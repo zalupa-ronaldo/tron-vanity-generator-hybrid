@@ -4,6 +4,7 @@
 #include "hwdetect.h"
 #include "ocl.h"
 #include "rng.h"
+#include "resident_protocol.h"
 
 #include <algorithm>
 #include <array>
@@ -19,9 +20,9 @@
 
 namespace {
 
-constexpr uint32_t kRecordBytes = 160;
-constexpr uint32_t kMaxMatches = 16;
-constexpr uint32_t kMetaWords = 5;
+constexpr uint32_t kRecordBytes = resident_protocol::kRecordBytes;
+constexpr uint32_t kMaxMatches = resident_protocol::kMaxMatches;
+constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
 constexpr uint32_t kResidentEcbits = 256;
 
 std::vector<unsigned char> genResidentTable(secp256k1_context* c) {

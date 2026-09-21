@@ -1,4 +1,8 @@
-#pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable
+#include <metal_stdlib>
+using namespace metal;
+
+#define METAL_BACKEND 1
+
 
 #ifndef KPI
 #define KPI 8            /* 每个 work-item 连续处理的私钥数（host 用 -D KPI=n 覆盖） */
@@ -8,12 +12,12 @@ typedef struct { uint n[10]; } fe;
 typedef struct { fe x, y; int inf; } ge;
 typedef struct { fe x, y, z; int inf; } gej;
 
-inline void fe_set_int(fe *r, uint v);
-inline void ge_load_g(ge *p, __global const uchar *xy);
-inline void gej_add_ge(gej *r, const gej *a, const ge *b);
-inline void gej_to_pub(uchar *out, gej *a);
-inline void keccak256_64(uchar *out, const uchar *in);
-inline void sha256_short(uchar *out, const uchar *msg, int len);
+inline void fe_set_int(thread fe *r, uint v);
+inline void ge_load_g(thread ge *p, device const uchar *xy);
+inline void gej_add_ge(thread gej *r, thread const gej *a, thread const ge *b);
+inline void gej_to_pub(thread uchar *out, thread gej *a);
+inline void keccak256_64(thread uchar *out, thread const uchar *in);
+inline void sha256_short(thread uchar *out, thread const uchar *msg, int len);
 
 #ifdef RESIDENT
 /* ---------------- GPU-resident generator ----------------
@@ -30,29 +34,29 @@ inline void sha256_short(uchar *out, const uchar *msg, int len);
 #endif
 
 #ifdef METAL_BACKEND
-static inline uint metal_atomic_add(volatile __global uint *p, uint v) {
-    return __atomic_fetch_add(p, v, 0);
+static inline uint metal_atomic_add(volatile device uint *p, uint v) {
+    return atomic_fetch_add_explicit((device atomic_uint*)p, v, memory_order_relaxed);
 }
 #define resident_atomic_add metal_atomic_add
 #else
-#define resident_atomic_add atomic_add
+
 #endif
 
-static inline uint resident_load32(const __global uchar *p) {
+static inline uint resident_load32(const device uchar *p) {
     return ((uint)p[0]) | ((uint)p[1] << 8) | ((uint)p[2] << 16) | ((uint)p[3] << 24);
 }
 
 static inline uint resident_rotl(uint x, uint n) { return (x << n) | (x >> (32 - n)); }
 
-static inline void resident_qr(uint *a, uint *b, uint *c, uint *d) {
+static inline void resident_qr(thread uint *a, thread uint *b, thread uint *c, thread uint *d) {
     *a += *b; *d ^= *a; *d = resident_rotl(*d, 16);
     *c += *d; *b ^= *c; *b = resident_rotl(*b, 12);
     *a += *b; *d ^= *a; *d = resident_rotl(*d, 8);
     *c += *d; *b ^= *c; *b = resident_rotl(*b, 7);
 }
 
-static inline void resident_chacha12(__global const uchar *seed, ulong counter,
-                                     uint domain, __private uchar *out) {
+static inline void resident_chacha12(device const uchar *seed, ulong counter,
+                                     uint domain, thread thread uchar *out) {
     uint x[16], orig[16];
     x[0] = 0x61707865U; x[1] = 0x3320646eU; x[2] = 0x79622d32U; x[3] = 0x6b206574U;
     for (int i = 0; i < 8; ++i) x[4 + i] = resident_load32(&seed[i * 4]);
@@ -76,13 +80,13 @@ static inline void resident_chacha12(__global const uchar *seed, ulong counter,
     }
 }
 
-static inline void resident_philox4(__global const uchar *seed, ulong counter,
-                                    uint domain, __private uchar *out) {
+static inline void resident_philox4(device const uchar *seed, ulong counter,
+                                    uint domain, thread thread uchar *out) {
     uint c0 = (uint)counter, c1 = (uint)(counter >> 32), c2 = domain, c3 = 0;
     uint k0 = resident_load32(&seed[0]), k1 = resident_load32(&seed[4]);
     for (int round = 0; round < 10; ++round) {
-        uint hi0 = mul_hi(0xD2511F53U, c0), lo0 = 0xD2511F53U * c0;
-        uint hi1 = mul_hi(0xCD9E8D57U, c2), lo1 = 0xCD9E8D57U * c2;
+        uint hi0 = ((uint)(((ulong)0xD2511F53U * (ulong)c0) >> 32)), lo0 = 0xD2511F53U * c0;
+        uint hi1 = ((uint)(((ulong)0xCD9E8D57U * (ulong)c2) >> 32)), lo1 = 0xCD9E8D57U * c2;
         uint n0 = hi1 ^ c1 ^ k0, n1 = lo1, n2 = hi0 ^ c3 ^ k1, n3 = lo0;
         c0 = n0; c1 = n1; c2 = n2; c3 = n3;
         k0 += 0x9E3779B9U; k1 += 0xBB67AE85U;
@@ -94,7 +98,7 @@ static inline void resident_philox4(__global const uchar *seed, ulong counter,
     }
 }
 
-__constant uchar resident_aes_sbox[256] = {
+constant uchar resident_aes_sbox[256] = {
     0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
     0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
     0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
@@ -115,8 +119,8 @@ __constant uchar resident_aes_sbox[256] = {
 
 static inline uchar resident_aes_xtime(uchar x) { return (uchar)((x << 1) ^ ((x >> 7) * 0x1b)); }
 
-static inline void resident_aes128(__global const uchar *seed, ulong counter,
-                                   uint domain, __private uchar *out) {
+static inline void resident_aes128(device const uchar *seed, ulong counter,
+                                   uint domain, thread thread uchar *out) {
     uchar rk[176], s[16];
     for (int i = 0; i < 16; ++i) rk[i] = seed[i];
     uchar rc = 1;
@@ -158,8 +162,8 @@ static inline void resident_aes128(__global const uchar *seed, ulong counter,
     for (int i = 0; i < 16; ++i) out[i] = s[i];
 }
 
-static inline void resident_rng32(__global const uchar *seed, ulong counter,
-                                  __private uchar *out) {
+static inline void resident_rng32(device const uchar *seed, ulong counter,
+                                  thread thread uchar *out) {
 #if RESIDENT_RNG == 2
     resident_philox4(seed, counter, 0x47505552U, out);
     resident_philox4(seed, counter, 0x47505553U, &out[16]);
@@ -173,7 +177,7 @@ static inline void resident_rng32(__global const uchar *seed, ulong counter,
 #endif
 }
 
-static inline int resident_lt_order(const uchar *sk) {
+static inline int resident_lt_order(thread const uchar *sk) {
     /* secp256k1 order, big endian. */
     const uchar n[32] = {
         0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
@@ -189,12 +193,12 @@ static inline int resident_lt_order(const uchar *sk) {
     return nonzero && cmp < 0;
 }
 
-static inline uint resident_scalar_bit(const uchar *sk, int bit) {
+static inline uint resident_scalar_bit(thread const uchar *sk, int bit) {
     return (sk[31 - bit / 8] >> (bit & 7)) & 1U;
 }
 
-static inline void resident_ec_mul(gej *acc, const uchar *sk,
-                                   __global const uchar *table_b32) {
+static inline void resident_ec_mul(thread gej *acc, thread const uchar *sk,
+                                   device const uchar *table_b32) {
     acc->x.n[0] = 0; acc->x.n[1] = 0; acc->x.n[2] = 0; acc->x.n[3] = 0;
     acc->x.n[4] = 0; acc->x.n[5] = 0; acc->x.n[6] = 0; acc->x.n[7] = 0;
     acc->x.n[8] = 0; acc->x.n[9] = 0;
@@ -207,11 +211,11 @@ static inline void resident_ec_mul(gej *acc, const uchar *sk,
     }
 }
 
-static inline void resident_u32(__global uchar *p, uint v) {
+static inline void resident_u32(device uchar *p, uint v) {
     p[0] = (uchar)v; p[1] = (uchar)(v >> 8); p[2] = (uchar)(v >> 16); p[3] = (uchar)(v >> 24);
 }
 
-static inline void resident_u64(__global uchar *p, ulong v) {
+static inline void resident_u64(device uchar *p, ulong v) {
     for (int i = 0; i < 8; ++i) p[i] = (uchar)(v >> (i * 8));
 }
 
@@ -221,7 +225,7 @@ static inline uint resident_b58_index(uchar c) {
     return 255;
 }
 
-static inline void resident_base58_address(uchar *addr, const uchar *full25) {
+static inline void resident_base58_address(thread uchar *addr, thread const uchar *full25) {
     const char b58[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     uchar num[25];
     for (int i = 0; i < 25; ++i) num[i] = full25[i];
@@ -237,13 +241,13 @@ static inline void resident_base58_address(uchar *addr, const uchar *full25) {
     }
 }
 
-static inline void resident_emit(const uchar *sk, const uchar *pub,
-                                 __global const uint *dfa,
-                                 __global const uint *out_start,
-                                 __global const uint *out_len,
-                                 __global const uint *out_ids,
-                                 volatile __global uint *meta,
-                                 __global uchar *records, uint cap, ulong seq) {
+static inline void resident_emit(thread const uchar *sk, thread const uchar *pub,
+                                 device const uint *dfa,
+                                 device const uint *out_start,
+                                 device const uint *out_len,
+                                 device const uint *out_ids,
+                                 volatile device uint *meta,
+                                 device uchar *records, constant uint& cap, ulong seq) {
     uchar h[32], payload[21], d1[32], d2[32], full[25], addr[34];
     keccak256_64(h, pub);
     payload[0] = 0x41;
@@ -272,17 +276,17 @@ static inline void resident_emit(const uchar *sk, const uchar *pub,
     }
     if (!count) return;
 
-    uint pos = resident_atomic_add((volatile __global uint*)&meta[0], 1U);
+    uint pos = resident_atomic_add((volatile device uint*)&meta[0], 1U);
     uint read_pos = meta[1];
     if (pos - read_pos >= cap) {
-        resident_atomic_add((volatile __global uint*)&meta[2], 1U);
+        resident_atomic_add((volatile device uint*)&meta[2], 1U);
         /* Metal's OpenCL-compatible front-end does not expose atomic_or in
          * the final AIR linker; the flag is boolean, so an atomic increment
          * preserves the protocol invariant (non-zero means error). */
-        resident_atomic_add((volatile __global uint*)&meta[3], 1U);
+        resident_atomic_add((volatile device uint*)&meta[3], 1U);
         return;
     }
-    __global uchar *dst = &records[(pos % cap) * RESIDENT_RECORD_BYTES];
+    device uchar *dst = &records[(pos % cap) * RESIDENT_RECORD_BYTES];
     for (int i = 0; i < 32; ++i) dst[i] = sk[i];
     for (int i = 0; i < RESIDENT_ADDR_BYTES; ++i) dst[32 + i] = addr[i];
     resident_u32(&dst[68], count);
@@ -291,22 +295,22 @@ static inline void resident_emit(const uchar *sk, const uchar *pub,
     resident_u64(&dst[140], seq);
 }
 
-__kernel void tron_vanity_resident(
-        __global const uchar *seed,
-        __global const uchar *table_b32,
-        __global const uint *dfa,
-        __global const uint *out_start,
-        __global const uint *out_len,
-        __global const uint *out_ids,
-        volatile __global uint *meta,
-        __global uchar *records,
-        const uint cap,
-        const ulong stream_base) {
-    uint gid = get_global_id(0);
+kernel void tron_vanity_resident(
+        device const uchar *seed,
+        device const uchar *table_b32,
+        device const uint *dfa,
+        device const uint *out_start,
+        device const uint *out_len,
+        device const uint *out_ids,
+        volatile device uint *meta,
+        device uchar *records,
+        constant uint& cap,
+        constant ulong& stream_base, uint3 tid [[thread_position_in_grid]]) {
+    uint gid = tid.x;
     uchar random32[32], sk[32], pub[64];
     resident_rng32(seed, stream_base + gid, random32);
     for (int i = 0; i < 32; ++i) sk[i] = random32[i];
-    resident_atomic_add((volatile __global uint*)&meta[4], 1U);
+    resident_atomic_add((volatile device uint*)&meta[4], 1U);
     if (!resident_lt_order(sk)) return;
     gej acc;
     resident_ec_mul(&acc, sk, table_b32);
@@ -331,7 +335,7 @@ __kernel void tron_vanity_resident(
 
 /* ---------------- 域运算 ---------------- */
 
-inline void fe_mul_inner(uint *r, const uint *a, const uint *b) {
+inline void fe_mul_inner(thread uint *r, thread const uint *a, thread const uint *b) {
     ulong c, d;
     ulong u0, u1, u2, u3, u4, u5, u6, u7, u8;
     uint t9, t1, t0, t2, t3, t4, t5, t6, t7;
@@ -412,7 +416,7 @@ inline void fe_mul_inner(uint *r, const uint *a, const uint *b) {
     r[2] = d;
 }
 
-inline void fe_sqr_inner(uint *r, const uint *a) {
+inline void fe_sqr_inner(thread uint *r, thread const uint *a) {
     ulong c, d;
     ulong u0, u1, u2, u3, u4, u5, u6, u7, u8;
     uint t9, t0, t1, t2, t3, t4, t5, t6, t7;
@@ -486,25 +490,25 @@ inline void fe_sqr_inner(uint *r, const uint *a) {
     r[2] = d;
 }
 
-inline void fe_mul(fe *r, const fe *a, const fe *b) { fe_mul_inner(r->n, a->n, b->n); }
-inline void fe_sqr(fe *r, const fe *a) { fe_sqr_inner(r->n, a->n); }
+inline void fe_mul(thread fe *r, thread const fe *a, thread const fe *b) { fe_mul_inner(r->n, a->n, b->n); }
+inline void fe_sqr(thread fe *r, thread const fe *a) { fe_sqr_inner(r->n, a->n); }
 
-inline void fe_set_int(fe *r, uint v) {
+inline void fe_set_int(thread fe *r, uint v) {
     r->n[0] = v;
     for (int i = 1; i < 10; i++) r->n[i] = 0;
 }
 
-inline void fe_add(fe *r, const fe *a) {
+inline void fe_add(thread fe *r, thread const fe *a) {
     for (int i = 0; i < 10; i++) r->n[i] += a->n[i];
 }
 
-inline void fe_add_int(fe *r, uint a) { r->n[0] += a; }
+inline void fe_add_int(thread fe *r, uint a) { r->n[0] += a; }
 
-inline void fe_mul_int(fe *r, uint a) {
+inline void fe_mul_int(thread fe *r, uint a) {
     for (int i = 0; i < 10; i++) r->n[i] *= a;
 }
 
-inline void fe_negate(fe *r, const fe *a, int m) {
+inline void fe_negate(thread fe *r, thread const fe *a, int m) {
     r->n[0] = 0x3FFFC2FU * 2 * (m + 1) - a->n[0];
     r->n[1] = 0x3FFFFBFU * 2 * (m + 1) - a->n[1];
     r->n[2] = 0x3FFFFFFU * 2 * (m + 1) - a->n[2];
@@ -517,13 +521,13 @@ inline void fe_negate(fe *r, const fe *a, int m) {
     r->n[9] = 0x03FFFFFU * 2 * (m + 1) - a->n[9];
 }
 
-inline void fe_cmov(fe *r, const fe *a, int flag) {
+inline void fe_cmov(thread fe *r, thread const fe *a, int flag) {
     uint mask0 = (uint)flag + ~((uint)0);
     uint mask1 = ~mask0;
     for (int i = 0; i < 10; i++) r->n[i] = (r->n[i] & mask0) | (a->n[i] & mask1);
 }
 
-inline void fe_half(fe *r) {
+inline void fe_half(thread fe *r) {
     uint t0 = r->n[0], t1 = r->n[1], t2 = r->n[2], t3 = r->n[3], t4 = r->n[4],
          t5 = r->n[5], t6 = r->n[6], t7 = r->n[7], t8 = r->n[8], t9 = r->n[9];
     uint one = 1U;
@@ -543,7 +547,7 @@ inline void fe_half(fe *r) {
     r->n[9] = (t9 >> 1);
 }
 
-inline void fe_normalize(fe *r) {
+inline void fe_normalize(thread fe *r) {
     uint t0 = r->n[0], t1 = r->n[1], t2 = r->n[2], t3 = r->n[3], t4 = r->n[4],
          t5 = r->n[5], t6 = r->n[6], t7 = r->n[7], t8 = r->n[8], t9 = r->n[9];
     uint m;
@@ -578,7 +582,7 @@ inline void fe_normalize(fe *r) {
     r->n[5] = t5; r->n[6] = t6; r->n[7] = t7; r->n[8] = t8; r->n[9] = t9;
 }
 
-inline int fe_normalizes_to_zero(const fe *r) {
+inline int fe_normalizes_to_zero(thread const fe *r) {
     uint t0 = r->n[0], t1 = r->n[1], t2 = r->n[2], t3 = r->n[3], t4 = r->n[4],
          t5 = r->n[5], t6 = r->n[6], t7 = r->n[7], t8 = r->n[8], t9 = r->n[9];
     uint z0, z1;
@@ -597,7 +601,7 @@ inline int fe_normalizes_to_zero(const fe *r) {
     return (z0 == 0) | (z1 == 0x3FFFFFFU);
 }
 
-inline void fe_set_b32(fe *r, const uchar *a) {
+inline void fe_set_b32(thread fe *r, thread const uchar *a) {
     r->n[0] = (uint)a[31] | ((uint)a[30] << 8) | ((uint)a[29] << 16) | ((uint)(a[28] & 0x3) << 24);
     r->n[1] = (uint)((a[28] >> 2) & 0x3f) | ((uint)a[27] << 6) | ((uint)a[26] << 14) | ((uint)(a[25] & 0xf) << 22);
     r->n[2] = (uint)((a[25] >> 4) & 0xf) | ((uint)a[24] << 4) | ((uint)a[23] << 12) | ((uint)(a[22] & 0x3f) << 20);
@@ -610,9 +614,9 @@ inline void fe_set_b32(fe *r, const uchar *a) {
     r->n[9] = (uint)((a[2] >> 2) & 0x3f) | ((uint)a[1] << 6) | ((uint)a[0] << 14);
 }
 
-inline void wbe32(uchar *p, uint x) { p[0] = x >> 24; p[1] = x >> 16; p[2] = x >> 8; p[3] = x; }
+inline void wbe32(thread uchar *p, uint x) { p[0] = x >> 24; p[1] = x >> 16; p[2] = x >> 8; p[3] = x; }
 
-inline void fe_get_b32(uchar *r, const fe *a) {
+inline void fe_get_b32(thread uchar *r, thread const fe *a) {
     wbe32(&r[0],  (a->n[9] << 10) | (a->n[8] >> 16));
     wbe32(&r[4],  (a->n[8] << 16) | (a->n[7] >> 10));
     wbe32(&r[8],  (a->n[7] << 22) | (a->n[6] >> 4));
@@ -624,7 +628,7 @@ inline void fe_get_b32(uchar *r, const fe *a) {
 }
 
 /* a^(p-2) mod p —— 费马求逆（libsecp256k1 加法链）*/
-inline void fe_inv(fe *r, const fe *a) {
+inline void fe_inv(thread fe *r, thread const fe *a) {
     fe x2, x3, x6, x9, x11, x22, x44, x88, x176, x220, x223, t1;
     int j;
     fe_sqr(&x2, a);       fe_mul(&x2, &x2, a);
@@ -647,7 +651,7 @@ inline void fe_inv(fe *r, const fe *a) {
 /* ---------------- 群运算 ---------------- */
 
 /* 统一加法/倍点：r = a + b，b 为仿射点 (b.inf 必须为 0)。移植自 secp256k1_gej_add_ge。 */
-inline void gej_add_ge(gej *r, const gej *a, const ge *b) {
+inline void gej_add_ge(thread gej *r, thread const gej *a, thread const ge *b) {
     fe zz, u1, u2, s1, s2, t, tt, m, n, q, rr, m_alt, rr_alt;
     fe fe_one; fe_set_int(&fe_one, 1);
     int degenerate;
@@ -692,12 +696,12 @@ inline void gej_add_ge(gej *r, const gej *a, const ge *b) {
     r->inf = fe_normalizes_to_zero(&r->z);
 }
 
-inline void gej_from_ge(gej *r, const ge *a) {
+inline void gej_from_ge(thread gej *r, thread const ge *a) {
     r->x = a->x; r->y = a->y; fe_set_int(&r->z, 1); r->inf = a->inf;
 }
 
 /* 转仿射并输出 X||Y (各 32 字节大端，私有内存) */
-inline void gej_to_pub(uchar *out, gej *a) {
+inline void gej_to_pub(thread uchar *out, thread gej *a) {
     fe zi, z2, z3, x, y;
     fe_inv(&zi, &a->z);
     fe_sqr(&z2, &zi);
@@ -711,7 +715,7 @@ inline void gej_to_pub(uchar *out, gej *a) {
 }
 
 /* 从 global 大端 64 字节载入 ge (仿射) */
-inline void ge_load_g(ge *p, __global const uchar *xy) {
+inline void ge_load_g(thread ge *p, device const uchar *xy) {
     uchar t[64];
     for (int i = 0; i < 64; i++) t[i] = xy[i];
     fe_set_b32(&p->x, &t[0]);
@@ -734,7 +738,7 @@ inline void ge_load_g(ge *p, __global const uchar *xy) {
 #define ECW_DIGITS (1 << ECW)
 #define ECW_WINDOWS ((ECBITS + ECW - 1) / ECW)
 
-inline void ec_base_mul(gej *acc, const ge *P0, __global const uchar *table_b32, uint base) {
+inline void ec_base_mul(thread gej *acc, thread const ge *P0, device const uchar *table_b32, uint base) {
     gej_from_ge(acc, P0);
 #if ECW == 1
     for (int j = 0; j < 32; j++) {
@@ -755,7 +759,7 @@ inline void ec_base_mul(gej *acc, const ge *P0, __global const uchar *table_b32,
 }
 
 /* 生成器 G 在表中的位置 */
-inline void ec_load_G(ge *G, __global const uchar *table_b32) {
+inline void ec_load_G(thread ge *G, device const uchar *table_b32) {
 #if ECW == 1
     ge_load_g(G, &table_b32[0 * 64]);          /* 2^0 * G */
 #else
@@ -765,19 +769,19 @@ inline void ec_load_G(ge *G, __global const uchar *table_b32) {
 
 /* ---------------- keccak-256 ---------------- */
 
-__constant ulong KECCAK_RC[24] = {
+constant ulong KECCAK_RC[24] = {
     0x0000000000000001UL,0x0000000000008082UL,0x800000000000808AUL,0x8000000080008000UL,
     0x000000000000808BUL,0x0000000080000001UL,0x8000000080008081UL,0x8000000000008009UL,
     0x000000000000008AUL,0x0000000000000088UL,0x0000000080008009UL,0x000000008000000AUL,
     0x000000008000808BUL,0x800000000000008BUL,0x8000000000008089UL,0x8000000000008003UL,
     0x8000000000008002UL,0x8000000000000080UL,0x000000000000800AUL,0x800000008000000AUL,
     0x8000000080008081UL,0x8000000000008080UL,0x0000000080000001UL,0x8000000080008008UL };
-__constant int KECCAK_RHO[25] = {
+constant int KECCAK_RHO[25] = {
     0,1,62,28,27, 36,44,6,55,20, 3,10,43,25,39, 41,45,15,21,8, 18,2,61,56,14 };
 
 inline ulong rotl64(ulong x, int n) { return n == 0 ? x : ((x << n) | (x >> (64 - n))); }
 
-inline void keccakf(ulong *s) {
+inline void keccakf(thread ulong *s) {
     for (int rnd = 0; rnd < 24; rnd++) {
         ulong c[5], d[5];
         for (int x = 0; x < 5; x++)
@@ -799,7 +803,7 @@ inline void keccakf(ulong *s) {
 }
 
 /* keccak256 of exactly 64 bytes */
-inline void keccak256_64(uchar *out, const uchar *in) {
+inline void keccak256_64(thread uchar *out, thread const uchar *in) {
     ulong s[25];
     for (int i = 0; i < 25; i++) s[i] = 0;
     for (int i = 0; i < 64; i++)
@@ -813,7 +817,7 @@ inline void keccak256_64(uchar *out, const uchar *in) {
 
 /* ---------------- sha-256 ---------------- */
 
-__constant uint SHA_K[64] = {
+constant uint SHA_K[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
     0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
@@ -826,7 +830,7 @@ __constant uint SHA_K[64] = {
 inline uint shr(uint x, int n) { return x >> n; }
 inline uint rotr(uint x, int n) { return (x >> n) | (x << (32 - n)); }
 
-inline void sha256_block(uint *st, const uchar *p) {
+inline void sha256_block(thread uint *st, thread const uchar *p) {
     uint w[64];
     for (int i = 0; i < 16; i++)
         w[i] = ((uint)p[4*i] << 24) | ((uint)p[4*i+1] << 16) | ((uint)p[4*i+2] << 8) | (uint)p[4*i+3];
@@ -849,7 +853,7 @@ inline void sha256_block(uint *st, const uchar *p) {
 }
 
 /* sha256 of a short message (< 56 bytes), single block */
-inline void sha256_short(uchar *out, const uchar *msg, int len) {
+inline void sha256_short(thread uchar *out, thread const uchar *msg, int len) {
     uint st[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
     uchar blk[64];
     for (int i = 0; i < 64; i++) blk[i] = 0;
@@ -871,7 +875,7 @@ inline void sha256_short(uchar *out, const uchar *msg, int len) {
 #define TAIL 12
 #define ADDR_LEN 34
 
-__constant char B58[58] = {
+constant char B58[58] = {
     '1','2','3','4','5','6','7','8','9',
     'A','B','C','D','E','F','G','H','J','K','L','M','N','P','Q','R','S','T','U','V','W','X','Y','Z',
     'a','b','c','d','e','f','g','h','i','j','k','m','n','o','p','q','r','s','t','u','v','w','x','y','z' };
@@ -885,7 +889,7 @@ inline int char_class(uchar c) {
 }
 
 /* full[25] 大端；取地址最后 TAIL 个 base58 字符，tc[0] = 最末字符。 */
-inline void base58_tail(uchar *tc, const uchar *full25) {
+inline void base58_tail(thread uchar *tc, thread const uchar *full25) {
     uchar num[25];
     for (int i = 0; i < 25; i++) num[i] = full25[i];
     for (int it = 0; it < TAIL; it++) {
@@ -899,7 +903,7 @@ inline void base58_tail(uchar *tc, const uchar *full25) {
     }
 }
 
-__constant uchar B58_INDEX[128] = {
+constant uchar B58_INDEX[128] = {
     255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
     255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
     255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
@@ -910,7 +914,7 @@ __constant uchar B58_INDEX[128] = {
     48,49,50,51,52,53,54,55,56,57,255,255,255,255,255,255
 };
 
-inline void base58_address(uchar *addr, const uchar *full25) {
+inline void base58_address(thread uchar *addr, thread const uchar *full25) {
     uchar num[25];
     for (int i = 0; i < 25; ++i) num[i] = full25[i];
     for (int i = 0; i < ADDR_LEN; ++i) addr[i] = '1';
@@ -928,7 +932,7 @@ inline void base58_address(uchar *addr, const uchar *full25) {
 /* 返回结尾「相同」或「连续」尾段的最大长度。
  * 连续 = 只认升序：每位 ASCII +1，且整段同一类别（全数字/全小写/全大写）。
  * tc[0] 是地址最末字符，所以升序要求 tc[0] = tc[1] + 1。*/
-inline int tail_match_len(const uchar *tc) {
+inline int tail_match_len(thread const uchar *tc) {
     int rep = 1;
     for (int i = 1; i < TAIL; i++) { if (tc[i] == tc[0]) rep++; else break; }
 
@@ -948,7 +952,7 @@ inline int tail_match_len(const uchar *tc) {
 /* ---------------- 主内核 ---------------- */
 
 /* pub = X||Y (64B 大端)。算 TRON 地址结尾 TAIL 个 base58 位置。 */
-inline void pub_to_tail(const uchar *pub, uchar *tp) {
+inline void pub_to_tail(thread const uchar *pub, thread uchar *tp) {
     uchar h[32];
     keccak256_64(h, pub);
     uchar payload[21];
@@ -963,13 +967,13 @@ inline void pub_to_tail(const uchar *pub, uchar *tp) {
     base58_tail(tp, full);
 }
 
-inline void emit_if_match(const uchar *pub, uint s,
-                          __global const uint *dfa,
-                          __global const uint *out_start,
-                          __global const uint *out_len,
-                          __global const uint *out_ids,
-                          volatile __global uint *out_count,
-                          __global uint *out_hits, uint out_cap) {
+inline void emit_if_match(thread const uchar *pub, uint s,
+                          device const uint *dfa,
+                          device const uint *out_start,
+                          device const uint *out_len,
+                          device const uint *out_ids,
+                          volatile device uint *out_count,
+                          device uint *out_hits, constant uint& out_cap) {
     uchar h[32];
     keccak256_64(h, pub);
     uchar payload[21];
@@ -1001,24 +1005,24 @@ inline void emit_if_match(const uchar *pub, uint s,
     }
 }
 
-static inline void probe_one(gej *acc, uint s,
-                      __global const uint *dfa,
-                      __global const uint *out_start,
-                      __global const uint *out_len,
-                      __global const uint *out_ids,
-                      volatile __global uint *out_count,
-                      __global uint *out_hits, uint out_cap) {
+static inline void probe_one(thread gej *acc, uint s,
+                      device const uint *dfa,
+                      device const uint *out_start,
+                      device const uint *out_len,
+                      device const uint *out_ids,
+                      volatile device uint *out_count,
+                      device uint *out_hits, constant uint& out_cap) {
     uchar pub[64];
     gej_to_pub(pub, acc);
     emit_if_match(pub, s, dfa, out_start, out_len, out_ids, out_count, out_hits, out_cap);
 }
 
-/* fe <-> __local uint[10] */
-inline void fe_ld_l(fe *r, __local const uint *p) { for (int i = 0; i < 10; i++) r->n[i] = p[i]; }
-inline void fe_st_l(__local uint *p, const fe *a) { for (int i = 0; i < 10; i++) p[i] = a->n[i]; }
+/* fe <-> threadgroup uint[10] */
+inline void fe_ld_l(thread fe *r, threadgroup const uint *p) { for (int i = 0; i < 10; i++) r->n[i] = p[i]; }
+inline void fe_st_l(threadgroup uint *p, thread const fe *a) { for (int i = 0; i < 10; i++) p[i] = a->n[i]; }
 
 /* Jacobian (X,Y) + 已求逆的 z^-1 -> 仿射 pub 64B 大端 */
-inline void jac_to_pub(uchar *pub, const fe *X, const fe *Y, const fe *zi) {
+inline void jac_to_pub(thread uchar *pub, thread const fe *X, thread const fe *Y, thread const fe *zi) {
     fe z2, z3, x, y;
     fe_sqr(&z2, zi);
     fe_mul(&z3, zi, &z2);
@@ -1035,8 +1039,8 @@ inline void jac_to_pub(uchar *pub, const fe *X, const fe *Y, const fe *zi) {
 #endif
 
 /* Montgomery 批量求逆：zbuf 存 N 个 Z，出口 zinv 存 N 个 z^-1。所有 WI 必须都调用。 */
-inline void mont_batch_invert(__local uint *zbuf, __local uint *zinv, int lid) {
-    barrier(CLK_LOCAL_MEM_FENCE);
+inline void mont_batch_invert(threadgroup uint *zbuf, threadgroup uint *zinv, int lid) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     if (lid == 0) {
         fe prod, zt;
         fe_ld_l(&prod, &zbuf[0]);
@@ -1058,22 +1062,22 @@ inline void mont_batch_invert(__local uint *zbuf, __local uint *zinv, int lid) {
         }
         fe_st_l(&zinv[0], &inv);
     }
-    barrier(CLK_LOCAL_MEM_FENCE);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
 #if MONT_N <= 1
 
-__kernel void tron_vanity_probe(
-        __global const uchar *P0_b32,
-        __global const uchar *table_b32,
-        __global const uint *dfa,
-        __global const uint *out_start,
-        __global const uint *out_len,
-        __global const uint *out_ids,
-        volatile __global uint *out_count,
-        __global uint *out_hits,
-        const uint out_cap) {
-    uint gid = get_global_id(0);
+kernel void tron_vanity_probe(
+        device const uchar *P0_b32,
+        device const uchar *table_b32,
+        device const uint *dfa,
+        device const uint *out_start,
+        device const uint *out_len,
+        device const uint *out_ids,
+        volatile device uint *out_count,
+        device uint *out_hits,
+        constant uint& out_cap) {
+    uint gid = 0;
     uint base = gid * KPI;
 
     ge Gpt; ec_load_G(&Gpt, table_b32);
@@ -1091,18 +1095,18 @@ __kernel void tron_vanity_probe(
 
 #else  /* Montgomery 批量求逆：1 work-item = 1 私钥 = 1 Jacobian 点，work-group 内 N 个一起求逆 */
 
-__kernel __attribute__((reqd_work_group_size(MONT_N, 1, 1)))
+kernel __attribute__((reqd_work_group_size(MONT_N, 1, 1)))
 void tron_vanity_probe(
-        __global const uchar *P0_b32,
-        __global const uchar *table_b32,
-        __global const uint *dfa,
-        __global const uint *out_start,
-        __global const uint *out_len,
-        __global const uint *out_ids,
-        volatile __global uint *out_count,
-        __global uint *out_hits,
-        const uint out_cap) {
-    uint gid = get_global_id(0);
+        device const uchar *P0_b32,
+        device const uchar *table_b32,
+        device const uint *dfa,
+        device const uint *out_start,
+        device const uint *out_len,
+        device const uint *out_ids,
+        volatile device uint *out_count,
+        device uint *out_hits,
+        constant uint& out_cap) {
+    uint gid = 0;
     uint lid = get_local_id(0);
     uint s = gid;
 
@@ -1110,8 +1114,8 @@ void tron_vanity_probe(
     gej acc;
     ec_base_mul(&acc, &P0, table_b32, s);        /* 本 WI 唯一的 Jacobian 点 */
 
-    __local uint zbuf[MONT_N * 10];
-    __local uint zinv[MONT_N * 10];
+    threadgroup uint zbuf[MONT_N * 10];
+    threadgroup uint zinv[MONT_N * 10];
     fe_st_l(&zbuf[lid * 10], &acc.z);
     mont_batch_invert(zbuf, zinv, lid);
 
@@ -1133,10 +1137,10 @@ void tron_vanity_probe(
 #define PROF_STAGE 0
 #endif
 #if PROF_STAGE > 0
-__kernel void prof(__global const uchar *P0_b32,
-                   __global const uchar *table_b32,
-                   __global uint *sink) {
-    uint gid = get_global_id(0);
+kernel void prof(device const uchar *P0_b32,
+                   device const uchar *table_b32,
+                   device uint *sink) {
+    uint gid = 0;
     uint base = gid * KPI;
 
     ge Gpt; ec_load_G(&Gpt, table_b32);
@@ -1178,13 +1182,13 @@ __kernel void prof(__global const uchar *P0_b32,
 /* ---------------- 自检内核（供 host 交叉验证） ---------------- */
 
 /* 输入 n 个私钥标量偏移，输出各自 P0 + s*G 的 pub(64B)；P0 由 host 给 */
-__kernel void test_pub(
-        __global const uchar *P0_b32,
-        __global const uchar *table_b32,
-        __global const uint *scalars,
-        __global uchar *pubout,
-        const uint n) {
-    uint gid = get_global_id(0);
+kernel void test_pub(
+        device const uchar *P0_b32,
+        device const uchar *table_b32,
+        device const uint *scalars,
+        device uchar *pubout,
+        constant uint& n) {
+    uint gid = 0;
     if (gid >= n) return;
     uint s = scalars[gid];
 
@@ -1206,21 +1210,21 @@ __kernel void test_pub(
 /* 批量求逆版：work-group=MONT_N，用 ec_base_mul(ECW) 算点，Montgomery 一次求逆，输出 pub。
  * host 对照 test_pub（逐点单独求逆）与 libsecp256k1，验证 batch inverse 数学一致。
  * scalars[gid] 必须 < 2^ECBITS。 */
-__kernel __attribute__((reqd_work_group_size(MONT_N, 1, 1)))
-void test_mont(__global const uchar *P0_b32,
-               __global const uchar *table_b32,
-               __global const uint *scalars,
-               __global uchar *pubout,
-               const uint n) {
-    uint gid = get_global_id(0);
+kernel __attribute__((reqd_work_group_size(MONT_N, 1, 1)))
+void test_mont(device const uchar *P0_b32,
+               device const uchar *table_b32,
+               device const uint *scalars,
+               device uchar *pubout,
+               constant uint& n) {
+    uint gid = 0;
     uint lid = get_local_id(0);
     uint s = (gid < n) ? scalars[gid] : 0;
 
     ge P0; ge_load_g(&P0, &P0_b32[0]);
     gej acc; ec_base_mul(&acc, &P0, table_b32, s);
 
-    __local uint zbuf[MONT_N * 10];
-    __local uint zinv[MONT_N * 10];
+    threadgroup uint zbuf[MONT_N * 10];
+    threadgroup uint zinv[MONT_N * 10];
     fe_st_l(&zbuf[lid * 10], &acc.z);
     mont_batch_invert(zbuf, zinv, lid);
 

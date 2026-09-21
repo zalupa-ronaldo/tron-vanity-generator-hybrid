@@ -1,6 +1,7 @@
 #include "backend.h"
 #include "crypto.h"
 #include "hwdetect.h"
+#include "metal_backend.h"
 #include "resident_backend.h"
 
 #if defined(_WIN32)
@@ -64,13 +65,13 @@ struct Options {
 
 void usage() {
     std::cout <<
-        "TRON vanity generator - CPU + AMD/NVIDIA OpenCL\n"
+        "TRON vanity generator - CPU + OpenCL + Apple Metal\n"
         "  --seconds N       run duration; 0 = until Ctrl+C\n"
         "  --threads N       CPU threads; default = logical cores\n"
         "  --words FILE      dictionary; default words.txt\n"
         "  --out DIR         output directory; default results\n"
         "  --output FILE     direct JSONL output override\n"
-        "  --backend auto|cpu|opencl\n"
+        "  --backend auto|cpu|opencl|metal\n"
         "  --gpu-batch N     GPU batch size (power of two, 1024..1048576)\n"
         "  --gpu-resident    GPU CSPRNG + device result ring mode\n"
         "  --gpu-rng NAME    chacha12, aes-ctr, or philox (resident mode)\n"
@@ -179,6 +180,10 @@ void printDevices(const HardwareReport& hw) {
         std::cout << "OpenCL GPU: " << g.name << " / " << g.vendor << " / "
                   << g.computeUnits << " CU @ " << g.clockMHz << " MHz\n";
     }
+#if defined(__APPLE__)
+    std::string note;
+    std::cout << "Metal GPU: " << (metalAvailable(&note) ? note : "none (" + note + ")") << "\n";
+#endif
 }
 
 } // namespace
@@ -209,6 +214,23 @@ int main(int argc, char** argv) {
     if (!dictionary) { std::cerr << error << "\n"; return 1; }
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--bench") {
+            bool metalMode = opt.backend == "metal" ||
+#if defined(__APPLE__)
+                (opt.backend == "auto");
+#else
+                false;
+#endif
+            if (metalMode) {
+                auto resident = makeMetalResidentBackend(dictionary, opt.gpuRng,
+                                                         opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
+                if (!resident || !resident->available()) {
+                    std::cerr << "Metal resident unavailable: "
+                              << (resident ? resident->note() : "Metal backend not built") << "\n";
+                    return 1;
+                }
+                std::cout << "Metal-resident benchmark: " << resident->benchmark(5.0) << " keys/s\n";
+                return 0;
+            }
             if (hw.gpus.empty()) { std::cerr << "no OpenCL GPU: " << hw.openclNote << "\n"; return 1; }
             if (!opt.gpuResident) return gpuBench(hw.gpus.front(), 5.0);
             auto resident = makeResidentGpuBackend(hw.gpus.front(), dictionary, opt.gpuRng,
@@ -235,7 +257,15 @@ int main(int argc, char** argv) {
 
     std::vector<std::unique_ptr<Backend>> backends;
     if (opt.backend == "auto" || opt.backend == "cpu") backends.push_back(makeCpuBackend());
-    if (opt.gpuResident && (opt.backend == "auto" || opt.backend == "opencl")) {
+    bool autoMetal = false;
+#if defined(__APPLE__)
+    autoMetal = opt.backend == "auto";
+#endif
+    if ((opt.gpuResident || opt.backend == "metal") && (opt.backend == "metal" || autoMetal)) {
+        auto metal = makeMetalResidentBackend(dictionary, opt.gpuRng,
+                                              opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
+        if (metal) backends.push_back(std::move(metal));
+    } else if (opt.gpuResident && (opt.backend == "auto" || opt.backend == "opencl")) {
         for (const auto& g : hw.gpus) {
             backends.push_back(makeResidentGpuBackend(g, dictionary, opt.gpuRng,
                                                       opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs));
@@ -251,8 +281,8 @@ int main(int argc, char** argv) {
             backends.push_back(makeCpuBackend());
         }
     }
-    if (opt.backend == "metal") {
-        std::cerr << "Metal backend is not available in this build; use CPU or OpenCL on Windows\n";
+    if (opt.backend == "metal" && backends.empty()) {
+        std::cerr << "Metal backend is not available in this build/platform\n";
     }
     if (backends.empty()) { std::cerr << "no backend available\n"; return 1; }
 

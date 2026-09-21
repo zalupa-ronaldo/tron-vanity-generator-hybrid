@@ -7,6 +7,11 @@ option(STATIC_RUNTIME "静态链接 C/C++ 运行库（便携 exe）" ON)
 
 project(tron_vanity_generator CXX)
 
+if(APPLE)
+  enable_language(OBJCXX)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS for Metal backend")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -51,14 +56,55 @@ add_custom_command(
     DEPENDS ${KERNEL_CL} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_kernel.cmake
     VERBATIM)
 
+if(APPLE)
+  set(METAL_SRC ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tron_vanity_resident.metal)
+  set(METAL_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/metal_kernel_src.h)
+  add_custom_command(
+    OUTPUT ${METAL_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${METAL_SRC} -DOUT=${METAL_GEN}
+            -DVAR=kMetalKernelSource
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_kernel.cmake
+    DEPENDS ${METAL_SRC} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_kernel.cmake
+    VERBATIM)
+  set(METAL_LIBS)
+  foreach(METAL_RNG_MODE IN ITEMS 1 2 3)
+    set(METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/tron_vanity_resident_${METAL_RNG_MODE}.air)
+    set(METAL_LIB ${CMAKE_CURRENT_BINARY_DIR}/tron_vanity_resident_${METAL_RNG_MODE}.metallib)
+    add_custom_command(
+      OUTPUT ${METAL_LIB}
+      COMMAND xcrun metal -DRESIDENT=1 -DRESIDENT_RNG=${METAL_RNG_MODE} -DECW=1 -DECBITS=256
+              -DKPI=1 -DMONT_N=1 -c ${METAL_SRC} -o ${METAL_AIR}
+      COMMAND xcrun metallib ${METAL_AIR} -o ${METAL_LIB}
+      DEPENDS ${METAL_SRC}
+      VERBATIM)
+    list(APPEND METAL_LIBS ${METAL_LIB})
+  endforeach()
+  add_custom_target(metal_shader_check ALL DEPENDS ${METAL_GEN} ${METAL_LIBS})
+endif()
+
 # ---- 主程序 ----
 file(GLOB SRC CONFIGURE_DEPENDS src/*.cpp)
-add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN})
+if(APPLE)
+  list(APPEND SRC src/metal_backend.mm)
+endif()
+if(APPLE)
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN})
+else()
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN})
+endif()
 target_include_directories(tron_vanity_generator PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gen)
 target_link_libraries(tron_vanity_generator PRIVATE secp256k1)
 
 find_package(Threads REQUIRED)
 target_link_libraries(tron_vanity_generator PRIVATE Threads::Threads)
+
+if(APPLE)
+  target_link_libraries(tron_vanity_generator PRIVATE
+    "-framework Foundation" "-framework Metal")
+  set_source_files_properties(src/metal_backend.mm PROPERTIES
+    COMPILE_FLAGS "-fobjc-arc")
+  target_compile_definitions(tron_vanity_generator PRIVATE TRON_METAL_MIN_MACOS=26)
+endif()
 
 if(WIN32)
   target_link_libraries(tron_vanity_generator PRIVATE bcrypt)

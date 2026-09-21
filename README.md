@@ -89,10 +89,20 @@ for cross-vendor benchmarking; all three use a per-run OS-generated seed and
 rejection sampling against the secp256k1 order. If the device result ring
 overflows, the run stops rather than silently dropping a wallet result.
 
-The resident implementation currently targets OpenCL on Windows AMD/NVIDIA.
-Metal is not advertised as ready until its kernel passes the same
-cross-validation suite on Apple silicon; macOS falls back to the legacy CPU
-path in this release.
+The Metal resident backend is available on Apple Silicon with macOS 26+ and
+Xcode 26.6's Metal Toolchain:
+
+```bash
+sudo xcode-select --switch /Applications/Xcode-26.6.0.app/Contents/Developer
+./build-macos.sh
+./build-mac-metal/tron_vanity_generator --backend metal --gpu-resident \
+  --gpu-rng chacha12 --gpu-buffer-mb 128 --gpu-chunk-ms 32 --gpu-poll-ms 50 \
+  --seconds 60
+```
+
+The MSL kernel is compiled and linked as a Metal library during the macOS
+build. The current release keeps Metal opt-in; `--backend auto` will select it
+after the cross-validation acceptance run.
 
 ## Results and security
 

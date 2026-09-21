@@ -4,6 +4,306 @@
 #define KPI 8            /* 每个 work-item 连续处理的私钥数（host 用 -D KPI=n 覆盖） */
 #endif
 
+typedef struct { uint n[10]; } fe;
+typedef struct { fe x, y; int inf; } ge;
+typedef struct { fe x, y, z; int inf; } gej;
+
+inline void fe_set_int(fe *r, uint v);
+inline void ge_load_g(ge *p, __global const uchar *xy);
+inline void gej_add_ge(gej *r, const gej *a, const ge *b);
+inline void gej_to_pub(uchar *out, gej *a);
+inline void keccak256_64(uchar *out, const uchar *in);
+inline void sha256_short(uchar *out, const uchar *msg, int len);
+
+#ifdef RESIDENT
+/* ---------------- GPU-resident generator ----------------
+ * The resident path uses a device-side CSPRNG and returns only complete
+ * matches through a fixed-size device ring. It intentionally uses bounded
+ * launches: Windows WDDM must be able to preempt the queue.
+ */
+#define RESIDENT_RECORD_BYTES 160
+#define RESIDENT_KEY_BYTES 32
+#define RESIDENT_ADDR_BYTES 34
+#define RESIDENT_MAX_MATCHES 16
+#ifndef RESIDENT_RNG
+#define RESIDENT_RNG 1
+#endif
+
+static inline uint resident_load32(const __global uchar *p) {
+    return ((uint)p[0]) | ((uint)p[1] << 8) | ((uint)p[2] << 16) | ((uint)p[3] << 24);
+}
+
+static inline uint resident_rotl(uint x, uint n) { return (x << n) | (x >> (32 - n)); }
+
+static inline void resident_qr(uint *a, uint *b, uint *c, uint *d) {
+    *a += *b; *d ^= *a; *d = resident_rotl(*d, 16);
+    *c += *d; *b ^= *c; *b = resident_rotl(*b, 12);
+    *a += *b; *d ^= *a; *d = resident_rotl(*d, 8);
+    *c += *d; *b ^= *c; *b = resident_rotl(*b, 7);
+}
+
+static inline void resident_chacha12(__global const uchar *seed, ulong counter,
+                                     uint domain, __private uchar *out) {
+    uint x[16], orig[16];
+    x[0] = 0x61707865U; x[1] = 0x3320646eU; x[2] = 0x79622d32U; x[3] = 0x6b206574U;
+    for (int i = 0; i < 8; ++i) x[4 + i] = resident_load32(&seed[i * 4]);
+    x[12] = (uint)counter; x[13] = domain ^ (uint)(counter >> 32); x[14] = resident_load32(&seed[16]) ^ 0x9e3779b9U;
+    x[15] = resident_load32(&seed[20]) ^ 0x243f6a88U;
+    for (int i = 0; i < 16; ++i) orig[i] = x[i];
+    for (int r = 0; r < 6; ++r) {
+        resident_qr(&x[0], &x[4], &x[8], &x[12]);
+        resident_qr(&x[1], &x[5], &x[9], &x[13]);
+        resident_qr(&x[2], &x[6], &x[10], &x[14]);
+        resident_qr(&x[3], &x[7], &x[11], &x[15]);
+        resident_qr(&x[0], &x[5], &x[10], &x[15]);
+        resident_qr(&x[1], &x[6], &x[11], &x[12]);
+        resident_qr(&x[2], &x[7], &x[8], &x[13]);
+        resident_qr(&x[3], &x[4], &x[9], &x[14]);
+    }
+    for (int i = 0; i < 16; ++i) {
+        uint v = x[i] + orig[i];
+        out[i * 4 + 0] = (uchar)v; out[i * 4 + 1] = (uchar)(v >> 8);
+        out[i * 4 + 2] = (uchar)(v >> 16); out[i * 4 + 3] = (uchar)(v >> 24);
+    }
+}
+
+static inline void resident_philox4(__global const uchar *seed, ulong counter,
+                                    uint domain, __private uchar *out) {
+    uint c0 = (uint)counter, c1 = (uint)(counter >> 32), c2 = domain, c3 = 0;
+    uint k0 = resident_load32(&seed[0]), k1 = resident_load32(&seed[4]);
+    for (int round = 0; round < 10; ++round) {
+        uint hi0 = mul_hi(0xD2511F53U, c0), lo0 = 0xD2511F53U * c0;
+        uint hi1 = mul_hi(0xCD9E8D57U, c2), lo1 = 0xCD9E8D57U * c2;
+        uint n0 = hi1 ^ c1 ^ k0, n1 = lo1, n2 = hi0 ^ c3 ^ k1, n3 = lo0;
+        c0 = n0; c1 = n1; c2 = n2; c3 = n3;
+        k0 += 0x9E3779B9U; k1 += 0xBB67AE85U;
+    }
+    uint v[4] = {c0, c1, c2, c3};
+    for (int i = 0; i < 4; ++i) {
+        out[i * 4 + 0] = (uchar)v[i]; out[i * 4 + 1] = (uchar)(v[i] >> 8);
+        out[i * 4 + 2] = (uchar)(v[i] >> 16); out[i * 4 + 3] = (uchar)(v[i] >> 24);
+    }
+}
+
+__constant uchar resident_aes_sbox[256] = {
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+};
+
+static inline uchar resident_aes_xtime(uchar x) { return (uchar)((x << 1) ^ ((x >> 7) * 0x1b)); }
+
+static inline void resident_aes128(__global const uchar *seed, ulong counter,
+                                   uint domain, __private uchar *out) {
+    uchar rk[176], s[16];
+    for (int i = 0; i < 16; ++i) rk[i] = seed[i];
+    uchar rc = 1;
+    int bytes = 16;
+    while (bytes < 176) {
+        uchar t0 = rk[bytes - 4], t1 = rk[bytes - 3];
+        uchar t2 = rk[bytes - 2], t3 = rk[bytes - 1];
+        if ((bytes & 15) == 0) {
+            uchar q0 = resident_aes_sbox[t1];
+            uchar q1 = resident_aes_sbox[t2];
+            uchar q2 = resident_aes_sbox[t3];
+            uchar q3 = resident_aes_sbox[t0];
+            t0 = q0 ^ rc; t1 = q1; t2 = q2; t3 = q3;
+            rc = resident_aes_xtime(rc);
+        }
+        for (int j = 0; j < 4; ++j) {
+            uchar v = rk[bytes - 16] ^ (j == 0 ? t0 : j == 1 ? t1 : j == 2 ? t2 : t3);
+            rk[bytes++] = v;
+        }
+    }
+    for (int i = 0; i < 16; ++i) s[i] = seed[16 + (i & 7)] ^ (uchar)(i < 8 ? (counter >> (i * 8)) : (domain >> ((i - 8) * 4)));
+    for (int i = 0; i < 16; ++i) s[i] ^= rk[i];
+    for (int round = 1; round <= 10; ++round) {
+        uchar t[16];
+        for (int i = 0; i < 16; ++i) t[i] = resident_aes_sbox[s[i]];
+        s[0]=t[0]; s[1]=t[5]; s[2]=t[10]; s[3]=t[15];
+        s[4]=t[4]; s[5]=t[9]; s[6]=t[14]; s[7]=t[3];
+        s[8]=t[8]; s[9]=t[13]; s[10]=t[2]; s[11]=t[7];
+        s[12]=t[12]; s[13]=t[1]; s[14]=t[6]; s[15]=t[11];
+        if (round != 10) for (int c = 0; c < 4; ++c) {
+            uchar a=s[c*4], b=s[c*4+1], d=s[c*4+2], e=s[c*4+3], q=a^b^d^e;
+            s[c*4]=a^q^resident_aes_xtime(a^b);
+            s[c*4+1]=b^q^resident_aes_xtime(b^d);
+            s[c*4+2]=d^q^resident_aes_xtime(d^e);
+            s[c*4+3]=e^q^resident_aes_xtime(e^a);
+        }
+        for (int i = 0; i < 16; ++i) s[i] ^= rk[round * 16 + i];
+    }
+    for (int i = 0; i < 16; ++i) out[i] = s[i];
+}
+
+static inline void resident_rng32(__global const uchar *seed, ulong counter,
+                                  __private uchar *out) {
+#if RESIDENT_RNG == 2
+    resident_philox4(seed, counter, 0x47505552U, out);
+    resident_philox4(seed, counter, 0x47505553U, &out[16]);
+#elif RESIDENT_RNG == 3
+    resident_aes128(seed, counter, 0x47505552U, out);
+    resident_aes128(seed, counter + 1, 0x47505553U, &out[16]);
+#else
+    uchar block[64];
+    resident_chacha12(seed, counter, 0x47505552U, block);
+    for (int i = 0; i < 32; ++i) out[i] = block[i];
+#endif
+}
+
+static inline int resident_lt_order(const uchar *sk) {
+    /* secp256k1 order, big endian. */
+    const uchar n[32] = {
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+        0xbc,0xe6,0xfa,0xda,0x71,0x48,0x9d,0x7e,
+        0xa3,0x0b,0x8c,0xd0,0x36,0x41,0x41,0x21
+    };
+    int nonzero = 0, cmp = 0;
+    for (int i = 0; i < 32; ++i) {
+        nonzero |= sk[i] != 0;
+        if (cmp == 0 && sk[i] != n[i]) cmp = sk[i] < n[i] ? -1 : 1;
+    }
+    return nonzero && cmp < 0;
+}
+
+static inline uint resident_scalar_bit(const uchar *sk, int bit) {
+    return (sk[31 - bit / 8] >> (bit & 7)) & 1U;
+}
+
+static inline void resident_ec_mul(gej *acc, const uchar *sk,
+                                   __global const uchar *table_b32) {
+    acc->x.n[0] = 0; acc->x.n[1] = 0; acc->x.n[2] = 0; acc->x.n[3] = 0;
+    acc->x.n[4] = 0; acc->x.n[5] = 0; acc->x.n[6] = 0; acc->x.n[7] = 0;
+    acc->x.n[8] = 0; acc->x.n[9] = 0;
+    acc->y = acc->x; fe_set_int(&acc->z, 1); acc->inf = 1;
+    for (int bit = 0; bit < 256; ++bit) {
+        if (resident_scalar_bit(sk, bit)) {
+            ge g; ge_load_g(&g, &table_b32[bit * 64]);
+            gej_add_ge(acc, acc, &g);
+        }
+    }
+}
+
+static inline void resident_u32(__global uchar *p, uint v) {
+    p[0] = (uchar)v; p[1] = (uchar)(v >> 8); p[2] = (uchar)(v >> 16); p[3] = (uchar)(v >> 24);
+}
+
+static inline void resident_u64(__global uchar *p, ulong v) {
+    for (int i = 0; i < 8; ++i) p[i] = (uchar)(v >> (i * 8));
+}
+
+static inline uint resident_b58_index(uchar c) {
+    const char b58[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    for (uint i = 0; i < 58; ++i) if ((uchar)b58[i] == c) return i;
+    return 255;
+}
+
+static inline void resident_base58_address(uchar *addr, const uchar *full25) {
+    const char b58[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    uchar num[25];
+    for (int i = 0; i < 25; ++i) num[i] = full25[i];
+    for (int i = 0; i < 34; ++i) addr[i] = '1';
+    for (int it = 0; it < 34; ++it) {
+        uint rem = 0;
+        for (int i = 0; i < 25; ++i) {
+            uint acc = (rem << 8) | num[i];
+            num[i] = acc / 58;
+            rem = acc % 58;
+        }
+        addr[33 - it] = (uchar)b58[rem];
+    }
+}
+
+static inline void resident_emit(const uchar *sk, const uchar *pub,
+                                 __global const uint *dfa,
+                                 __global const uint *out_start,
+                                 __global const uint *out_len,
+                                 __global const uint *out_ids,
+                                 volatile __global uint *meta,
+                                 __global uchar *records, uint cap, ulong seq) {
+    uchar h[32], payload[21], d1[32], d2[32], full[25], addr[34];
+    keccak256_64(h, pub);
+    payload[0] = 0x41;
+    for (int i = 0; i < 20; ++i) payload[1 + i] = h[12 + i];
+    sha256_short(d1, payload, 21); sha256_short(d2, d1, 32);
+    for (int i = 0; i < 21; ++i) full[i] = payload[i];
+    for (int i = 0; i < 4; ++i) full[21 + i] = d2[i];
+    resident_base58_address(addr, full);
+
+    uint ids[RESIDENT_MAX_MATCHES];
+    uint count = 0, state = 0, flags = 0;
+    for (int i = 1; i < 34; ++i) {
+        uchar c = addr[i];
+        uint ai = resident_b58_index(c);
+        if (ai >= 58) { state = 0; continue; }
+        state = dfa[state * 58 + ai];
+        uint start = out_start[state], len = out_len[state];
+        for (uint j = 0; j < len; ++j) {
+            uint id = out_ids[start + j], seen = 0;
+            for (uint k = 0; k < count; ++k) if (ids[k] == id) seen = 1;
+            if (!seen) {
+                if (count < RESIDENT_MAX_MATCHES) ids[count++] = id;
+                else flags |= 1U;
+            }
+        }
+    }
+    if (!count) return;
+
+    uint pos = atomic_add((volatile __global unsigned int*)&meta[0], 1U);
+    uint read_pos = meta[1];
+    if (pos - read_pos >= cap) {
+        atomic_inc((volatile __global unsigned int*)&meta[2]);
+        atomic_or((volatile __global unsigned int*)&meta[3], 1U);
+        return;
+    }
+    __global uchar *dst = &records[(pos % cap) * RESIDENT_RECORD_BYTES];
+    for (int i = 0; i < 32; ++i) dst[i] = sk[i];
+    for (int i = 0; i < RESIDENT_ADDR_BYTES; ++i) dst[32 + i] = addr[i];
+    resident_u32(&dst[68], count);
+    for (uint i = 0; i < RESIDENT_MAX_MATCHES; ++i) resident_u32(&dst[72 + i * 4], i < count ? ids[i] : 0);
+    resident_u32(&dst[136], flags);
+    resident_u64(&dst[140], seq);
+}
+
+__kernel void tron_vanity_resident(
+        __global const uchar *seed,
+        __global const uchar *table_b32,
+        __global const uint *dfa,
+        __global const uint *out_start,
+        __global const uint *out_len,
+        __global const uint *out_ids,
+        volatile __global uint *meta,
+        __global uchar *records,
+        const uint cap,
+        const ulong stream_base) {
+    uint gid = get_global_id(0);
+    uchar random32[32], sk[32], pub[64];
+    resident_rng32(seed, stream_base + gid, random32);
+    for (int i = 0; i < 32; ++i) sk[i] = random32[i];
+    atomic_inc((volatile __global unsigned int*)&meta[4]);
+    if (!resident_lt_order(sk)) return;
+    gej acc;
+    resident_ec_mul(&acc, sk, table_b32);
+    gej_to_pub(pub, &acc);
+    resident_emit(sk, pub, dfa, out_start, out_len, out_ids, meta, records, cap,
+                  (ulong)stream_base + gid);
+}
+#endif
+
 /* TRON 靓号 OpenCL 批处理内核
  * secp256k1 域/群运算移植自 bitcoin-core/libsecp256k1 (field_10x26 / group_impl，MIT)。
  * keccak-256 / sha-256 与 CPU 侧 src/ 实现同参数。
@@ -16,10 +316,6 @@
  *   full= payload || sha256d(payload)[0:4]              (25 字节)
  *   将完整 TRON Base58 地址送入扁平 Aho-Corasick DFA；命中则回传 (s, word_id)
  */
-
-typedef struct { uint n[10]; } fe;
-typedef struct { fe x, y; int inf; } ge;
-typedef struct { fe x, y, z; int inf; } gej;
 
 /* ---------------- 域运算 ---------------- */
 

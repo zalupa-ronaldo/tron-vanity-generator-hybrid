@@ -175,10 +175,16 @@ bool Program::run1D(id k, size_t global, size_t local, std::string* err) {
 }
 
 bool Program::read(id buf, size_t bytes, void* dst) {
-    return pEnqueueReadBuffer(queue_, buf, TRUE_, 0, bytes, dst, 0, nullptr, nullptr) == 0;
+    return readAt(buf, 0, bytes, dst);
+}
+bool Program::readAt(id buf, size_t offset, size_t bytes, void* dst) {
+    return pEnqueueReadBuffer(queue_, buf, TRUE_, offset, bytes, dst, 0, nullptr, nullptr) == 0;
 }
 bool Program::write(id buf, size_t bytes, const void* src) {
-    return pEnqueueWriteBuffer(queue_, buf, TRUE_, 0, bytes, src, 0, nullptr, nullptr) == 0;
+    return writeAt(buf, 0, bytes, src);
+}
+bool Program::writeAt(id buf, size_t offset, size_t bytes, const void* src) {
+    return pEnqueueWriteBuffer(queue_, buf, TRUE_, offset, bytes, src, 0, nullptr, nullptr) == 0;
 }
 bool Program::finish() { return pFinish(queue_) == 0; }
 void Program::release(id mem) { if (mem) pReleaseMemObject(mem); }

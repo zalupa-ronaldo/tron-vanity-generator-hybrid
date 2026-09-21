@@ -1,6 +1,7 @@
 #include "backend.h"
 #include "crypto.h"
 #include "hwdetect.h"
+#include "resident_backend.h"
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -54,6 +55,11 @@ struct Options {
     uint32_t gpuBatch = 0;
     uint32_t ecWindow = 0;
     uint32_t montN = 0;
+    bool gpuResident = false;
+    std::string gpuRng = "chacha12";
+    uint32_t gpuBufferMiB = 128;
+    uint32_t gpuChunkMs = 32;
+    uint32_t gpuPollMs = 50;
 };
 
 void usage() {
@@ -66,6 +72,11 @@ void usage() {
         "  --output FILE     direct JSONL output override\n"
         "  --backend auto|cpu|opencl\n"
         "  --gpu-batch N     GPU batch size (power of two, 1024..1048576)\n"
+        "  --gpu-resident    GPU CSPRNG + device result ring mode\n"
+        "  --gpu-rng NAME    chacha12, aes-ctr, or philox (resident mode)\n"
+        "  --gpu-buffer-mb N device result ring size, default 128\n"
+        "  --gpu-chunk-ms N  bounded GPU chunk target, default 32\n"
+        "  --gpu-poll-ms N   result polling interval, default 50\n"
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL devices and exit\n"
         "  --verbose         more frequent progress updates\n"
@@ -93,6 +104,11 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--list") o.list = true;
             else if (a == "--keys-per-item") o.keysPerItem = std::stoul(next(i, "--keys-per-item"));
             else if (a == "--gpu-batch") o.gpuBatch = std::stoul(next(i, "--gpu-batch"));
+            else if (a == "--gpu-resident") o.gpuResident = true;
+            else if (a == "--gpu-rng") o.gpuRng = next(i, "--gpu-rng");
+            else if (a == "--gpu-buffer-mb") o.gpuBufferMiB = std::stoul(next(i, "--gpu-buffer-mb"));
+            else if (a == "--gpu-chunk-ms") o.gpuChunkMs = std::stoul(next(i, "--gpu-chunk-ms"));
+            else if (a == "--gpu-poll-ms") o.gpuPollMs = std::stoul(next(i, "--gpu-poll-ms"));
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
             else if (a == "--mont-n") o.montN = std::stoul(next(i, "--mont-n"));
             else if (a == "--backend") o.backend = next(i, "--backend");
@@ -104,8 +120,8 @@ bool parse(int argc, char** argv, Options& o) {
         std::cerr << e.what() << "\n"; return false;
     }
     if (o.backend == "gpu") o.backend = "opencl";
-    if (o.backend != "auto" && o.backend != "cpu" && o.backend != "opencl") {
-        std::cerr << "backend must be auto, cpu, or opencl\n"; return false;
+    if (o.backend != "auto" && o.backend != "cpu" && o.backend != "opencl" && o.backend != "metal") {
+        std::cerr << "backend must be auto, cpu, opencl, or metal\n"; return false;
     }
     return true;
 }
@@ -186,15 +202,26 @@ int main(int argc, char** argv) {
             if (hw.gpus.empty()) { std::cerr << "no OpenCL GPU: " << hw.openclNote << "\n"; return 1; }
             return gpuSelfTest(hw.gpus.front());
         }
-        if (std::string(argv[i]) == "--bench") {
-            if (hw.gpus.empty()) { std::cerr << "no OpenCL GPU: " << hw.openclNote << "\n"; return 1; }
-            return gpuBench(hw.gpus.front(), 5.0);
-        }
     }
 
     std::string error;
     auto dictionary = Dictionary::load(opt.words, opt.caseSensitive, &error);
     if (!dictionary) { std::cerr << error << "\n"; return 1; }
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--bench") {
+            if (hw.gpus.empty()) { std::cerr << "no OpenCL GPU: " << hw.openclNote << "\n"; return 1; }
+            if (!opt.gpuResident) return gpuBench(hw.gpus.front(), 5.0);
+            auto resident = makeResidentGpuBackend(hw.gpus.front(), dictionary, opt.gpuRng,
+                                                   opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
+            if (!resident->available()) {
+                std::cerr << "GPU resident unavailable: " << resident->note() << "\n";
+                return 1;
+            }
+            std::cout << "GPU-resident benchmark: " << resident->name() << "\n";
+            std::cout << "  " << resident->benchmark(5.0) << " keys/s\n";
+            return 0;
+        }
+    }
     gpuSetKeysPerItem(opt.keysPerItem);
     if (opt.gpuBatch) {
         gpuSetBatch(opt.gpuBatch);
@@ -208,12 +235,24 @@ int main(int argc, char** argv) {
 
     std::vector<std::unique_ptr<Backend>> backends;
     if (opt.backend == "auto" || opt.backend == "cpu") backends.push_back(makeCpuBackend());
-    if (opt.backend == "auto" || opt.backend == "opencl") {
+    if (opt.gpuResident && (opt.backend == "auto" || opt.backend == "opencl")) {
+        for (const auto& g : hw.gpus) {
+            backends.push_back(makeResidentGpuBackend(g, dictionary, opt.gpuRng,
+                                                      opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs));
+        }
+        if (hw.gpus.empty() && opt.backend == "opencl") {
+            std::cerr << "OpenCL unavailable; falling back to CPU\n";
+            backends.push_back(makeCpuBackend());
+        }
+    } else if (!opt.gpuResident && (opt.backend == "auto" || opt.backend == "opencl")) {
         for (const auto& g : hw.gpus) backends.push_back(makeGpuBackend(g, dictionary));
         if (hw.gpus.empty() && opt.backend == "opencl") {
             std::cerr << "OpenCL unavailable; falling back to CPU\n";
             backends.push_back(makeCpuBackend());
         }
+    }
+    if (opt.backend == "metal") {
+        std::cerr << "Metal backend is not available in this build; use CPU or OpenCL on Windows\n";
     }
     if (backends.empty()) { std::cerr << "no backend available\n"; return 1; }
 

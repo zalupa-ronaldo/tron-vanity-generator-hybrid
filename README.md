@@ -61,6 +61,7 @@ Useful checks:
 .\build\tron_vanity_generator.exe --backend cpu --threads 16 --seconds 60
 .\build\tron_vanity_generator.exe --backend opencl --seconds 60
 .\build\tron_vanity_generator.exe --backend opencl --gpu-batch 1048576 --seconds 60
+.\build\tron_vanity_generator.exe --backend opencl --gpu-resident --gpu-rng chacha12 --seconds 60
 ```
 
 If OpenCL is unavailable, `--backend opencl` falls back to CPU. `auto` uses
@@ -69,6 +70,29 @@ CPU plus every available OpenCL GPU.
 Discrete GPUs default to a larger `2^20` GPU batch to reduce command-queue
 gaps. Integrated GPUs stay at `2^16` to keep desktop responsiveness. Use
 `--gpu-batch` to override this with a power-of-two value from 1024 to 1048576.
+
+## GPU-resident mode (experimental)
+
+`--gpu-resident` keeps the dictionary, 256-bit GPU-generated scalars, address
+checking and a device result ring on the GPU. The CPU receives only complete
+matches for local JSONL writing. Chunks are bounded to avoid Windows WDDM
+timeouts:
+
+```powershell
+.\build\tron_vanity_generator.exe --backend opencl --gpu-resident `
+  --gpu-rng chacha12 --gpu-buffer-mb 128 --gpu-chunk-ms 32 --gpu-poll-ms 50 `
+  --seconds 60
+```
+
+`chacha12` is the production resident RNG. `philox` and `aes-ctr` are available
+for cross-vendor benchmarking; all three use a per-run OS-generated seed and
+rejection sampling against the secp256k1 order. If the device result ring
+overflows, the run stops rather than silently dropping a wallet result.
+
+The resident implementation currently targets OpenCL on Windows AMD/NVIDIA.
+Metal is not advertised as ready until its kernel passes the same
+cross-validation suite on Apple silicon; macOS falls back to the legacy CPU
+path in this release.
 
 ## Results and security
 

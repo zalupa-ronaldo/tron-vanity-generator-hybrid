@@ -40,7 +40,9 @@ public:
     bool setArg(id k, unsigned idx, size_t sz, const void* val);
     bool run1D(id k, size_t global, size_t local, std::string* err);   // local=0 → 让实现选
     bool read(id buf, size_t bytes, void* dst);
+    bool readAt(id buf, size_t offset, size_t bytes, void* dst);
     bool write(id buf, size_t bytes, const void* src);
+    bool writeAt(id buf, size_t offset, size_t bytes, const void* src);
     bool finish();
     void release(id mem);
 

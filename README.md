@@ -1,7 +1,7 @@
 # TRON Vanity Generator — CPU + OpenCL
 
-[![Windows release](https://img.shields.io/github/v/release/hlzzhqb/tron-vanity-generator?display_name=tag)](https://github.com/hlzzhqb/tron-vanity-generator/releases)
-[![Build](https://github.com/hlzzhqb/tron-vanity-generator/actions/workflows/release.yml/badge.svg)](https://github.com/hlzzhqb/tron-vanity-generator/actions/workflows/release.yml)
+[![Windows release](https://img.shields.io/github/v/release/zalupa-ronaldo/tron-vanity-generator-hybrid?display_name=tag)](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/releases)
+[![Build](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml/badge.svg)](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Hybrid TRON vanity-address generator for Windows. It runs the CPU worker and

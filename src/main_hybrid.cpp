@@ -247,7 +247,7 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });
-    std::thread progress([&] {
+    std::thread progressThread([&] {
         while (!finished.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             if (finished.load() || state.stop.load()) break;
@@ -271,7 +271,7 @@ int main(int argc, char** argv) {
     state.stop.store(true);
     finished.store(true);
     timer.join();
-    progress.join();
+    progressThread.join();
     double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     std::cout << "\nDone: " << state.checked.load() << " keys, " << rate(state.checked.load(), elapsed)
               << ", CPU=" << rate(state.cpuChecked.load(), elapsed)

@@ -15,4 +15,5 @@ std::unique_ptr<Backend> makeMetalResidentBackend(
     uint32_t bufferMiB,
     uint32_t chunkMs,
     uint32_t pollMs,
-    uint32_t groupSize = 256);
+    uint32_t groupSize = 256,
+    uint32_t keysPerLane = 32);

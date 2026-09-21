@@ -63,6 +63,7 @@ struct Options {
     uint32_t gpuChunkMs = 32;
     uint32_t gpuPollMs = 50;
     uint32_t gpuGroupSize = 256;
+    uint32_t metalKeysPerLane = 32;
     double benchSeconds = 1.0;
 };
 
@@ -82,6 +83,7 @@ void usage() {
         "  --gpu-chunk-ms N  bounded GPU chunk target, default 32\n"
         "  --gpu-poll-ms N   result polling interval, default 50\n"
         "  --gpu-group-size N resident work-group size: 64, 128, or 256 (default 256)\n"
+        "  --metal-keys-per-lane N Metal point-walk batch: 1, 2, 4, 8, 16, or 32 (default 32)\n"
         "  --bench-seconds N seconds per benchmark method; --bench runs all available methods\n"
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
         "  --case-sensitive  exact case matching\n"
@@ -117,6 +119,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--gpu-chunk-ms") o.gpuChunkMs = std::stoul(next(i, "--gpu-chunk-ms"));
             else if (a == "--gpu-poll-ms") o.gpuPollMs = std::stoul(next(i, "--gpu-poll-ms"));
             else if (a == "--gpu-group-size") o.gpuGroupSize = std::stoul(next(i, "--gpu-group-size"));
+            else if (a == "--metal-keys-per-lane") o.metalKeysPerLane = std::stoul(next(i, "--metal-keys-per-lane"));
             else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
             else if (a == "--bench-resident") o.benchResidentOnly = true;
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
@@ -138,6 +141,10 @@ bool parse(int argc, char** argv, Options& o) {
     }
     if (o.gpuGroupSize != 64 && o.gpuGroupSize != 128 && o.gpuGroupSize != 256) {
         std::cerr << "--gpu-group-size must be 64, 128, or 256\n"; return false;
+    }
+    if (o.metalKeysPerLane == 0 || o.metalKeysPerLane > 32 ||
+        (o.metalKeysPerLane & (o.metalKeysPerLane - 1)) != 0) {
+        std::cerr << "--metal-keys-per-lane must be 1, 2, 4, 8, 16, or 32\n"; return false;
     }
     return true;
 }
@@ -295,7 +302,7 @@ int main(int argc, char** argv) {
                 for (const auto& rng : rngs) {
                     auto metal = makeMetalResidentBackend(dictionary, rng,
                                                            opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
-                                                           opt.gpuGroupSize);
+                                                           opt.gpuGroupSize, opt.metalKeysPerLane);
                     if (!metal || !metal->available()) {
                         std::cout << "Metal " << rng << ": unavailable ("
                                   << (metal ? metal->note() : "not built") << ")\n";
@@ -333,7 +340,7 @@ int main(int argc, char** argv) {
     if ((opt.gpuResident || opt.backend == "metal") && (opt.backend == "metal" || autoMetal)) {
         auto metal = makeMetalResidentBackend(dictionary, opt.gpuRng,
                                               opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
-                                              opt.gpuGroupSize);
+                                              opt.gpuGroupSize, opt.metalKeysPerLane);
         if (metal) backends.push_back(std::move(metal));
     } else if (opt.gpuResident && (opt.backend == "auto" || opt.backend == "opencl")) {
         for (const auto& g : hw.gpus) {

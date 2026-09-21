@@ -72,8 +72,8 @@ if(APPLE)
     set(METAL_LIB ${CMAKE_CURRENT_BINARY_DIR}/tron_vanity_resident_${METAL_RNG_MODE}.metallib)
     add_custom_command(
       OUTPUT ${METAL_LIB}
-      COMMAND xcrun metal -DRESIDENT=1 -DRESIDENT_RNG=${METAL_RNG_MODE} -DECW=1 -DECBITS=256
-              -DKPI=1 -DMONT_N=1 -c ${METAL_SRC} -o ${METAL_AIR}
+      COMMAND xcrun metal -DRESIDENT=1 -DRESIDENT_RNG=${METAL_RNG_MODE} -DECW=8 -DECBITS=256
+              -DKPI=32 -DMONT_N=1 -c ${METAL_SRC} -o ${METAL_AIR}
       COMMAND xcrun metallib ${METAL_AIR} -o ${METAL_LIB}
       DEPENDS ${METAL_SRC}
       VERBATIM)

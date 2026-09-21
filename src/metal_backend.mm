@@ -28,7 +28,6 @@ constexpr uint32_t kMaxMatches = resident_protocol::kMaxMatches;
 constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
 constexpr uint32_t kResidentEcw = 8;
 constexpr uint32_t kResidentEcbits = 256;
-constexpr uint32_t kResidentKpi = 4;
 
 uint32_t read32(const unsigned char* p) {
     return static_cast<uint32_t>(p[0]) |
@@ -75,7 +74,8 @@ class MetalResidentBackend final : public Backend {
 public:
     MetalResidentBackend(std::shared_ptr<const Dictionary> dictionary,
                          std::string rng, uint32_t bufferMiB,
-                         uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize)
+                         uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize,
+                         uint32_t keysPerLane)
         : dictionary_(std::move(dictionary)), rng_(std::move(rng)),
           bufferMiB_(std::max(8u, bufferMiB)),
           // Keep Metal chunks bounded too: oversized dispatches make the
@@ -83,7 +83,8 @@ public:
           // steady-state throughput on Apple Silicon.
           chunkMs_(std::clamp(chunkMs, 8u, 100u)),
           pollMs_(std::clamp(pollMs, 10u, 1000u)),
-          groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256) {
+          groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256),
+          keysPerLane_(keysPerLane) {
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
         workItems_ = std::clamp((1u << 18) * chunkMs_ / 32u, 1u << 14, 1u << 20);
     }
@@ -102,7 +103,8 @@ public:
         out.kind = "GPU-resident";
         out.title = device_ ? std::string([[device_ name] UTF8String]) : "Apple GPU";
         out.lines.push_back("Metal runtime available");
-        out.lines.push_back("CSPRNG " + rng_ + ", chunk " + std::to_string(chunkMs_) + " ms");
+        out.lines.push_back("CSPRNG " + rng_ + ", chunk " + std::to_string(chunkMs_) +
+                            " ms, " + std::to_string(keysPerLane_) + " keys/lane");
         out.lines.push_back(std::to_string(bufferMiB_) + " MiB device result ring");
         return out;
     }
@@ -113,7 +115,7 @@ public:
         uint64_t generated = 0;
         while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds) {
             if (!runChunk(nullptr, nullptr, nullptr)) break;
-            generated += static_cast<uint64_t>(workItems_) * kResidentKpi;
+            generated += static_cast<uint64_t>(workItems_) * keysPerLane_;
         }
         double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         return elapsed > 0 ? generated / elapsed : 0.0;
@@ -136,8 +138,8 @@ public:
                 state.stop.store(true);
                 return;
             }
-            state.checked.fetch_add(static_cast<uint64_t>(workItems_) * kResidentKpi, std::memory_order_relaxed);
-            state.gpuChecked.fetch_add(static_cast<uint64_t>(workItems_) * kResidentKpi, std::memory_order_relaxed);
+            state.checked.fetch_add(static_cast<uint64_t>(workItems_) * keysPerLane_, std::memory_order_relaxed);
+            state.gpuChecked.fetch_add(static_cast<uint64_t>(workItems_) * keysPerLane_, std::memory_order_relaxed);
             if (overflow) {
                 std::cerr << "Metal resident result ring overflow; stopping\n";
                 state.stop.store(true);
@@ -157,6 +159,7 @@ private:
     uint32_t workItems_ = 1u << 18;
     uint32_t ringSlots_ = 0;
     uint32_t groupSize_ = 256;
+    uint32_t keysPerLane_ = 32;
     uint64_t streamBase_ = 0;
     uint32_t readPos_ = 0;
     secp256k1_context* context_ = nullptr;
@@ -187,7 +190,7 @@ private:
         if (!queue_) { error_ = "cannot create Metal command queue"; return false; }
 
         int mode = rng_ == "philox" ? 2 : (rng_ == "aes-ctr" ? 3 : 1);
-        NSString* prefix = [NSString stringWithFormat:@"#define RESIDENT 1\n#define RESIDENT_RNG %d\n#define ECW %u\n#define ECBITS %u\n#define KPI %u\n#define MONT_N 1\n#define METAL_BACKEND 1\n", mode, kResidentEcw, kResidentEcbits, kResidentKpi];
+        NSString* prefix = [NSString stringWithFormat:@"#define RESIDENT 1\n#define RESIDENT_RNG %d\n#define ECW %u\n#define ECBITS %u\n#define KPI %u\n#define MONT_N 1\n#define METAL_BACKEND 1\n", mode, kResidentEcw, kResidentEcbits, keysPerLane_];
         NSString* source = [prefix stringByAppendingString:[NSString stringWithUTF8String:kMetalKernelSource]];
         NSError* nsError = nil;
         id<MTLLibrary> library = [device_ newLibraryWithSource:source options:nil error:&nsError];
@@ -298,6 +301,8 @@ std::string metalDeviceSummary() {
 
 std::unique_ptr<Backend> makeMetalResidentBackend(
     std::shared_ptr<const Dictionary> dictionary, const std::string& rng,
-    uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize) {
-    return std::make_unique<MetalResidentBackend>(std::move(dictionary), rng, bufferMiB, chunkMs, pollMs, groupSize);
+    uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize,
+    uint32_t keysPerLane) {
+    return std::make_unique<MetalResidentBackend>(std::move(dictionary), rng, bufferMiB, chunkMs,
+                                                  pollMs, groupSize, keysPerLane);
 }

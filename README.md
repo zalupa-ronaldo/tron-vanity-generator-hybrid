@@ -110,6 +110,21 @@ The MSL kernel is compiled and linked as a Metal library during the macOS
 build. The current release keeps Metal opt-in; `--backend auto` will select it
 after the cross-validation acceptance run.
 
+Metal processes 32 consecutive curve points per lane and uses one modular
+inverse for the batch. Tune with `--metal-keys-per-lane 4|8|16|32` if a
+different Apple GPU prefers a smaller batch. On a base M4 with the same
+dictionary and 256-lane groups, `chacha12` measured 14.3 M keys/s at 4,
+18.7 M at 8, 22.0 M at 16, and 23.5 M at 32 (2026-09-21, 2-second
+benchmark passes). The 32-key mode also passed independent verification of
+121 generated address/key pairs. Rates from upstream prefix-only search are
+not directly comparable to full Base58 dictionary matching.
+
+```bash
+./build-mac-metal/tron_vanity_generator --bench-resident --backend metal \
+  --words words.example.txt --bench-seconds 2 --gpu-chunk-ms 100 \
+  --gpu-group-size 256 --metal-keys-per-lane 32
+```
+
 Resident work-group size can be tuned per GPU without rebuilding:
 
 ```powershell

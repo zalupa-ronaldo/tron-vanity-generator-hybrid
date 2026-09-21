@@ -5,7 +5,7 @@ using namespace metal;
 
 
 #ifndef KPI
-#define KPI 8            /* 每个 work-item 连续处理的私钥数（host 用 -D KPI=n 覆盖） */
+#define KPI 32           /* keys per lane; host build prefix overrides this */
 #endif
 #ifndef ECW
 #define ECW 1

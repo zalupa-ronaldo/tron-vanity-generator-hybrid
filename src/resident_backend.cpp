@@ -24,18 +24,28 @@ constexpr uint32_t kRecordBytes = resident_protocol::kRecordBytes;
 constexpr uint32_t kMaxMatches = resident_protocol::kMaxMatches;
 constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
 constexpr uint32_t kResidentEcbits = 256;
+constexpr uint32_t kResidentEcw = 8;
 
 std::vector<unsigned char> genResidentTable(secp256k1_context* c) {
-    std::vector<unsigned char> table(256 * 64, 0);
-    for (uint32_t bit = 0; bit < 256; ++bit) {
-        unsigned char sk[32] = {0};
-        sk[31 - bit / 8] = static_cast<unsigned char>(1u << (bit & 7));
-        secp256k1_pubkey p;
-        if (!secp256k1_ec_pubkey_create(c, &p, sk)) continue;
-        unsigned char encoded[65];
-        size_t len = sizeof(encoded);
-        secp256k1_ec_pubkey_serialize(c, encoded, &len, &p, SECP256K1_EC_UNCOMPRESSED);
-        std::memcpy(&table[bit * 64], encoded + 1, 64);
+    const uint32_t digits = 1u << kResidentEcw;
+    const uint32_t windows = (kResidentEcbits + kResidentEcw - 1) / kResidentEcw;
+    std::vector<unsigned char> table(static_cast<size_t>(windows) * digits * 64, 0);
+    for (uint32_t w = 0; w < windows; ++w) {
+        for (uint32_t d = 1; d < digits; ++d) {
+            unsigned char sk[32] = {0};
+            uint32_t value = d;
+            for (uint32_t bit = 0; bit < kResidentEcw; ++bit) {
+                uint32_t absolute = w * kResidentEcw + bit;
+                if (absolute < kResidentEcbits && ((value >> bit) & 1u))
+                    sk[31 - absolute / 8] |= static_cast<unsigned char>(1u << (absolute & 7));
+            }
+            secp256k1_pubkey p;
+            if (!secp256k1_ec_pubkey_create(c, &p, sk)) continue;
+            unsigned char encoded[65];
+            size_t len = sizeof(encoded);
+            secp256k1_ec_pubkey_serialize(c, encoded, &len, &p, SECP256K1_EC_UNCOMPRESSED);
+            std::memcpy(&table[(static_cast<size_t>(w) * digits + d) * 64], encoded + 1, 64);
+        }
     }
     return table;
 }
@@ -169,7 +179,9 @@ private:
         }
         const int rngMode = rng_ == "philox" ? 2 : (rng_ == "aes-ctr" ? 3 : 1);
         std::string opts = "-D RESIDENT=1 -D RESIDENT_RNG=" + std::to_string(rngMode) +
-                           " -D ECW=1 -D ECBITS=256 -D KPI=1 -D MONT_N=1";
+                           " -D ECW=" + std::to_string(kResidentEcw) +
+                           " -D ECBITS=" + std::to_string(kResidentEcbits) +
+                           " -D KPI=1 -D MONT_N=1";
         if (!program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_)) return false;
         kernel_ = program_.kernel("tron_vanity_resident", &error_);
         if (!kernel_) return false;

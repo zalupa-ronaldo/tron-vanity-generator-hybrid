@@ -7,6 +7,14 @@ using namespace metal;
 #ifndef KPI
 #define KPI 8            /* 每个 work-item 连续处理的私钥数（host 用 -D KPI=n 覆盖） */
 #endif
+#ifndef ECW
+#define ECW 1
+#endif
+#ifndef ECBITS
+#define ECBITS 20
+#endif
+#define ECW_DIGITS (1 << ECW)
+#define ECW_WINDOWS ((ECBITS + ECW - 1) / ECW)
 
 typedef struct { uint n[10]; } fe;
 typedef struct { fe x, y; int inf; } ge;
@@ -203,12 +211,25 @@ static inline void resident_ec_mul(thread gej *acc, thread const uchar *sk,
     acc->x.n[4] = 0; acc->x.n[5] = 0; acc->x.n[6] = 0; acc->x.n[7] = 0;
     acc->x.n[8] = 0; acc->x.n[9] = 0;
     acc->y = acc->x; fe_set_int(&acc->z, 1); acc->inf = 1;
+    #if ECW == 1
     for (int bit = 0; bit < 256; ++bit) {
         if (resident_scalar_bit(sk, bit)) {
             ge g; ge_load_g(&g, &table_b32[bit * 64]);
             gej_add_ge(acc, acc, &g);
         }
     }
+    #else
+    for (int w = 0; w < ECW_WINDOWS; ++w) {
+        uint d = 0;
+        for (int b = 0; b < ECW; ++b)
+            d |= resident_scalar_bit(sk, w * ECW + b) << b;
+        if (d) {
+            ge g;
+            ge_load_g(&g, &table_b32[(w * ECW_DIGITS + d) * 64]);
+            gej_add_ge(acc, acc, &g);
+        }
+    }
+    #endif
 }
 
 static inline void resident_u32(device uchar *p, uint v) {
@@ -729,15 +750,6 @@ inline void ge_load_g(thread ge *p, device const uchar *xy) {
  *   ECW>=2 : table[w*(1<<ECW) + d] = d * 2^(w*ECW) * G，comb 窗口法
  * 窗口法把点加次数从 ~ECBITS/2 降到 ceil(ECBITS/ECW)。
  */
-#ifndef ECW
-#define ECW 1
-#endif
-#ifndef ECBITS
-#define ECBITS 20
-#endif
-#define ECW_DIGITS (1 << ECW)
-#define ECW_WINDOWS ((ECBITS + ECW - 1) / ECW)
-
 inline void ec_base_mul(thread gej *acc, thread const ge *P0, device const uchar *table_b32, uint base) {
     gej_from_ge(acc, P0);
 #if ECW == 1

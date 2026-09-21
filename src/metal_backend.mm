@@ -26,6 +26,8 @@ namespace {
 constexpr uint32_t kRecordBytes = resident_protocol::kRecordBytes;
 constexpr uint32_t kMaxMatches = resident_protocol::kMaxMatches;
 constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
+constexpr uint32_t kResidentEcw = 8;
+constexpr uint32_t kResidentEcbits = 256;
 
 uint32_t read32(const unsigned char* p) {
     return static_cast<uint32_t>(p[0]) |
@@ -46,16 +48,24 @@ std::string hexUpper(const unsigned char* p, size_t n) {
 }
 
 std::vector<unsigned char> genTable(secp256k1_context* c) {
-    std::vector<unsigned char> table(256 * 64, 0);
-    for (uint32_t bit = 0; bit < 256; ++bit) {
-        unsigned char sk[32] = {};
-        sk[31 - bit / 8] = static_cast<unsigned char>(1u << (bit & 7));
-        secp256k1_pubkey pub;
-        if (!secp256k1_ec_pubkey_create(c, &pub, sk)) continue;
-        unsigned char encoded[65];
-        size_t len = sizeof(encoded);
-        secp256k1_ec_pubkey_serialize(c, encoded, &len, &pub, SECP256K1_EC_UNCOMPRESSED);
-        std::memcpy(table.data() + bit * 64, encoded + 1, 64);
+    const uint32_t digits = 1u << kResidentEcw;
+    const uint32_t windows = (kResidentEcbits + kResidentEcw - 1) / kResidentEcw;
+    std::vector<unsigned char> table(static_cast<size_t>(windows) * digits * 64, 0);
+    for (uint32_t w = 0; w < windows; ++w) {
+        for (uint32_t d = 1; d < digits; ++d) {
+            unsigned char sk[32] = {};
+            for (uint32_t bit = 0; bit < kResidentEcw; ++bit) {
+                uint32_t absolute = w * kResidentEcw + bit;
+                if (absolute < kResidentEcbits && ((d >> bit) & 1u))
+                    sk[31 - absolute / 8] |= static_cast<unsigned char>(1u << (absolute & 7));
+            }
+            secp256k1_pubkey pub;
+            if (!secp256k1_ec_pubkey_create(c, &pub, sk)) continue;
+            unsigned char encoded[65];
+            size_t len = sizeof(encoded);
+            secp256k1_ec_pubkey_serialize(c, encoded, &len, &pub, SECP256K1_EC_UNCOMPRESSED);
+            std::memcpy(table.data() + (static_cast<size_t>(w) * digits + d) * 64, encoded + 1, 64);
+        }
     }
     return table;
 }
@@ -167,7 +177,7 @@ private:
         if (!queue_) { error_ = "cannot create Metal command queue"; return false; }
 
         int mode = rng_ == "philox" ? 2 : (rng_ == "aes-ctr" ? 3 : 1);
-        NSString* prefix = [NSString stringWithFormat:@"#define RESIDENT 1\n#define RESIDENT_RNG %d\n#define ECW 1\n#define ECBITS 256\n#define KPI 1\n#define MONT_N 1\n#define METAL_BACKEND 1\n", mode];
+        NSString* prefix = [NSString stringWithFormat:@"#define RESIDENT 1\n#define RESIDENT_RNG %d\n#define ECW %u\n#define ECBITS %u\n#define KPI 1\n#define MONT_N 1\n#define METAL_BACKEND 1\n", mode, kResidentEcw, kResidentEcbits];
         NSString* source = [prefix stringByAppendingString:[NSString stringWithUTF8String:kMetalKernelSource]];
         NSError* nsError = nil;
         id<MTLLibrary> library = [device_ newLibraryWithSource:source options:nil error:&nsError];

@@ -61,6 +61,7 @@ struct Options {
     uint32_t gpuBufferMiB = 128;
     uint32_t gpuChunkMs = 32;
     uint32_t gpuPollMs = 50;
+    uint32_t gpuGroupSize = 256;
     double benchSeconds = 1.0;
 };
 
@@ -79,6 +80,7 @@ void usage() {
         "  --gpu-buffer-mb N device result ring size, default 128\n"
         "  --gpu-chunk-ms N  bounded GPU chunk target, default 32\n"
         "  --gpu-poll-ms N   result polling interval, default 50\n"
+        "  --gpu-group-size N resident work-group size: 64, 128, or 256 (default 256)\n"
         "  --bench-seconds N seconds per benchmark method; --bench runs all available methods\n"
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL devices and exit\n"
@@ -112,6 +114,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--gpu-buffer-mb") o.gpuBufferMiB = std::stoul(next(i, "--gpu-buffer-mb"));
             else if (a == "--gpu-chunk-ms") o.gpuChunkMs = std::stoul(next(i, "--gpu-chunk-ms"));
             else if (a == "--gpu-poll-ms") o.gpuPollMs = std::stoul(next(i, "--gpu-poll-ms"));
+            else if (a == "--gpu-group-size") o.gpuGroupSize = std::stoul(next(i, "--gpu-group-size"));
             else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
             else if (a == "--mont-n") o.montN = std::stoul(next(i, "--mont-n"));
@@ -129,6 +132,9 @@ bool parse(int argc, char** argv, Options& o) {
     }
     if (o.benchSeconds <= 0) {
         std::cerr << "--bench-seconds must be positive\n"; return false;
+    }
+    if (o.gpuGroupSize != 64 && o.gpuGroupSize != 128 && o.gpuGroupSize != 256) {
+        std::cerr << "--gpu-group-size must be 64, 128, or 256\n"; return false;
     }
     return true;
 }
@@ -262,7 +268,8 @@ int main(int argc, char** argv) {
                 for (const auto& g : hw.gpus) {
                     for (const auto& rng : rngs) {
                         auto resident = makeResidentGpuBackend(g, dictionary, rng,
-                                                               opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
+                                                               opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
+                                                               opt.gpuGroupSize);
                         if (!resident || !resident->available()) {
                             std::cout << "resident OpenCL " << rng << " / " << g.name
                                       << ": unavailable (" << (resident ? resident->note() : "not built") << ")\n";
@@ -282,7 +289,8 @@ int main(int argc, char** argv) {
             if (wantMetal) {
                 for (const auto& rng : rngs) {
                     auto metal = makeMetalResidentBackend(dictionary, rng,
-                                                           opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
+                                                           opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
+                                                           opt.gpuGroupSize);
                     if (!metal || !metal->available()) {
                         std::cout << "Metal " << rng << ": unavailable ("
                                   << (metal ? metal->note() : "not built") << ")\n";
@@ -319,12 +327,14 @@ int main(int argc, char** argv) {
 #endif
     if ((opt.gpuResident || opt.backend == "metal") && (opt.backend == "metal" || autoMetal)) {
         auto metal = makeMetalResidentBackend(dictionary, opt.gpuRng,
-                                              opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
+                                              opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
+                                              opt.gpuGroupSize);
         if (metal) backends.push_back(std::move(metal));
     } else if (opt.gpuResident && (opt.backend == "auto" || opt.backend == "opencl")) {
         for (const auto& g : hw.gpus) {
             backends.push_back(makeResidentGpuBackend(g, dictionary, opt.gpuRng,
-                                                      opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs));
+                                                      opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
+                                                      opt.gpuGroupSize));
         }
         if (hw.gpus.empty() && opt.backend == "opencl") {
             std::cerr << "OpenCL unavailable; falling back to CPU\n";

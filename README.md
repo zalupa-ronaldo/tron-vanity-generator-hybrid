@@ -104,6 +104,16 @@ The MSL kernel is compiled and linked as a Metal library during the macOS
 build. The current release keeps Metal opt-in; `--backend auto` will select it
 after the cross-validation acceptance run.
 
+Resident work-group size can be tuned per GPU without rebuilding:
+
+```powershell
+.\tron_vanity_generator.exe --backend opencl --gpu-resident `
+  --gpu-group-size 256 --gpu-rng philox --seconds 60
+```
+
+Supported values are `64`, `128` and `256`; `256` is the default. If a driver
+reports a compile or launch failure, retry with `128`.
+
 ### Full benchmark matrix
 
 `--bench` compares every backend available on the current machine. With

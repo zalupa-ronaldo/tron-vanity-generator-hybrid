@@ -80,11 +80,12 @@ class ResidentGpuBackend final : public Backend {
 public:
     ResidentGpuBackend(GpuDevice device, std::shared_ptr<const Dictionary> dictionary,
                        std::string rng, uint32_t bufferMiB,
-                       uint32_t chunkMs, uint32_t pollMs)
+                       uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize)
         : device_(std::move(device)), dictionary_(std::move(dictionary)),
           rng_(std::move(rng)), bufferMiB_(std::max(8u, bufferMiB)),
           chunkMs_(std::clamp(chunkMs, 8u, 100u)),
-          pollMs_(std::clamp(pollMs, 10u, 1000u)) {
+          pollMs_(std::clamp(pollMs, 10u, 1000u)),
+          groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256) {
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
         workItems_ = std::clamp((1u << 18) * chunkMs_ / 32u, 1u << 14, 1u << 20);
     }
@@ -159,6 +160,7 @@ private:
     uint32_t bufferMiB_, chunkMs_, pollMs_;
     uint32_t workItems_ = 1u << 18;
     uint32_t ringSlots_ = 0;
+    uint32_t groupSize_ = kResidentLocalSize;
     uint64_t streamBase_ = 0;
     secp256k1_context* context_ = nullptr;
     bool tried_ = false, ready_ = false;
@@ -237,7 +239,7 @@ private:
 
     bool runChunk(uint32_t* produced, uint32_t* overflow, const ReportFn& report) {
         if (!bindKernel()) { error_ = "setting resident kernel arguments failed"; return false; }
-        if (!program_.run1D(kernel_, workItems_, kResidentLocalSize, &error_) || !program_.finish()) return false;
+        if (!program_.run1D(kernel_, workItems_, groupSize_, &error_) || !program_.finish()) return false;
         std::array<uint32_t, kMetaWords> meta{};
         if (!program_.read(meta_, sizeof(meta), meta.data())) { error_ = "reading resident metadata failed"; return false; }
         const uint32_t writePos = meta[0];
@@ -268,7 +270,7 @@ private:
         }
         readPos_ = writePos;
         if (!program_.writeAt(meta_, sizeof(uint32_t), sizeof(uint32_t), &readPos_)) return false;
-        streamBase_ += workItems_ / kResidentLocalSize;
+        streamBase_ += workItems_ / groupSize_;
         return true;
     }
 };
@@ -277,7 +279,7 @@ private:
 
 std::unique_ptr<Backend> makeResidentGpuBackend(
     const GpuDevice& device, std::shared_ptr<const Dictionary> dictionary,
-    const std::string& rng, uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs) {
+    const std::string& rng, uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize) {
     return std::make_unique<ResidentGpuBackend>(device, std::move(dictionary), rng,
-                                                bufferMiB, chunkMs, pollMs);
+                                                bufferMiB, chunkMs, pollMs, groupSize);
 }

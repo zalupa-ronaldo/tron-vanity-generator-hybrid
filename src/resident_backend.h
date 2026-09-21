@@ -14,4 +14,5 @@ std::unique_ptr<Backend> makeResidentGpuBackend(
     const std::string& rng,
     uint32_t bufferMiB,
     uint32_t chunkMs,
-    uint32_t pollMs);
+    uint32_t pollMs,
+    uint32_t groupSize = 256);

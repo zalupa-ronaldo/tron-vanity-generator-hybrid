@@ -75,11 +75,12 @@ class MetalResidentBackend final : public Backend {
 public:
     MetalResidentBackend(std::shared_ptr<const Dictionary> dictionary,
                          std::string rng, uint32_t bufferMiB,
-                         uint32_t chunkMs, uint32_t pollMs)
+                         uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize)
         : dictionary_(std::move(dictionary)), rng_(std::move(rng)),
           bufferMiB_(std::max(8u, bufferMiB)),
           chunkMs_(std::clamp(chunkMs, 8u, 100u)),
-          pollMs_(std::clamp(pollMs, 10u, 1000u)) {
+          pollMs_(std::clamp(pollMs, 10u, 1000u)),
+          groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256) {
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
         workItems_ = std::clamp((1u << 18) * chunkMs_ / 32u, 1u << 14, 1u << 20);
     }
@@ -152,6 +153,7 @@ private:
     uint32_t bufferMiB_, chunkMs_, pollMs_;
     uint32_t workItems_ = 1u << 18;
     uint32_t ringSlots_ = 0;
+    uint32_t groupSize_ = 256;
     uint64_t streamBase_ = 0;
     uint32_t readPos_ = 0;
     secp256k1_context* context_ = nullptr;
@@ -233,7 +235,10 @@ private:
         [encoder setBytes:&stream length:sizeof(stream) atIndex:9];
         MTLSize threads = MTLSizeMake(workItems_, 1, 1);
         NSUInteger width = std::max<NSUInteger>(1, [pipeline_ threadExecutionWidth]);
-        MTLSize group = MTLSizeMake(std::min<NSUInteger>(width * 8, 256), 1, 1);
+        NSUInteger requestedGroup = std::min<NSUInteger>(groupSize_, 256);
+        if (requestedGroup < width) requestedGroup = width;
+        if (requestedGroup % width) requestedGroup = width;
+        MTLSize group = MTLSizeMake(requestedGroup, 1, 1);
         [encoder dispatchThreads:threads threadsPerThreadgroup:group];
         [encoder endEncoding];
         [command commit];
@@ -269,7 +274,7 @@ private:
         }
         readPos_ = writePos;
         meta[1] = readPos_;
-        streamBase_ += workItems_ / std::min<uint32_t>(threadWidth_ * 8, 256);
+        streamBase_ += workItems_ / groupSize_;
         return true;
     }
 };
@@ -290,6 +295,6 @@ std::string metalDeviceSummary() {
 
 std::unique_ptr<Backend> makeMetalResidentBackend(
     std::shared_ptr<const Dictionary> dictionary, const std::string& rng,
-    uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs) {
-    return std::make_unique<MetalResidentBackend>(std::move(dictionary), rng, bufferMiB, chunkMs, pollMs);
+    uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize) {
+    return std::make_unique<MetalResidentBackend>(std::move(dictionary), rng, bufferMiB, chunkMs, pollMs, groupSize);
 }

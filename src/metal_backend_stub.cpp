@@ -9,7 +9,7 @@ bool metalAvailable(std::string* note) {
 std::string metalDeviceSummary() { return "Metal unavailable"; }
 
 std::unique_ptr<Backend> makeMetalResidentBackend(
-    std::shared_ptr<const Dictionary>, const std::string&, uint32_t, uint32_t, uint32_t) {
+    std::shared_ptr<const Dictionary>, const std::string&, uint32_t, uint32_t, uint32_t, uint32_t) {
     return nullptr;
 }
 #endif

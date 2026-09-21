@@ -992,7 +992,11 @@ inline void emit_if_match(const uchar *pub, uint s,
         uint start = out_start[state];
         uint len = out_len[state];
         for (uint j = 0; j < len; ++j) {
+#ifdef RESIDENT
             uint idx = resident_atomic_add(out_count, 1U);
+#else
+            uint idx = atomic_add(out_count, 1U);
+#endif
             if (idx < out_cap) {
                 out_hits[idx * 2] = s;
                 out_hits[idx * 2 + 1] = out_ids[start + j];

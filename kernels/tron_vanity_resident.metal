@@ -366,9 +366,9 @@ kernel void tron_vanity_resident(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint item = 0; item < KPI; ++item) {
         uint offset = lid * KPI + item;
-        // Reserve the maximum supported 64-lane threadgroup span so group
+        // Reserve the maximum supported 256-lane threadgroup span so group
         // sequence ranges never overlap even on wider Apple GPU groups.
-        ulong seq = (stream_base + group) * (uint)(KPI * 128) + offset;
+        ulong seq = (stream_base + group) * (uint)(KPI * 256) + offset;
         uchar sk[32], pub[64];
         for (int i = 0; i < 32; ++i) sk[i] = base_sk[i];
         uint carry = offset;
@@ -381,9 +381,16 @@ kernel void tron_vanity_resident(
         if (base_acc.inf) continue;
         if (!resident_lt_order(sk)) continue;
         gej acc = base_acc;
-        if (offset) {
+        uint low = offset & (ECW_DIGITS - 1);
+        uint high = offset >> ECW;
+        if (low) {
             ge g;
-            ge_load_g(&g, &table_b32[offset * 64]);
+            ge_load_g(&g, &table_b32[low * 64]);
+            gej_add_ge(&acc, &acc, &g);
+        }
+        if (high) {
+            ge g;
+            ge_load_g(&g, &table_b32[(ECW_DIGITS + high) * 64]);
             gej_add_ge(&acc, &acc, &g);
         }
         gej_to_pub(pub, &acc);

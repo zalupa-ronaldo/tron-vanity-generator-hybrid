@@ -372,9 +372,16 @@ __kernel void tron_vanity_resident(
         if (base_acc.inf) continue;
         if (!resident_lt_order(sk)) continue;
         gej acc = base_acc;
-        if (offset) {
+        uint low = offset & (ECW_DIGITS - 1);
+        uint high = offset >> ECW;
+        if (low) {
             ge g;
-            ge_load_g(&g, &table_b32[offset * 64]);
+            ge_load_g(&g, &table_b32[low * 64]);
+            gej_add_ge(&acc, &acc, &g);
+        }
+        if (high) {
+            ge g;
+            ge_load_g(&g, &table_b32[(ECW_DIGITS + high) * 64]);
             gej_add_ge(&acc, &acc, &g);
         }
         gej_to_pub(pub, &acc);

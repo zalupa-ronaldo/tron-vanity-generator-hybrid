@@ -233,7 +233,7 @@ private:
         [encoder setBytes:&stream length:sizeof(stream) atIndex:9];
         MTLSize threads = MTLSizeMake(workItems_, 1, 1);
         NSUInteger width = std::max<NSUInteger>(1, [pipeline_ threadExecutionWidth]);
-        MTLSize group = MTLSizeMake(std::min<NSUInteger>(width * 4, 128), 1, 1);
+        MTLSize group = MTLSizeMake(std::min<NSUInteger>(width * 8, 256), 1, 1);
         [encoder dispatchThreads:threads threadsPerThreadgroup:group];
         [encoder endEncoding];
         [command commit];
@@ -269,7 +269,7 @@ private:
         }
         readPos_ = writePos;
         meta[1] = readPos_;
-        streamBase_ += workItems_ / std::min<uint32_t>(threadWidth_ * 4, 128);
+        streamBase_ += workItems_ / std::min<uint32_t>(threadWidth_ * 8, 256);
         return true;
     }
 };

@@ -26,7 +26,7 @@ constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
 constexpr uint32_t kResidentEcbits = 256;
 constexpr uint32_t kResidentEcw = 8;
 constexpr uint32_t kResidentKpi = 2;
-constexpr uint32_t kResidentLocalSize = 128;
+constexpr uint32_t kResidentLocalSize = 256;
 
 std::vector<unsigned char> genResidentTable(secp256k1_context* c) {
     const uint32_t digits = 1u << kResidentEcw;

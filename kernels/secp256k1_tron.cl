@@ -693,7 +693,7 @@ inline void emit_if_match(const uchar *pub, uint s,
     }
 }
 
-inline void probe_one(gej *acc, uint s,
+static inline void probe_one(gej *acc, uint s,
                       __global const uint *dfa,
                       __global const uint *out_start,
                       __global const uint *out_len,

@@ -368,7 +368,6 @@ __kernel void tron_vanity_resident(
             sk[i] = (uchar)sum;
             carry = (carry >> 8) + (sum >> 8);
         }
-        resident_atomic_add((volatile __global uint*)&meta[4], 1U);
         if (base_acc.inf) continue;
         if (!resident_lt_order(sk)) continue;
         gej acc = base_acc;

@@ -4,6 +4,8 @@ build-*/
 out/
 cmake-build-*/
 build-local/
+dist-v1.2/
+tron-vanity-generator-v*.zip
 
 # Runtime outputs (never publish wallets or logs)
 results/

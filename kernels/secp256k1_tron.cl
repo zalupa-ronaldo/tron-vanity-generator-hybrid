@@ -256,14 +256,16 @@ static inline void resident_base58_address(uchar *addr, const uchar *full25) {
     uchar num[25];
     for (int i = 0; i < 25; ++i) num[i] = full25[i];
     for (int i = 0; i < 34; ++i) addr[i] = '1';
+    int start = 0;
     for (int it = 0; it < 34; ++it) {
         uint rem = 0;
-        for (int i = 0; i < 25; ++i) {
+        for (int i = start; i < 25; ++i) {
             uint acc = (rem << 8) | num[i];
             num[i] = acc / 58;
             rem = acc % 58;
         }
         addr[33 - it] = (uchar)b58[rem];
+        while (start < 25 && num[start] == 0) ++start;
     }
 }
 

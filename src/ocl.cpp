@@ -86,7 +86,7 @@ bool load(std::string* err) {
     g_loaded = true;
     return true;
 #else
-    if (err) *err = "仅支持 Windows";
+    if (err) *err = "OpenCL backend is currently supported on Windows only";
     return false;
 #endif
 }

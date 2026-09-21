@@ -71,7 +71,7 @@ static void detectGpus(HardwareReport& rep) {
         g.deviceId = d.device;
         rep.gpus.push_back(std::move(g));
     }
-    if (rep.gpus.empty()) rep.openclNote = "OpenCL 可用，但未枚举到 GPU 设备";
+    if (rep.gpus.empty()) rep.openclNote = "OpenCL loaded, but no GPU devices were enumerated";
 }
 
 HardwareReport detectHardware() {

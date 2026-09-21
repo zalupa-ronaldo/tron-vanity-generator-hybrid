@@ -178,6 +178,18 @@ std::string rate(uint64_t n, double seconds) {
     return s.str();
 }
 
+std::string benchRate(double keysPerSecond) {
+    std::ostringstream s;
+    if (keysPerSecond >= 1e6) {
+        s << std::fixed << std::setprecision(2) << keysPerSecond / 1e6 << " M/s";
+    } else if (keysPerSecond >= 1e3) {
+        s << std::fixed << std::setprecision(1) << keysPerSecond / 1e3 << " K/s";
+    } else {
+        s << std::fixed << std::setprecision(0) << keysPerSecond << " /s";
+    }
+    return s.str();
+}
+
 void printDevices(const HardwareReport& hw) {
     auto ci = detectCpu();
     std::cout << "CPU: " << ci.brand << " (" << std::thread::hardware_concurrency() << " threads)\n";
@@ -229,24 +241,23 @@ int main(int argc, char** argv) {
             std::cout << "\n=== Full benchmark matrix (" << seconds << " s per method) ===\n"
                       << "CPU + legacy OpenCL tuning + resident OpenCL/Metal RNGs\n"
                       << "No wallet output is written by --bench.\n\n"
-                      << std::left << std::setw(30) << "method"
-                      << std::right << std::setw(16) << "keys/s" << "\n"
-                      << std::string(48, '-') << "\n";
+                      << std::left << std::setw(38) << "method"
+                      << std::right << std::setw(16) << "throughput" << "\n"
+                      << std::string(56, '-') << "\n";
 
             if (wantCpu) {
                 auto cpu = makeCpuBackend();
                 double r = cpu->benchmark(seconds);
-                std::cout << std::left << std::setw(30) << "CPU (all host threads)"
-                          << std::right << std::setw(16) << std::fixed << std::setprecision(0) << r << "\n";
+                std::cout << std::left << std::setw(38) << "CPU (all host threads)"
+                          << std::right << std::setw(16) << benchRate(r) << "\n";
             }
 
             if (wantOpencl && !hw.gpus.empty()) {
                 for (const auto& g : hw.gpus) {
                     std::cout << "\n[legacy OpenCL tuning] " << g.name << "\n";
                     double r = gpuBench(g, seconds);
-                    std::cout << std::left << std::setw(30) << ("legacy OpenCL best / " + g.name)
-                              << std::right << std::setw(16) << std::fixed << std::setprecision(0)
-                              << r << "\n";
+                    std::cout << std::left << std::setw(38) << ("legacy OpenCL best / " + g.name)
+                              << std::right << std::setw(16) << benchRate(r) << "\n";
                 }
                 for (const auto& g : hw.gpus) {
                     for (const auto& rng : rngs) {
@@ -258,10 +269,9 @@ int main(int argc, char** argv) {
                             continue;
                         }
                         double r = resident->benchmark(seconds);
-                        std::cout << std::left << std::setw(30)
+                        std::cout << std::left << std::setw(38)
                                   << ("resident OpenCL " + rng + " / " + g.name)
-                                  << std::right << std::setw(16) << std::fixed << std::setprecision(0)
-                                  << r << "\n";
+                                  << std::right << std::setw(16) << benchRate(r) << "\n";
                     }
                 }
             } else if (wantOpencl) {
@@ -279,9 +289,8 @@ int main(int argc, char** argv) {
                         continue;
                     }
                     double r = metal->benchmark(seconds);
-                    std::cout << std::left << std::setw(30) << ("Metal resident " + rng)
-                              << std::right << std::setw(16) << std::fixed << std::setprecision(0)
-                              << r << "\n";
+                    std::cout << std::left << std::setw(38) << ("Metal resident " + rng)
+                              << std::right << std::setw(16) << benchRate(r) << "\n";
                 }
             }
 #else

@@ -114,7 +114,7 @@ public:
         bi.lines.push_back("OpenCL  " + hw_.platform);
         bi.lines.push_back(std::to_string(hw_.computeUnits) + " CU");
         bi.lines.push_back(std::to_string(hw_.clockMHz) + " MHz");
-        bi.lines.push_back(hw_.integrated ? "集成显卡 (统一内存)" : "独立显卡");
+        bi.lines.push_back(hw_.integrated ? "Integrated GPU (unified memory)" : "Discrete GPU");
         return bi;
     }
 
@@ -141,13 +141,13 @@ public:
     }
 
     void run(const RunConfig& cfg, RunState& state, const ReportFn& report) override {
-        if (!ensureReady()) { std::cerr << "GPU 后端不可用: " << err_ << "\n"; return; }
+        if (!ensureReady()) { std::cerr << "GPU backend unavailable: " << err_ << "\n"; return; }
         while (!state.stop.load(std::memory_order_relaxed)) {
             if (cfg.maxAttempts && state.checked.load() >= cfg.maxAttempts) { state.stop = true; break; }
             std::vector<uint32_t> hits;
             unsigned char k0[32];
             if (!runBatch(&hits, k0)) {
-                std::cerr << "GPU 批次执行失败\n";
+                std::cerr << "GPU batch execution failed\n";
                 return;
             }
             for (size_t hi = 0; hi + 1 < hits.size(); hi += 2) {
@@ -196,8 +196,8 @@ private:
         if (tried_) return ready_;
         tried_ = true;
         if (!ocl::load(&err_)) return false;
-        if (!hw_.deviceId) { err_ = "无 OpenCL 设备句柄"; return false; }
-        if (!dictionary_ || dictionary_->words.empty()) { err_ = "字典为空"; return false; }
+        if (!hw_.deviceId) { err_ = "no OpenCL device handle"; return false; }
+        if (!dictionary_ || dictionary_->words.empty()) { err_ = "dictionary is empty"; return false; }
         builtMont_ = g_montN >= 2 ? g_montN : 1;
         builtKpi_ = builtMont_ >= 2 ? 1 : (g_keysPerItem ? g_keysPerItem : 1);
         while (g_batch % builtKpi_) --builtKpi_;
@@ -274,7 +274,7 @@ private:
 
 int GpuBackend::selfTest(const GpuDevice& hw) {
     std::string err;
-    if (!ocl::load(&err)) { std::cout << "OpenCL 加载失败: " << err << "\n"; return 1; }
+    if (!ocl::load(&err)) { std::cout << "OpenCL load failed: " << err << "\n"; return 1; }
     ocl::Program prog;
     if (!prog.build(hw.platformId, hw.deviceId, kGpuKernelSource, "", &err)) {
         std::cout << err << "\n";
@@ -327,20 +327,20 @@ int GpuBackend::selfTest(const GpuDevice& hw) {
                   << "  cpu=" << cpuAddr << "  gpu=" << gpuAddr << "\n";
         if (!match) ++fails;
     }
-    std::cout << (fails ? std::to_string(fails) + " 个不一致\n"
-                        : "test_pub: GPU secp256k1/keccak/base58 与 CPU 完全一致\n");
+    std::cout << (fails ? std::to_string(fails) + " mismatches\n"
+                        : "test_pub: GPU secp256k1/keccak/base58 matches CPU\n");
 
     // ---- Montgomery 批量求逆：对照 libsecp256k1（其自带模逆 = 逐点单独求逆基准）----
     const uint32_t ecw = 7;
     std::vector<unsigned char> ct = genTable(c, ecw);
-    std::cout << "\ntest_mont (ECW=" << ecw << ", 批量求逆 vs 逐点求逆):\n";
+    std::cout << "\ntest_mont (ECW=" << ecw << ", batch inversion vs point-by-point):\n";
     for (uint32_t N : {2u, 4u, 8u, 16u, 32u}) {
         ocl::Program pm;
         std::string opts = "-D KPI=1 -D ECW=" + std::to_string(ecw) +
                            " -D ECBITS=" + std::to_string(kEcBits) +
                            " -D MONT_N=" + std::to_string(N);
         if (!pm.build(hw.platformId, hw.deviceId, kGpuKernelSource, opts, &err)) {
-            std::cout << "  N=" << N << " 编译失败:\n" << err << "\n"; ++fails; continue;
+            std::cout << "  N=" << N << " compile failed:\n" << err << "\n"; ++fails; continue;
         }
         ocl::id km = pm.kernel("test_mont", &err);
         if (!km) { std::cout << "  N=" << N << ": " << err << "\n"; ++fails; continue; }
@@ -374,12 +374,12 @@ int GpuBackend::selfTest(const GpuDevice& hw) {
                 std::memcmp(cpuPub, &po[i * 64], 64) != 0)
                 ++bad;
         }
-        std::cout << "  N=" << N << " : " << (bad ? std::to_string(bad) + " / " + std::to_string(cnt) + " 不一致"
-                                                  : std::to_string(cnt) + " 个全部一致") << "\n";
+        std::cout << "  N=" << N << " : " << (bad ? std::to_string(bad) + " / " + std::to_string(cnt) + " mismatches"
+                                                  : std::to_string(cnt) + " vectors match") << "\n";
         if (bad) ++fails;
     }
 
-    std::cout << (fails ? "\n有不一致，GPU 结果不可信\n" : "\n全部通过\n");
+    std::cout << (fails ? "\nGPU validation failed\n" : "\nAll GPU checks passed\n");
     return fails ? 1 : 0;
 }
 
@@ -502,13 +502,14 @@ int gpuProfile(const GpuDevice& dev, double secs) {
 // --bench：EC 窗口法 × keys-per-item 矩阵 + 尾号规则吞吐
 // 每档单独编译内核、重新生成预计算表，预热到稳态再计时。
 int gpuBench(const GpuDevice& dev, double secs) {
-    std::cout << "\n每档预热 " << secs << "s + 计时 " << secs
-              << "s（集成显卡持续负载会降频，取稳态值）\n";
+    std::cout << "\nLegacy OpenCL tuning\n"
+              << "  Warm-up: " << secs << " s | timed: " << secs
+              << " s | steady-state throughput\n";
 
     uint32_t savedKpi = g_keysPerItem, savedEcw = g_ecWindow, savedMont = g_montN, savedBatch = g_batch;
 
-    std::cout << "\n== 固定基点 EC 窗口法扫描（KPI=1，min_len=20）==\n";
-    std::cout << "  ECW=1 逐bit(baseline)；ECW=w 用 comb 表，点加从 ~10 降到 ceil(20/w)\n";
+    std::cout << "\n[1/5] Fixed-base EC window scan (KPI=1, min_len=20)\n";
+    std::cout << "  ECW=1 baseline; ECW>=2 uses comb precomputation\n";
     g_keysPerItem = 1;
     uint32_t bestEcw = 1;
     double bestR = 0;
@@ -516,20 +517,20 @@ int gpuBench(const GpuDevice& dev, double secs) {
     for (uint32_t w : {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u}) {
         g_ecWindow = w;
         GpuBackend b(dev);
-        if (!b.available()) { std::cout << "  ECW=" << w << " 构建失败\n"; continue; }
+        if (!b.available()) { std::cout << "  ECW=" << w << " : build failed\n"; continue; }
         b.benchN(secs, 20);
         double r = b.benchN(secs, 20);
         if (w == 1) baseR = r;
         uint32_t windows = (kEcBits + w - 1) / w;
         uint32_t kb = (w == 1 ? 2u : windows * (1u << w) * 64 / 1024);
-        std::printf("  ECW=%u  (窗口 %u, 表 %3u KB) : %10.0f keys/s   %+5.0f%%%s\n",
+        std::printf("  ECW=%u  windows=%-2u table=%3u KB : %10.0f keys/s   %+5.0f%%%s\n",
                     w, windows, kb, r, baseR > 0 ? (r - baseR) / baseR * 100 : 0,
                     r > bestR ? "  <-" : "");
         if (r > bestR) { bestR = r; bestEcw = w; }
     }
-    std::printf("  最优 ECW=%u  (%.0f keys/s)\n", bestEcw, bestR);
+    std::printf("  Best ECW: %u  (%.0f keys/s)\n", bestEcw, bestR);
 
-    std::cout << "\n== Montgomery 批量求逆扫描 (ECW=" << bestEcw << ", 1 WI=1 私钥) ==\n";
+    std::cout << "\n[2/5] Montgomery batch inversion scan (ECW=" << bestEcw << ")\n";
     g_ecWindow = bestEcw;
     g_keysPerItem = 1;
     double montBase = 0, bestMontR = 0;
@@ -537,7 +538,7 @@ int gpuBench(const GpuDevice& dev, double secs) {
     for (uint32_t nn : {1u, 2u, 4u, 8u, 16u, 32u}) {
         g_montN = nn;
         GpuBackend b(dev);
-        if (!b.available()) { std::cout << "  N=" << nn << " 构建失败\n"; continue; }
+        if (!b.available()) { std::cout << "  N=" << nn << " : build failed\n"; continue; }
         b.benchN(secs, 20);
         double r = b.benchN(secs, 20);
         if (nn == 1) montBase = r;
@@ -546,9 +547,9 @@ int gpuBench(const GpuDevice& dev, double secs) {
                     r > bestMontR ? "  <-" : "");
         if (r > bestMontR) { bestMontR = r; bestMont = nn; }
     }
-    std::printf("  最优 MONT_N=%u  (%.0f keys/s)\n", bestMont, bestMontR);
+    std::printf("  Best MONT_N: %u  (%.0f keys/s)\n", bestMont, bestMontR);
 
-    std::cout << "\n== keys-per-item 扫描 (ECW=" << bestEcw << ", MONT_N=1) ==\n";
+    std::cout << "\n[3/5] Keys-per-item scan (ECW=" << bestEcw << ", MONT_N=1)\n";
     g_montN = 1;
     double bestAll = std::max({bestR, bestMontR});
     for (uint32_t n : {1u, 2u, 4u, 8u}) {
@@ -562,18 +563,18 @@ int gpuBench(const GpuDevice& dev, double secs) {
     }
     g_keysPerItem = 1;
 
-    std::cout << "\n== 尾号规则对吞吐的影响 (ECW=" << bestEcw << ", N=1) ==\n";
+    std::cout << "\n[4/5] Match-rule overhead (ECW=" << bestEcw << ", KPI=1)\n";
     g_keysPerItem = 1;
     GpuBackend b(dev);
     b.available();
     b.benchN(secs, 5);
     for (uint32_t ml : {5u, 6u, 7u, 8u}) {
         double r = b.benchN(secs, ml);
-        std::printf("  相同/连续 >= %u 位 : %10.0f keys/s\n", ml, r);
+        std::printf("  suffix match >= %u chars : %10.0f keys/s\n", ml, r);
         bestAll = std::max(bestAll, r);
     }
 
-    std::cout << "\n== GPU batch size 扫描 (ECW=" << bestEcw << ", KPI=1, MONT_N=1) ==\n";
+    std::cout << "\n[5/5] GPU batch-size scan (ECW=" << bestEcw << ", KPI=1, MONT_N=1)\n";
     g_ecWindow = bestEcw;
     g_keysPerItem = 1;
     g_montN = 1;
@@ -592,6 +593,6 @@ int gpuBench(const GpuDevice& dev, double secs) {
     g_ecWindow = savedEcw;
     g_montN = savedMont;
     g_batch = savedBatch;
-    std::printf("  legacy OpenCL best: %.0f keys/s\n", bestAll);
+    std::printf("\n  Legacy OpenCL best: %.0f keys/s\n", bestAll);
     return static_cast<int>(bestAll);
 }

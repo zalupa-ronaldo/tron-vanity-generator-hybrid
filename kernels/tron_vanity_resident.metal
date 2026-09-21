@@ -368,7 +368,7 @@ kernel void tron_vanity_resident(
         uint offset = lid * KPI + item;
         // Reserve the maximum supported 64-lane threadgroup span so group
         // sequence ranges never overlap even on wider Apple GPU groups.
-        ulong seq = (stream_base + group) * (uint)(KPI * 64) + offset;
+        ulong seq = (stream_base + group) * (uint)(KPI * 128) + offset;
         uchar sk[32], pub[64];
         for (int i = 0; i < 32; ++i) sk[i] = base_sk[i];
         uint carry = offset;

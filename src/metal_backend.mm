@@ -28,6 +28,7 @@ constexpr uint32_t kMaxMatches = resident_protocol::kMaxMatches;
 constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
 constexpr uint32_t kResidentEcw = 8;
 constexpr uint32_t kResidentEcbits = 256;
+constexpr uint32_t kResidentKpi = 2;
 
 uint32_t read32(const unsigned char* p) {
     return static_cast<uint32_t>(p[0]) |
@@ -108,7 +109,7 @@ public:
         uint64_t generated = 0;
         while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds) {
             if (!runChunk(nullptr, nullptr, nullptr)) break;
-            generated += workItems_;
+            generated += static_cast<uint64_t>(workItems_) * kResidentKpi;
         }
         double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         return elapsed > 0 ? generated / elapsed : 0.0;
@@ -131,8 +132,8 @@ public:
                 state.stop.store(true);
                 return;
             }
-            state.checked.fetch_add(workItems_, std::memory_order_relaxed);
-            state.gpuChecked.fetch_add(workItems_, std::memory_order_relaxed);
+            state.checked.fetch_add(static_cast<uint64_t>(workItems_) * kResidentKpi, std::memory_order_relaxed);
+            state.gpuChecked.fetch_add(static_cast<uint64_t>(workItems_) * kResidentKpi, std::memory_order_relaxed);
             if (overflow) {
                 std::cerr << "Metal resident result ring overflow; stopping\n";
                 state.stop.store(true);
@@ -180,7 +181,7 @@ private:
         if (!queue_) { error_ = "cannot create Metal command queue"; return false; }
 
         int mode = rng_ == "philox" ? 2 : (rng_ == "aes-ctr" ? 3 : 1);
-        NSString* prefix = [NSString stringWithFormat:@"#define RESIDENT 1\n#define RESIDENT_RNG %d\n#define ECW %u\n#define ECBITS %u\n#define KPI 1\n#define MONT_N 1\n#define METAL_BACKEND 1\n", mode, kResidentEcw, kResidentEcbits];
+        NSString* prefix = [NSString stringWithFormat:@"#define RESIDENT 1\n#define RESIDENT_RNG %d\n#define ECW %u\n#define ECBITS %u\n#define KPI %u\n#define MONT_N 1\n#define METAL_BACKEND 1\n", mode, kResidentEcw, kResidentEcbits, kResidentKpi];
         NSString* source = [prefix stringByAppendingString:[NSString stringWithUTF8String:kMetalKernelSource]];
         NSError* nsError = nil;
         id<MTLLibrary> library = [device_ newLibraryWithSource:source options:nil error:&nsError];
@@ -266,7 +267,7 @@ private:
         }
         readPos_ = writePos;
         meta[1] = readPos_;
-        streamBase_ += workItems_;
+        streamBase_ += static_cast<uint64_t>(workItems_) * kResidentKpi;
         return true;
     }
 };

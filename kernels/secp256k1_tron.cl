@@ -236,10 +236,19 @@ static inline void resident_u64(__global uchar *p, ulong v) {
     for (int i = 0; i < 8; ++i) p[i] = (uchar)(v >> (i * 8));
 }
 
+__constant uchar resident_b58_map[128] = {
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 255, 255, 255, 255, 255, 255,
+    255, 9, 10, 11, 12, 13, 14, 15, 16, 255, 17, 18, 19, 20, 21, 255,
+    22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 255, 255, 255, 255, 255,
+    255, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 255, 44, 45, 46,
+    47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 255, 255, 255, 255, 255,
+};
+
 static inline uint resident_b58_index(uchar c) {
-    const char b58[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    for (uint i = 0; i < 58; ++i) if ((uchar)b58[i] == c) return i;
-    return 255;
+    return c < 128 ? resident_b58_map[c] : 255;
 }
 
 static inline void resident_base58_address(uchar *addr, const uchar *full25) {
@@ -324,16 +333,18 @@ __kernel void tron_vanity_resident(
         const uint cap,
         const ulong stream_base) {
     uint gid = get_global_id(0);
-    uchar random32[32], sk[32], pub[64];
-    resident_rng32(seed, stream_base + gid, random32);
-    for (int i = 0; i < 32; ++i) sk[i] = random32[i];
-    resident_atomic_add((volatile __global uint*)&meta[4], 1U);
-    if (!resident_lt_order(sk)) return;
-    gej acc;
-    resident_ec_mul(&acc, sk, table_b32);
-    gej_to_pub(pub, &acc);
-    resident_emit(sk, pub, dfa, out_start, out_len, out_ids, meta, records, cap,
-                  (ulong)stream_base + gid);
+    for (uint item = 0; item < KPI; ++item) {
+        ulong seq = stream_base + (ulong)gid * KPI + item;
+        uchar random32[32], sk[32], pub[64];
+        resident_rng32(seed, seq, random32);
+        for (int i = 0; i < 32; ++i) sk[i] = random32[i];
+        resident_atomic_add((volatile __global uint*)&meta[4], 1U);
+        if (!resident_lt_order(sk)) continue;
+        gej acc;
+        resident_ec_mul(&acc, sk, table_b32);
+        gej_to_pub(pub, &acc);
+        resident_emit(sk, pub, dfa, out_start, out_len, out_ids, meta, records, cap, seq);
+    }
 }
 #endif
 

@@ -25,6 +25,7 @@ constexpr uint32_t kMaxMatches = resident_protocol::kMaxMatches;
 constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
 constexpr uint32_t kResidentEcbits = 256;
 constexpr uint32_t kResidentEcw = 8;
+constexpr uint32_t kResidentKpi = 2;
 
 std::vector<unsigned char> genResidentTable(secp256k1_context* c) {
     const uint32_t digits = 1u << kResidentEcw;
@@ -108,7 +109,7 @@ public:
         uint64_t generated = 0;
         while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds) {
             if (!runChunk(nullptr, nullptr, nullptr)) break;
-            generated += workItems_;
+            generated += static_cast<uint64_t>(workItems_) * kResidentKpi;
         }
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         return elapsed > 0 ? generated / elapsed : 0.0;
@@ -132,8 +133,8 @@ public:
                 state.stop.store(true);
                 return;
             }
-            state.checked.fetch_add(workItems_, std::memory_order_relaxed);
-            state.gpuChecked.fetch_add(workItems_, std::memory_order_relaxed);
+            state.checked.fetch_add(static_cast<uint64_t>(workItems_) * kResidentKpi, std::memory_order_relaxed);
+            state.gpuChecked.fetch_add(static_cast<uint64_t>(workItems_) * kResidentKpi, std::memory_order_relaxed);
             if (overflow) {
                 std::cerr << "GPU resident result ring overflow; stopping to avoid lost matches\n";
                 state.stop.store(true);
@@ -185,7 +186,7 @@ private:
         std::string opts = "-D RESIDENT=1 -D RESIDENT_RNG=" + std::to_string(rngMode) +
                            " -D ECW=" + std::to_string(kResidentEcw) +
                            " -D ECBITS=" + std::to_string(kResidentEcbits) +
-                           " -D KPI=1 -D MONT_N=1";
+                           " -D KPI=" + std::to_string(kResidentKpi) + " -D MONT_N=1";
         if (!program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_)) return false;
         kernel_ = program_.kernel("tron_vanity_resident", &error_);
         if (!kernel_) return false;
@@ -266,7 +267,7 @@ private:
         }
         readPos_ = writePos;
         if (!program_.writeAt(meta_, sizeof(uint32_t), sizeof(uint32_t), &readPos_)) return false;
-        streamBase_ += workItems_;
+        streamBase_ += static_cast<uint64_t>(workItems_) * kResidentKpi;
         return true;
     }
 };

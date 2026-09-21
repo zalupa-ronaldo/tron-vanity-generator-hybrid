@@ -60,10 +60,15 @@ Useful checks:
 .\build\tron_vanity_generator.exe --matchtest
 .\build\tron_vanity_generator.exe --backend cpu --threads 16 --seconds 60
 .\build\tron_vanity_generator.exe --backend opencl --seconds 60
+.\build\tron_vanity_generator.exe --backend opencl --gpu-batch 1048576 --seconds 60
 ```
 
 If OpenCL is unavailable, `--backend opencl` falls back to CPU. `auto` uses
 CPU plus every available OpenCL GPU.
+
+Discrete GPUs default to a larger `2^20` GPU batch to reduce command-queue
+gaps. Integrated GPUs stay at `2^16` to keep desktop responsiveness. Use
+`--gpu-batch` to override this with a power-of-two value from 1024 to 1048576.
 
 ## Results and security
 

@@ -20,9 +20,11 @@ namespace {
 // 每次内核启动扫描的连续私钥数。原来是 2^20：在 UHD 730 上单次 GPU kernel 会连续跑
 // ~1.3 秒不间断——集成显卡同时还要管显示合成(DWM)，长时间几乎满载跑这种单次超过 1 秒的
 // 大批次，被观察到会导致显示子系统卡死到需要硬重启（个别机器/驱动组合下 WDDM 抢占不够
-// 及时）。缩到 2^16 后单次 kernel 只跑几十毫秒，两次启动之间 GPU 有机会正常服务显示。
+// 及时）。集成 GPU 使用 2^16；独立 GPU по умолчанию получает 2^20,
+// чтобы сократить host<->device паузы между kernel-запусками.
 // 对吞吐影响可忽略（host<->device 开销本来就在 profile 里测出接近 0）。
 constexpr uint32_t kBatch = 1u << 16;
+constexpr uint32_t kMaxBatch = 1u << 20;
 constexpr uint32_t kEcBits = 20;        // 固定基点标量乘覆盖的位数；> log2(kBatch) 也没问题，
                                         // 只是表里高位窗口永远用不到，不影响正确性
 constexpr uint32_t kOutCap = 65536;     // 单批命中回传上限（每项两个 uint）
@@ -30,6 +32,7 @@ constexpr uint32_t kOutCap = 65536;     // 单批命中回传上限（每项两�
 // 每个 work-item 连续处理多少私钥。UHD 730 上实测 N=1 最快（寄存器压力 + 每个私钥仍需一次
 // 模逆，未做 Montgomery 批量求逆）。保留可调，供不同 GPU 找甜点位。
 uint32_t g_keysPerItem = 1;
+uint32_t g_batch = kBatch;
 // 固定基点窗口位宽：1=逐bit(baseline)。UHD 730 实测 ECW=7 甜点位（3 次点加，24KB 表，
 // 约 +58%），再大表翻倍收益 <1%。换 GPU 可用 --bench 重新找。
 uint32_t g_ecWindow = 7;
@@ -129,7 +132,7 @@ public:
         uint64_t done = 0;
         while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds) {
             if (!runBatch(nullptr, nullptr)) break;
-            done += kBatch;
+            done += g_batch;
         }
         double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         return el > 0 ? done / el : 0.0;
@@ -163,8 +166,8 @@ public:
                 state.found.fetch_add(1, std::memory_order_relaxed);
                 report(fk);
             }
-            state.checked.fetch_add(kBatch, std::memory_order_relaxed);
-            state.gpuChecked.fetch_add(kBatch, std::memory_order_relaxed);
+            state.checked.fetch_add(g_batch, std::memory_order_relaxed);
+            state.gpuChecked.fetch_add(g_batch, std::memory_order_relaxed);
         }
     }
 
@@ -195,7 +198,7 @@ private:
         if (!dictionary_ || dictionary_->words.empty()) { err_ = "字典为空"; return false; }
         builtMont_ = g_montN >= 2 ? g_montN : 1;
         builtKpi_ = builtMont_ >= 2 ? 1 : (g_keysPerItem ? g_keysPerItem : 1);
-        while (kBatch % builtKpi_) --builtKpi_;
+        while (g_batch % builtKpi_) --builtKpi_;
         builtEcw_ = g_ecWindow ? g_ecWindow : 1;
         std::string opts = "-D KPI=" + std::to_string(builtKpi_) +
                            " -D ECW=" + std::to_string(builtEcw_) +
@@ -240,7 +243,7 @@ private:
         uint32_t zero = 0;
         if (!prog_.write(bufCount_, 4, &zero)) return false;
 
-        uint32_t global = builtMont_ >= 2 ? kBatch : kBatch / builtKpi_;
+        uint32_t global = builtMont_ >= 2 ? g_batch : g_batch / builtKpi_;
         size_t local = builtMont_ >= 2 ? builtMont_ : 0;
         if (!prog_.setArg(kProbe_, 0, sizeof(ocl::id), &bufP0_)) return false;
         prog_.setArg(kProbe_, 1, sizeof(ocl::id), &bufTable_);
@@ -387,6 +390,13 @@ std::unique_ptr<Backend> makeGpuBackend(const GpuDevice& dev, std::shared_ptr<co
 int gpuSelfTest(const GpuDevice& dev) { return GpuBackend::selfTest(dev); }
 
 void gpuSetKeysPerItem(uint32_t n) { if (n) g_keysPerItem = n; }
+void gpuSetBatch(uint32_t n) {
+    if (n < 1024) n = 1024;
+    if (n > kMaxBatch) n = kMaxBatch;
+    uint32_t p = 1;
+    while ((p << 1) <= n) p <<= 1;
+    g_batch = p;
+}
 void gpuSetEcWindow(uint32_t w) { if (w >= 1 && w <= 8) g_ecWindow = w; }
 void gpuSetMontN(uint32_t n) { if (n >= 1 && n <= 64) g_montN = n; }
 

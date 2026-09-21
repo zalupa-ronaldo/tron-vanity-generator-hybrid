@@ -30,6 +30,7 @@ int matchtest();
 int gpuSelfTest(const GpuDevice& dev);
 int gpuBench(const GpuDevice& dev, double secs);
 void gpuSetKeysPerItem(uint32_t n);
+void gpuSetBatch(uint32_t n);
 void gpuSetEcWindow(uint32_t w);
 void gpuSetMontN(uint32_t n);
 
@@ -50,6 +51,7 @@ struct Options {
     bool verbose = false;
     bool list = false;
     uint32_t keysPerItem = 1;
+    uint32_t gpuBatch = 0;
     uint32_t ecWindow = 0;
     uint32_t montN = 0;
 };
@@ -63,6 +65,7 @@ void usage() {
         "  --out DIR         output directory; default results\n"
         "  --output FILE     direct JSONL output override\n"
         "  --backend auto|cpu|opencl\n"
+        "  --gpu-batch N     GPU batch size (power of two, 1024..1048576)\n"
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL devices and exit\n"
         "  --verbose         more frequent progress updates\n"
@@ -89,6 +92,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--verbose") o.verbose = true;
             else if (a == "--list") o.list = true;
             else if (a == "--keys-per-item") o.keysPerItem = std::stoul(next(i, "--keys-per-item"));
+            else if (a == "--gpu-batch") o.gpuBatch = std::stoul(next(i, "--gpu-batch"));
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
             else if (a == "--mont-n") o.montN = std::stoul(next(i, "--mont-n"));
             else if (a == "--backend") o.backend = next(i, "--backend");
@@ -192,6 +196,13 @@ int main(int argc, char** argv) {
     auto dictionary = Dictionary::load(opt.words, opt.caseSensitive, &error);
     if (!dictionary) { std::cerr << error << "\n"; return 1; }
     gpuSetKeysPerItem(opt.keysPerItem);
+    if (opt.gpuBatch) {
+        gpuSetBatch(opt.gpuBatch);
+    } else {
+        uint32_t batch = 1u << 16;
+        for (const auto& g : hw.gpus) if (!g.integrated) batch = 1u << 20;
+        gpuSetBatch(batch);
+    }
     gpuSetEcWindow(opt.ecWindow);
     gpuSetMontN(opt.montN);
 

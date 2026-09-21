@@ -28,7 +28,7 @@ constexpr uint32_t kMaxMatches = resident_protocol::kMaxMatches;
 constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
 constexpr uint32_t kResidentEcw = 8;
 constexpr uint32_t kResidentEcbits = 256;
-constexpr uint32_t kResidentKpi = 2;
+constexpr uint32_t kResidentKpi = 4;
 
 uint32_t read32(const unsigned char* p) {
     return static_cast<uint32_t>(p[0]) |

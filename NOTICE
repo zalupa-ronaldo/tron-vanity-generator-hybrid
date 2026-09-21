@@ -6,6 +6,11 @@ This project includes and adapts the OpenCL/TRON GPU architecture from:
 Pinned source commit: 9ebed8558ef33dc6bf1506de7be11c89774fbb0d
 Copyright (c) 2026 Huang Qingbiao. Licensed under the MIT License.
 
+The Metal resident point walk and batch-inversion strategy were inspired by:
+  https://github.com/mrtozner/tron-vanity-metal
+Inspected source commit: dc0bffe22b86e2d5b239d3b889ea5add30b12217
+Copyright (c) 2025 mrtozner. Licensed under the MIT License.
+
 The third_party/secp256k1 submodule is from Bitcoin Core and is licensed
 under the MIT License; see third_party/secp256k1/COPYING.
 

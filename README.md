@@ -14,6 +14,12 @@ The GPU architecture is based on and attributes
 (MIT). The project also bundles Bitcoin Core `libsecp256k1` as an MIT
 submodule; see `NOTICE` and `third_party/secp256k1/COPYING`.
 
+The Metal resident point walk and per-lane batch inversion were inspired by
+[mrtozner/tron-vanity-metal](https://github.com/mrtozner/tron-vanity-metal)
+(MIT). Our kernel keeps GPU-generated starting scalars and checks the full
+dictionary against each Base58 address; benchmark rates from the two projects
+therefore measure different workloads and hardware.
+
 ## What it searches
 
 `--words` supplies a Base58-compatible dictionary. Every address is scanned

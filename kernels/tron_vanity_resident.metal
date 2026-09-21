@@ -21,9 +21,12 @@ typedef struct { fe x, y; int inf; } ge;
 typedef struct { fe x, y, z; int inf; } gej;
 
 inline void fe_set_int(thread fe *r, uint v);
+inline void fe_mul(thread fe *r, thread const fe *a, thread const fe *b);
+inline void fe_inv(thread fe *r, thread const fe *a);
 inline void ge_load_g(thread ge *p, device const uchar *xy);
 inline void gej_add_ge(thread gej *r, thread const gej *a, thread const ge *b);
 inline void gej_to_pub(thread uchar *out, thread gej *a);
+inline void jac_to_pub(thread uchar *pub, thread const fe *X, thread const fe *Y, thread const fe *zi);
 inline void keccak256_64(thread uchar *out, thread const uchar *in);
 inline void sha256_short(thread uchar *out, thread const uchar *msg, int len);
 
@@ -364,11 +367,47 @@ kernel void tron_vanity_resident(
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (base_acc.inf) return;
+
+    // Each lane walks KPI consecutive points. Invert their Z coordinates
+    // together (Montgomery's trick), then check every resulting address.
+    const uint first_offset = lid * KPI;
+    gej acc = base_acc;
+    uint low = first_offset & (ECW_DIGITS - 1);
+    uint high = first_offset >> ECW;
+    if (low) {
+        ge g;
+        ge_load_g(&g, &table_b32[low * 64]);
+        gej_add_ge(&acc, &acc, &g);
+    }
+    if (high) {
+        ge g;
+        ge_load_g(&g, &table_b32[(ECW_DIGITS + high) * 64]);
+        gej_add_ge(&acc, &acc, &g);
+    }
+    ge generator;
+    ge_load_g(&generator, &table_b32[64]);
+    gej points[KPI];
+    fe prefixes[KPI];
+    fe one;
+    fe_set_int(&one, 1);
     for (uint item = 0; item < KPI; ++item) {
-        uint offset = lid * KPI + item;
-        // Reserve the maximum supported 256-lane threadgroup span so group
-        // sequence ranges never overlap even on wider Apple GPU groups.
-        ulong seq = (stream_base + group) * (uint)(KPI * 256) + offset;
+        points[item] = acc;
+        if (points[item].inf) points[item].z = one;
+        if (item == 0) prefixes[item] = points[item].z;
+        else fe_mul(&prefixes[item], &prefixes[item - 1], &points[item].z);
+        if (item + 1 < KPI) gej_add_ge(&acc, &acc, &generator);
+    }
+    fe inverse;
+    fe_inv(&inverse, &prefixes[KPI - 1]);
+    for (int item = KPI - 1; item >= 0; --item) {
+        fe zi;
+        if (item == 0) zi = inverse;
+        else fe_mul(&zi, &inverse, &prefixes[item - 1]);
+        fe_mul(&inverse, &inverse, &points[item].z);
+        if (points[item].inf) continue;
+
+        uint offset = first_offset + (uint)item;
         uchar sk[32], pub[64];
         for (int i = 0; i < 32; ++i) sk[i] = base_sk[i];
         uint carry = offset;
@@ -377,22 +416,10 @@ kernel void tron_vanity_resident(
             sk[i] = (uchar)sum;
             carry = (carry >> 8) + (sum >> 8);
         }
-        if (base_acc.inf) continue;
         if (!resident_lt_order(sk)) continue;
-        gej acc = base_acc;
-        uint low = offset & (ECW_DIGITS - 1);
-        uint high = offset >> ECW;
-        if (low) {
-            ge g;
-            ge_load_g(&g, &table_b32[low * 64]);
-            gej_add_ge(&acc, &acc, &g);
-        }
-        if (high) {
-            ge g;
-            ge_load_g(&g, &table_b32[(ECW_DIGITS + high) * 64]);
-            gej_add_ge(&acc, &acc, &g);
-        }
-        gej_to_pub(pub, &acc);
+        jac_to_pub(pub, &points[item].x, &points[item].y, &zi);
+        // Reserve the maximum 256-lane span so sequence ranges cannot overlap.
+        ulong seq = (stream_base + group) * (uint)(KPI * 256) + offset;
         resident_emit(sk, pub, dfa, out_start, out_len, out_ids, meta, records, cap, seq);
     }
 }

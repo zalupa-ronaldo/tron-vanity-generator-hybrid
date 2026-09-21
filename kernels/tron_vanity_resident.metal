@@ -7,6 +7,12 @@ using namespace metal;
 #ifndef KPI
 #define KPI 32           /* keys per lane; host build prefix overrides this */
 #endif
+#ifndef RESIDENT_PROFILE_STAGE
+#define RESIDENT_PROFILE_STAGE 0
+#endif
+#ifndef RESIDENT_SCALAR_KECCAK
+#define RESIDENT_SCALAR_KECCAK 0
+#endif
 #ifndef ECW
 #define ECW 1
 #endif
@@ -334,6 +340,60 @@ static inline void resident_emit(thread const uchar *sk, thread const uchar *pub
     resident_u64(&dst[140], seq);
 }
 
+#if RESIDENT_PROFILE_STAGE > 0
+/* Diagnostic-only ablation of the *resident* path. The sink keeps each
+ * selected stage observable; these kernels never write wallets or keys. */
+static inline uint resident_profile_emit(thread const uchar *pub,
+                                         device const uint *dfa,
+                                         device const uint *out_start,
+                                         device const uint *out_len,
+                                         device const uint *out_ids) {
+    uint sink = (uint)pub[0] ^ ((uint)pub[31] << 8) ^
+                ((uint)pub[32] << 16) ^ ((uint)pub[63] << 24);
+#if RESIDENT_PROFILE_STAGE >= 2
+    uchar h[32];
+    keccak256_64(h, pub);
+    sink ^= (uint)h[0] ^ ((uint)h[31] << 8);
+#endif
+#if RESIDENT_PROFILE_STAGE >= 3
+    uchar payload[21], d1[32], d2[32];
+    payload[0] = 0x41;
+    for (int i = 0; i < 20; ++i) payload[1 + i] = h[12 + i];
+    sha256_short(d1, payload, 21);
+    sha256_short(d2, d1, 32);
+    sink ^= (uint)d2[0] ^ ((uint)d2[31] << 16);
+#endif
+#if RESIDENT_PROFILE_STAGE >= 4
+    uchar full[25], addr[34];
+    for (int i = 0; i < 21; ++i) full[i] = payload[i];
+    for (int i = 0; i < 4; ++i) full[21 + i] = d2[i];
+    resident_base58_address(addr, full);
+    sink ^= (uint)addr[0] ^ ((uint)addr[33] << 24);
+#endif
+#if RESIDENT_PROFILE_STAGE >= 5
+    uint ids[RESIDENT_MAX_MATCHES];
+    uint count = 0, state = 0, flags = 0;
+    for (int i = 1; i < 34; ++i) {
+        uchar c = addr[i];
+        uint ai = resident_b58_index(c);
+        if (ai >= 58) { state = 0; continue; }
+        state = dfa[state * 58 + ai];
+        uint start = out_start[state], len = out_len[state];
+        for (uint j = 0; j < len; ++j) {
+            uint id = out_ids[start + j], seen = 0;
+            for (uint k = 0; k < count; ++k) if (ids[k] == id) seen = 1;
+            if (!seen) {
+                if (count < RESIDENT_MAX_MATCHES) ids[count++] = id;
+                else flags |= 1U;
+            }
+        }
+    }
+    sink ^= state ^ (count << 16) ^ flags;
+#endif
+    return sink;
+}
+#endif
+
 kernel void tron_vanity_resident(
         device const uchar *seed,
         device const uchar *table_b32,
@@ -389,6 +449,9 @@ kernel void tron_vanity_resident(
     ge_load_g(&generator, &table_b32[64]);
     gej points[KPI];
     fe prefixes[KPI];
+#if RESIDENT_PROFILE_STAGE > 0
+    uint profile_sink = 0;
+#endif
     fe one;
     fe_set_int(&one, 1);
     for (uint item = 0; item < KPI; ++item) {
@@ -418,10 +481,19 @@ kernel void tron_vanity_resident(
         }
         if (!resident_lt_order(sk)) continue;
         jac_to_pub(pub, &points[item].x, &points[item].y, &zi);
+#if RESIDENT_PROFILE_STAGE > 0
+        profile_sink = (profile_sink << 5) | (profile_sink >> 27);
+        profile_sink ^= resident_profile_emit(pub, dfa, out_start, out_len, out_ids);
+#else
         // Reserve the maximum 256-lane span so sequence ranges cannot overlap.
         ulong seq = (stream_base + group) * (uint)(KPI * 256) + offset;
-        resident_emit(sk, pub, dfa, out_start, out_len, out_ids, meta, records, cap, seq);
+        resident_emit(sk, pub, dfa, out_start, out_len, out_ids,
+                      meta, records, cap, seq);
+#endif
     }
+#if RESIDENT_PROFILE_STAGE > 0
+    records[tid.x] = (uchar)profile_sink;
+#endif
 }
 #endif
 
@@ -898,6 +970,101 @@ inline void keccakf(thread ulong *s) {
     }
 }
 
+#if RESIDENT_SCALAR_KECCAK
+/* Same Keccak-f[1600] permutation with named lanes and an in-place Rho/Pi
+ * cycle. This avoids the dynamically indexed c/d/b arrays in keccakf(). */
+inline void keccakf_scalar(thread ulong *s) {
+    ulong a0=s[0], a1=s[1], a2=s[2], a3=s[3], a4=s[4];
+    ulong a5=s[5], a6=s[6], a7=s[7], a8=s[8], a9=s[9];
+    ulong a10=s[10], a11=s[11], a12=s[12], a13=s[13], a14=s[14];
+    ulong a15=s[15], a16=s[16], a17=s[17], a18=s[18], a19=s[19];
+    ulong a20=s[20], a21=s[21], a22=s[22], a23=s[23], a24=s[24];
+    #pragma unroll 1
+    for (int rnd = 0; rnd < 24; ++rnd) {
+        ulong c0=a0^a5^a10^a15^a20, c1=a1^a6^a11^a16^a21;
+        ulong c2=a2^a7^a12^a17^a22, c3=a3^a8^a13^a18^a23;
+        ulong c4=a4^a9^a14^a19^a24;
+        ulong d0=c4^rotl64(c1,1), d1=c0^rotl64(c2,1);
+        ulong d2=c1^rotl64(c3,1), d3=c2^rotl64(c4,1), d4=c3^rotl64(c0,1);
+        a0^=d0; a5^=d0; a10^=d0; a15^=d0; a20^=d0;
+        a1^=d1; a6^=d1; a11^=d1; a16^=d1; a21^=d1;
+        a2^=d2; a7^=d2; a12^=d2; a17^=d2; a22^=d2;
+        a3^=d3; a8^=d3; a13^=d3; a18^=d3; a23^=d3;
+        a4^=d4; a9^=d4; a14^=d4; a19^=d4; a24^=d4;
+
+        ulong t=a1, u;
+        u=a10; a10=rotl64(t,1);  t=u;
+        u=a7;  a7 =rotl64(t,3);  t=u;
+        u=a11; a11=rotl64(t,6);  t=u;
+        u=a17; a17=rotl64(t,10); t=u;
+        u=a18; a18=rotl64(t,15); t=u;
+        u=a3;  a3 =rotl64(t,21); t=u;
+        u=a5;  a5 =rotl64(t,28); t=u;
+        u=a16; a16=rotl64(t,36); t=u;
+        u=a8;  a8 =rotl64(t,45); t=u;
+        u=a21; a21=rotl64(t,55); t=u;
+        u=a24; a24=rotl64(t,2);  t=u;
+        u=a4;  a4 =rotl64(t,14); t=u;
+        u=a15; a15=rotl64(t,27); t=u;
+        u=a23; a23=rotl64(t,41); t=u;
+        u=a19; a19=rotl64(t,56); t=u;
+        u=a13; a13=rotl64(t,8);  t=u;
+        u=a12; a12=rotl64(t,25); t=u;
+        u=a2;  a2 =rotl64(t,43); t=u;
+        u=a20; a20=rotl64(t,62); t=u;
+        u=a14; a14=rotl64(t,18); t=u;
+        u=a22; a22=rotl64(t,39); t=u;
+        u=a9;  a9 =rotl64(t,61); t=u;
+        u=a6;  a6 =rotl64(t,20); t=u;
+        a1=rotl64(t,44);
+
+#define KECCAK_CHI_ROW(x0,x1,x2,x3,x4) do { \
+        ulong b0=(x0), b1=(x1), b2=(x2), b3=(x3), b4=(x4); \
+        (x0)=b0^((~b1)&b2); (x1)=b1^((~b2)&b3); \
+        (x2)=b2^((~b3)&b4); (x3)=b3^((~b4)&b0); \
+        (x4)=b4^((~b0)&b1); \
+    } while (0)
+        KECCAK_CHI_ROW(a0,a1,a2,a3,a4);
+        KECCAK_CHI_ROW(a5,a6,a7,a8,a9);
+        KECCAK_CHI_ROW(a10,a11,a12,a13,a14);
+        KECCAK_CHI_ROW(a15,a16,a17,a18,a19);
+        KECCAK_CHI_ROW(a20,a21,a22,a23,a24);
+#undef KECCAK_CHI_ROW
+        a0 ^= KECCAK_RC[rnd];
+    }
+    s[0]=a0; s[1]=a1; s[2]=a2; s[3]=a3; s[4]=a4;
+    s[5]=a5; s[6]=a6; s[7]=a7; s[8]=a8; s[9]=a9;
+    s[10]=a10; s[11]=a11; s[12]=a12; s[13]=a13; s[14]=a14;
+    s[15]=a15; s[16]=a16; s[17]=a17; s[18]=a18; s[19]=a19;
+    s[20]=a20; s[21]=a21; s[22]=a22; s[23]=a23; s[24]=a24;
+}
+
+/* Deterministic, non-secret validation vectors for the experimental
+ * permutation. The host runs this once before benchmarking or use. */
+kernel void test_keccak_variants(device uint *mismatch,
+                                 uint gid [[thread_position_in_grid]]) {
+    ulong generic_state[25], scalar_state[25];
+    for (int i = 0; i < 25; ++i) generic_state[i] = scalar_state[i] = 0;
+    for (uint i = 0; i < 64; ++i) {
+        uint v = gid * 0x9e3779b9U + i * 0x7f4a7c15U;
+        v ^= v >> 16; v *= 0x85ebca6bU; v ^= v >> 13;
+        uchar byte = gid == 0 ? 0 : (gid == 1 ? (uchar)i : (uchar)v);
+        ulong shifted = (ulong)byte << ((i & 7) * 8);
+        generic_state[i >> 3] ^= shifted;
+        scalar_state[i >> 3] ^= shifted;
+    }
+    generic_state[8] ^= 0x01UL;
+    scalar_state[8] ^= 0x01UL;
+    generic_state[16] ^= 0x8000000000000000UL;
+    scalar_state[16] ^= 0x8000000000000000UL;
+    keccakf(generic_state);
+    keccakf_scalar(scalar_state);
+    uint different = 0;
+    for (int i = 0; i < 25; ++i) different |= generic_state[i] != scalar_state[i];
+    mismatch[gid] = different;
+}
+#endif
+
 /* keccak256 of exactly 64 bytes */
 inline void keccak256_64(thread uchar *out, thread const uchar *in) {
     ulong s[25];
@@ -906,7 +1073,11 @@ inline void keccak256_64(thread uchar *out, thread const uchar *in) {
         s[i >> 3] ^= (ulong)in[i] << ((i & 7) * 8);
     s[8] ^= (ulong)0x01UL << ((64 & 7) * 8);   /* pad at offset 64 -> lane 8, byte 0 */
     s[16] ^= (ulong)0x80UL << 56;              /* rate 136 -> last lane index 16 */
+#if RESIDENT_SCALAR_KECCAK
+    keccakf_scalar(s);
+#else
     keccakf(s);
+#endif
     for (int i = 0; i < 32; i++)
         out[i] = (uchar)(s[i >> 3] >> ((i & 7) * 8));
 }

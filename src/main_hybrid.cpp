@@ -53,6 +53,9 @@ struct Options {
     bool verbose = false;
     bool list = false;
     bool benchResidentOnly = false;
+    bool metalProfileStages = false;
+    int metalProfileStage = -1;
+    bool metalProfileScalarKeccak = true;
     uint32_t keysPerItem = 1;
     uint32_t gpuBatch = 0;
     uint32_t ecWindow = 0;
@@ -86,6 +89,9 @@ void usage() {
         "  --metal-keys-per-lane N Metal point-walk batch: 1, 2, 4, 8, 16, or 32 (default 32)\n"
         "  --bench-seconds N seconds per benchmark method; --bench runs all available methods\n"
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
+        "  --metal-profile-stages  profile the active Metal resident pipeline by stage; no wallets written\n"
+        "  --metal-profile-stage N  profile only stage 0..5 (0 is full resident)\n"
+        "  --metal-profile-indexed-keccak profile the slower indexed reference Keccak\n"
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL devices and exit\n"
         "  --verbose         more frequent progress updates\n"
@@ -122,6 +128,9 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--metal-keys-per-lane") o.metalKeysPerLane = std::stoul(next(i, "--metal-keys-per-lane"));
             else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
             else if (a == "--bench-resident") o.benchResidentOnly = true;
+            else if (a == "--metal-profile-stages") o.metalProfileStages = true;
+            else if (a == "--metal-profile-stage") o.metalProfileStage = std::stoi(next(i, "--metal-profile-stage"));
+            else if (a == "--metal-profile-indexed-keccak") o.metalProfileScalarKeccak = false;
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
             else if (a == "--mont-n") o.montN = std::stoul(next(i, "--mont-n"));
             else if (a == "--backend") o.backend = next(i, "--backend");
@@ -145,6 +154,9 @@ bool parse(int argc, char** argv, Options& o) {
     if (o.metalKeysPerLane == 0 || o.metalKeysPerLane > 32 ||
         (o.metalKeysPerLane & (o.metalKeysPerLane - 1)) != 0) {
         std::cerr << "--metal-keys-per-lane must be 1, 2, 4, 8, 16, or 32\n"; return false;
+    }
+    if (o.metalProfileStage < -1 || o.metalProfileStage > 5) {
+        std::cerr << "--metal-profile-stage must be 0..5\n"; return false;
     }
     return true;
 }
@@ -246,6 +258,42 @@ int main(int argc, char** argv) {
     std::string error;
     auto dictionary = Dictionary::load(opt.words, opt.caseSensitive, &error);
     if (!dictionary) { std::cerr << error << "\n"; return 1; }
+    if (opt.metalProfileStages || opt.metalProfileStage >= 0) {
+#if defined(__APPLE__)
+        if (opt.backend != "auto" && opt.backend != "metal") {
+            std::cerr << "--metal-profile-stages requires --backend metal\n";
+            return 1;
+        }
+        const char* labels[] = {"full resident", "EC + affine", "+ Keccak", "+ SHA256d",
+                                "+ Base58", "+ dictionary"};
+        std::cout << "Metal resident stage profile (throwaway benchmark run; no wallet output)\n"
+                  << "Stage variants are separate compiled kernels; deltas are diagnostic, not exact function timings.\n"
+                  << "stage             wall M/s   GPU M/s   GPU ns/key   GPU busy\n";
+        const uint32_t firstStage = opt.metalProfileStage >= 0 ? static_cast<uint32_t>(opt.metalProfileStage) : 0;
+        const uint32_t lastStage = opt.metalProfileStage >= 0 ? firstStage : 5;
+        for (uint32_t stage = firstStage; stage <= lastStage; ++stage) {
+            MetalProfileResult p = profileMetalResidentStage(dictionary, opt.gpuRng,
+                opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuGroupSize,
+                opt.metalKeysPerLane, stage, opt.benchSeconds, opt.metalProfileScalarKeccak);
+            if (!p.error.empty()) {
+                std::cerr << "Metal profile stage " << stage << " failed: " << p.error << "\n";
+                return 1;
+            }
+            const double wallRate = p.wallSeconds > 0 ? p.keys / p.wallSeconds / 1e6 : 0.0;
+            const double gpuRate = p.gpuSeconds > 0 ? p.keys / p.gpuSeconds / 1e6 : 0.0;
+            const double nsPerKey = p.keys ? p.gpuSeconds / p.keys * 1e9 : 0.0;
+            const double busy = p.wallSeconds > 0 ? p.gpuSeconds / p.wallSeconds * 100.0 : 0.0;
+            std::cout << std::left << std::setw(18) << labels[stage]
+                      << std::right << std::fixed << std::setprecision(2)
+                      << std::setw(9) << wallRate << std::setw(10) << gpuRate
+                      << std::setw(13) << nsPerKey << std::setw(10) << busy << "%\n";
+        }
+        return 0;
+#else
+        std::cerr << "--metal-profile-stages requires macOS\n";
+        return 1;
+#endif
+    }
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--bench" || std::string(argv[i]) == "--bench-resident") {
             const double seconds = opt.benchSeconds;
@@ -301,7 +349,7 @@ int main(int argc, char** argv) {
             if (wantMetal) {
                 for (const auto& rng : rngs) {
                     auto metal = makeMetalResidentBackend(dictionary, rng,
-                                                           opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
+                                                           opt.gpuBufferMiB, opt.gpuChunkMs,
                                                            opt.gpuGroupSize, opt.metalKeysPerLane);
                     if (!metal || !metal->available()) {
                         std::cout << "Metal " << rng << ": unavailable ("
@@ -339,7 +387,7 @@ int main(int argc, char** argv) {
 #endif
     if ((opt.gpuResident || opt.backend == "metal") && (opt.backend == "metal" || autoMetal)) {
         auto metal = makeMetalResidentBackend(dictionary, opt.gpuRng,
-                                              opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
+                                              opt.gpuBufferMiB, opt.gpuChunkMs,
                                               opt.gpuGroupSize, opt.metalKeysPerLane);
         if (metal) backends.push_back(std::move(metal));
     } else if (opt.gpuResident && (opt.backend == "auto" || opt.backend == "opencl")) {

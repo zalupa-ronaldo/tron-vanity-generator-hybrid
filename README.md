@@ -102,7 +102,7 @@ Xcode 26.6's Metal Toolchain:
 sudo xcode-select --switch /Applications/Xcode-26.6.0.app/Contents/Developer
 ./build-macos.sh
 ./build-mac-metal/tron_vanity_generator --backend metal --gpu-resident \
-  --gpu-rng chacha12 --gpu-buffer-mb 128 --gpu-chunk-ms 32 --gpu-poll-ms 50 \
+  --gpu-rng chacha12 --gpu-buffer-mb 128 --gpu-chunk-ms 32 \
   --seconds 60
 ```
 
@@ -119,11 +119,31 @@ benchmark passes). The 32-key mode also passed independent verification of
 121 generated address/key pairs. Rates from upstream prefix-only search are
 not directly comparable to full Base58 dictionary matching.
 
+The Metal path also uses a named-lane Keccak-f[1600] permutation. It keeps the
+25 lanes in scalar variables and performs Rho/Pi as one in-place cycle instead
+of dynamically indexing three temporary arrays. A same-temperature A/B on the
+base M4 measured 27.8 M keys/s versus 23.1 M keys/s for the indexed reference
+permutation (about 20% faster); cold short runs reached 34.3 M keys/s. Startup
+compares both permutations over 1,024 deterministic blocks.
+
+Already-saved dictionary words are removed from the live DFA output tables
+between Metal dispatches. This preserves the existing one-result-per-word
+behavior without sending millions of duplicate short-word records back to the
+CPU. In a sustained test the production path reached 27.1 M keys/s against a
+27.9 M keys/s GPU-only ceiling. An independent run recomputed 142 generated
+addresses from their keys and verified every dictionary match with no duplicate
+words.
+
 ```bash
 ./build-mac-metal/tron_vanity_generator --bench-resident --backend metal \
   --words words.example.txt --bench-seconds 2 --gpu-chunk-ms 100 \
   --gpu-group-size 256 --metal-keys-per-lane 32
 ```
+
+For stage-by-stage diagnosis, use `--metal-profile-stages`; it compiles
+separate EC, Keccak, SHA-256, Base58 and dictionary variants and writes no
+wallet file. `--metal-profile-indexed-keccak` selects the old Keccak only for
+an A/B profile.
 
 Resident work-group size can be tuned per GPU without rebuilding:
 

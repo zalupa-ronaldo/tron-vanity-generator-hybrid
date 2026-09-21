@@ -73,7 +73,7 @@ if(APPLE)
     add_custom_command(
       OUTPUT ${METAL_LIB}
       COMMAND xcrun metal -DRESIDENT=1 -DRESIDENT_RNG=${METAL_RNG_MODE} -DECW=8 -DECBITS=256
-              -DKPI=32 -DMONT_N=1 -c ${METAL_SRC} -o ${METAL_AIR}
+              -DKPI=32 -DRESIDENT_SCALAR_KECCAK=1 -DMONT_N=1 -c ${METAL_SRC} -o ${METAL_AIR}
       COMMAND xcrun metallib ${METAL_AIR} -o ${METAL_LIB}
       DEPENDS ${METAL_SRC}
       VERBATIM)

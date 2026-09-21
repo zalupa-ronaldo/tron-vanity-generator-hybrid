@@ -14,7 +14,6 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <secp256k1.h>
@@ -74,17 +73,17 @@ class MetalResidentBackend final : public Backend {
 public:
     MetalResidentBackend(std::shared_ptr<const Dictionary> dictionary,
                          std::string rng, uint32_t bufferMiB,
-                         uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize,
-                         uint32_t keysPerLane)
+                         uint32_t chunkMs, uint32_t groupSize,
+                         uint32_t keysPerLane, uint32_t profileStage = 0,
+                         bool scalarKeccak = false)
         : dictionary_(std::move(dictionary)), rng_(std::move(rng)),
           bufferMiB_(std::max(8u, bufferMiB)),
           // Keep Metal chunks bounded too: oversized dispatches make the
           // result ring and interactive polling sluggish without improving
           // steady-state throughput on Apple Silicon.
           chunkMs_(std::clamp(chunkMs, 8u, 100u)),
-          pollMs_(std::clamp(pollMs, 10u, 1000u)),
           groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256),
-          keysPerLane_(keysPerLane) {
+          keysPerLane_(keysPerLane), profileStage_(profileStage), scalarKeccak_(scalarKeccak) {
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
         workItems_ = std::clamp((1u << 18) * chunkMs_ / 32u, 1u << 14, 1u << 20);
     }
@@ -105,6 +104,8 @@ public:
         out.lines.push_back("Metal runtime available");
         out.lines.push_back("CSPRNG " + rng_ + ", chunk " + std::to_string(chunkMs_) +
                             " ms, " + std::to_string(keysPerLane_) + " keys/lane");
+        out.lines.push_back(scalarKeccak_ ? "Keccak named-lane permutation"
+                                         : "Keccak indexed reference permutation");
         out.lines.push_back(std::to_string(bufferMiB_) + " MiB device result ring");
         return out;
     }
@@ -121,6 +122,26 @@ public:
         return elapsed > 0 ? generated / elapsed : 0.0;
     }
 
+    MetalProfileResult profile(double seconds) {
+        MetalProfileResult result;
+        if (!ensureReady()) { result.error = error_; return result; }
+        // Exclude shader compilation and first-dispatch warmup from timings.
+        if (!runChunk(nullptr, nullptr, nullptr)) { result.error = error_; return result; }
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds) {
+            double gpuSeconds = 0.0;
+            if (!runChunk(nullptr, nullptr, nullptr, &gpuSeconds)) {
+                result.error = error_;
+                return result;
+            }
+            result.keys += static_cast<uint64_t>(workItems_) * keysPerLane_;
+            result.gpuSeconds += gpuSeconds;
+            ++result.dispatches;
+        }
+        result.wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        return result;
+    }
+
     void run(const RunConfig& cfg, RunState& state, const ReportFn& report) override {
         if (!ensureReady()) {
             std::cerr << "Metal resident unavailable: " << error_ << "\n";
@@ -128,12 +149,12 @@ public:
         }
         while (!state.stop.load(std::memory_order_relaxed)) {
             if (cfg.maxAttempts && state.checked.load() >= cfg.maxAttempts) break;
-            uint32_t produced = 0, overflow = 0;
+            uint32_t overflow = 0;
             ReportFn counted = [&](const FoundKey& key) {
                 state.found.fetch_add(1, std::memory_order_relaxed);
                 report(key);
             };
-            if (!runChunk(&produced, &overflow, counted)) {
+            if (!runChunk(nullptr, &overflow, counted)) {
                 std::cerr << "Metal resident chunk failed: " << error_ << "\n";
                 state.stop.store(true);
                 return;
@@ -145,21 +166,19 @@ public:
                 state.stop.store(true);
                 return;
             }
-            // A completed chunk already polled the ring. Sleep only while it
-            // was empty; productive chunks should immediately keep the GPU fed.
-            if (produced == 0)
-                std::this_thread::sleep_for(std::chrono::milliseconds(pollMs_));
         }
     }
 
 private:
     std::shared_ptr<const Dictionary> dictionary_;
     std::string rng_;
-    uint32_t bufferMiB_, chunkMs_, pollMs_;
+    uint32_t bufferMiB_, chunkMs_;
     uint32_t workItems_ = 1u << 18;
     uint32_t ringSlots_ = 0;
     uint32_t groupSize_ = 256;
     uint32_t keysPerLane_ = 32;
+    uint32_t profileStage_ = 0;
+    bool scalarKeccak_ = false;
     uint64_t streamBase_ = 0;
     uint32_t readPos_ = 0;
     secp256k1_context* context_ = nullptr;
@@ -170,6 +189,7 @@ private:
     id<MTLComputePipelineState> pipeline_ = nil;
     id<MTLBuffer> seed_ = nil, table_ = nil, dfa_ = nil, outStart_ = nil, outLen_ = nil, outIds_ = nil;
     id<MTLBuffer> meta_ = nil, records_ = nil;
+    std::vector<uint32_t> activeWords_;
     std::array<unsigned char, 32> seedBytes_{};
     uint32_t threadWidth_ = 32;
 
@@ -190,13 +210,53 @@ private:
         if (!queue_) { error_ = "cannot create Metal command queue"; return false; }
 
         int mode = rng_ == "philox" ? 2 : (rng_ == "aes-ctr" ? 3 : 1);
-        NSString* prefix = [NSString stringWithFormat:@"#define RESIDENT 1\n#define RESIDENT_RNG %d\n#define ECW %u\n#define ECBITS %u\n#define KPI %u\n#define MONT_N 1\n#define METAL_BACKEND 1\n", mode, kResidentEcw, kResidentEcbits, keysPerLane_];
+        NSString* prefix = [NSString stringWithFormat:@"#define RESIDENT 1\n#define RESIDENT_RNG %d\n#define ECW %u\n#define ECBITS %u\n#define KPI %u\n#define RESIDENT_PROFILE_STAGE %u\n#define RESIDENT_SCALAR_KECCAK %u\n#define MONT_N 1\n#define METAL_BACKEND 1\n", mode, kResidentEcw, kResidentEcbits, keysPerLane_, profileStage_, scalarKeccak_ ? 1u : 0u];
         NSString* source = [prefix stringByAppendingString:[NSString stringWithUTF8String:kMetalKernelSource]];
         NSError* nsError = nil;
         id<MTLLibrary> library = [device_ newLibraryWithSource:source options:nil error:&nsError];
         if (!library) {
             error_ = nsError ? std::string([[nsError localizedDescription] UTF8String]) : "Metal shader compilation failed";
             return false;
+        }
+        if (scalarKeccak_) {
+            id<MTLFunction> validationFunction = [library newFunctionWithName:@"test_keccak_variants"];
+            id<MTLComputePipelineState> validationPipeline = validationFunction
+                ? [device_ newComputePipelineStateWithFunction:validationFunction error:&nsError] : nil;
+            constexpr NSUInteger kValidationCount = 1024;
+            id<MTLBuffer> mismatch = [device_ newBufferWithLength:kValidationCount * sizeof(uint32_t)
+                                                           options:MTLResourceStorageModeShared];
+            if (!validationPipeline || !mismatch) {
+                error_ = nsError ? std::string([[nsError localizedDescription] UTF8String])
+                                 : "Metal scalar Keccak validation setup failed";
+                return false;
+            }
+            std::memset([mismatch contents], 0, kValidationCount * sizeof(uint32_t));
+            id<MTLCommandBuffer> validationCommand = [queue_ commandBuffer];
+            id<MTLComputeCommandEncoder> validationEncoder = [validationCommand computeCommandEncoder];
+            [validationEncoder setComputePipelineState:validationPipeline];
+            [validationEncoder setBuffer:mismatch offset:0 atIndex:0];
+            const NSUInteger width = std::max<NSUInteger>(1, [validationPipeline threadExecutionWidth]);
+            NSUInteger groupWidth = std::min<NSUInteger>(256, [validationPipeline maxTotalThreadsPerThreadgroup]);
+            groupWidth -= groupWidth % width;
+            if (!groupWidth) groupWidth = width;
+            [validationEncoder dispatchThreads:MTLSizeMake(kValidationCount, 1, 1)
+                           threadsPerThreadgroup:MTLSizeMake(groupWidth, 1, 1)];
+            [validationEncoder endEncoding];
+            [validationCommand commit];
+            [validationCommand waitUntilCompleted];
+            if ([validationCommand status] != MTLCommandBufferStatusCompleted) {
+                error_ = validationCommand.error
+                    ? std::string([[validationCommand.error localizedDescription] UTF8String])
+                    : "Metal scalar Keccak validation command failed";
+                return false;
+            }
+            auto* differences = static_cast<const uint32_t*>([mismatch contents]);
+            for (NSUInteger i = 0; i < kValidationCount; ++i) {
+                if (differences[i]) {
+                    error_ = "Metal scalar Keccak disagrees with reference permutation";
+                    return false;
+                }
+            }
         }
         id<MTLFunction> function = [library newFunctionWithName:@"tron_vanity_resident"];
         if (!function) { error_ = "tron_vanity_resident not found in Metal library"; return false; }
@@ -217,10 +277,12 @@ private:
         outStart_ = make(dictionary_->outStart.data(), dictionary_->outStart.size() * sizeof(uint32_t));
         outLen_ = make(dictionary_->outLen.data(), dictionary_->outLen.size() * sizeof(uint32_t));
         outIds_ = make(dictionary_->outIds.data(), dictionary_->outIds.size() * sizeof(uint32_t));
+        activeWords_.assign((dictionary_->words.size() + 31) / 32, 0xffffffffU);
         ringSlots_ = (bufferMiB_ * 1024u * 1024u) / kRecordBytes;
         meta_ = [device_ newBufferWithLength:kMetaWords * sizeof(uint32_t) options:MTLResourceStorageModeShared];
         records_ = [device_ newBufferWithLength:static_cast<size_t>(ringSlots_) * kRecordBytes options:MTLResourceStorageModeShared];
-        if (!seed_ || !table_ || !dfa_ || !outStart_ || !outLen_ || !outIds_ || !meta_ || !records_) {
+        if (!seed_ || !table_ || !dfa_ || !outStart_ || !outLen_ || !outIds_ ||
+            !meta_ || !records_) {
             error_ = "Metal buffer allocation failed"; return false;
         }
         std::memset([meta_ contents], 0, kMetaWords * sizeof(uint32_t));
@@ -228,7 +290,8 @@ private:
         return true;
     }
 
-    bool runChunk(uint32_t* produced, uint32_t* overflow, const ReportFn& report) {
+    bool runChunk(uint32_t* produced, uint32_t* overflow, const ReportFn& report,
+                  double* gpuSeconds = nullptr) {
         id<MTLCommandBuffer> command = [queue_ commandBuffer];
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
         if (!command || !encoder) { error_ = "Metal command encoder creation failed"; return false; }
@@ -253,6 +316,11 @@ private:
             error_ = command.error ? std::string([[command.error localizedDescription] UTF8String]) : "Metal command failed";
             return false;
         }
+        if (gpuSeconds) {
+            const double start = [command GPUStartTime];
+            const double end = [command GPUEndTime];
+            *gpuSeconds = end > start ? end - start : 0.0;
+        }
         auto* meta = static_cast<uint32_t*>([meta_ contents]);
         uint32_t writePos = meta[0];
         uint32_t available = writePos - readPos_;
@@ -260,28 +328,50 @@ private:
         if (produced) *produced = count;
         if (overflow) *overflow = meta[2];
         if (report && count) {
-            std::vector<unsigned char> bytes(static_cast<size_t>(count) * kRecordBytes);
             auto* raw = static_cast<unsigned char*>([records_ contents]);
+            bool outputsChanged = false;
             for (uint32_t i = 0; i < count; ++i) {
                 uint32_t slot = (readPos_ + i) % ringSlots_;
-                std::memcpy(bytes.data() + static_cast<size_t>(i) * kRecordBytes,
-                            raw + static_cast<size_t>(slot) * kRecordBytes, kRecordBytes);
-                const unsigned char* rec = bytes.data() + static_cast<size_t>(i) * kRecordBytes;
+                const unsigned char* rec = raw + static_cast<size_t>(slot) * kRecordBytes;
                 FoundKey key;
-                key.privHex = hexUpper(rec, 32);
-                key.address.assign(reinterpret_cast<const char*>(rec + 32), 34);
                 uint32_t n = std::min(read32(rec + 68), kMaxMatches);
                 for (uint32_t j = 0; j < n; ++j) {
                     uint32_t id = read32(rec + 72 + j * 4);
-                    if (id < dictionary_->words.size()) key.words.push_back(dictionary_->words[id]);
+                    uint32_t mask = 1U << (id & 31);
+                    if (id < dictionary_->words.size() && (activeWords_[id >> 5] & mask)) {
+                        activeWords_[id >> 5] &= ~mask;
+                        outputsChanged = true;
+                        key.words.push_back(dictionary_->words[id]);
+                    }
                 }
-                if (!key.words.empty()) report(key);
+                if (!key.words.empty()) {
+                    key.privHex = hexUpper(rec, 32);
+                    key.address.assign(reinterpret_cast<const char*>(rec + 32), 34);
+                    report(key);
+                }
             }
+            if (outputsChanged) refreshActiveOutputs();
         }
         readPos_ = writePos;
         meta[1] = readPos_;
         streamBase_ += workItems_ / groupSize_;
         return true;
+    }
+
+    void refreshActiveOutputs() {
+        auto* lengths = static_cast<uint32_t*>([outLen_ contents]);
+        auto* ids = static_cast<uint32_t*>([outIds_ contents]);
+        for (size_t state = 0; state < dictionary_->outLen.size(); ++state) {
+            const uint32_t start = dictionary_->outStart[state];
+            const uint32_t originalLength = dictionary_->outLen[state];
+            uint32_t activeLength = 0;
+            for (uint32_t j = 0; j < originalLength; ++j) {
+                const uint32_t id = dictionary_->outIds[start + j];
+                const uint32_t mask = 1U << (id & 31);
+                if (activeWords_[id >> 5] & mask) ids[start + activeLength++] = id;
+            }
+            lengths[state] = activeLength;
+        }
     }
 };
 
@@ -299,10 +389,21 @@ std::string metalDeviceSummary() {
     return device ? std::string([[device name] UTF8String]) : "Metal unavailable";
 }
 
+MetalProfileResult profileMetalResidentStage(
+    std::shared_ptr<const Dictionary> dictionary, const std::string& rng,
+    uint32_t bufferMiB, uint32_t chunkMs, uint32_t groupSize,
+    uint32_t keysPerLane, uint32_t stage, double seconds, bool scalarKeccak) {
+    if (stage > 5 || seconds <= 0.0)
+        return MetalProfileResult{0, 0.0, 0.0, 0, "invalid Metal profile stage or duration"};
+    MetalResidentBackend backend(std::move(dictionary), rng, bufferMiB, chunkMs,
+                                 groupSize, keysPerLane, stage, scalarKeccak);
+    return backend.profile(seconds);
+}
+
 std::unique_ptr<Backend> makeMetalResidentBackend(
     std::shared_ptr<const Dictionary> dictionary, const std::string& rng,
-    uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize,
-    uint32_t keysPerLane) {
+    uint32_t bufferMiB, uint32_t chunkMs, uint32_t groupSize,
+    uint32_t keysPerLane, bool scalarKeccak) {
     return std::make_unique<MetalResidentBackend>(std::move(dictionary), rng, bufferMiB, chunkMs,
-                                                  pollMs, groupSize, keysPerLane);
+                                                  groupSize, keysPerLane, 0, scalarKeccak);
 }

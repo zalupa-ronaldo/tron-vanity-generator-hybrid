@@ -7,23 +7,29 @@
 #include <vector>
 
 #include "matcher.h"
+#include "dictionary.h"
 
 struct RunConfig {
     int minLen = 5;
     unsigned int threads = 0;      // 0 = 自动
     uint64_t maxAttempts = 0;      // 0 = 无限
+    uint64_t seconds = 60;         // 0 = until Ctrl+C
     bool verbose = false;
+    std::shared_ptr<const Dictionary> dictionary;
 };
 
 struct FoundKey {
     std::string address;
     std::string privHex;
     MatchResult match;
+    std::vector<std::string> words;
 };
 
 // 全局运行状态（所有 backend 共享）
 struct RunState {
     std::atomic<uint64_t> checked{0};
+    std::atomic<uint64_t> cpuChecked{0};
+    std::atomic<uint64_t> gpuChecked{0};
     std::atomic<uint64_t> found{0};
     std::atomic<bool> stop{false};
 };
@@ -54,4 +60,7 @@ public:
 
 struct GpuDevice;  // hwdetect.h
 std::unique_ptr<Backend> makeCpuBackend();
-std::unique_ptr<Backend> makeGpuBackend(const GpuDevice& dev);
+std::unique_ptr<Backend> makeGpuBackend(const GpuDevice& dev, std::shared_ptr<const Dictionary> dictionary);
+inline std::unique_ptr<Backend> makeGpuBackend(const GpuDevice& dev) {
+    return makeGpuBackend(dev, nullptr);
+}

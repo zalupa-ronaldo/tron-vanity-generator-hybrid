@@ -17,7 +17,9 @@ endif()
 if(STATIC_RUNTIME)
   if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-  else()
+  elseif(MINGW)
+    add_link_options(-static -static-libgcc -static-libstdc++)
+  elseif(UNIX AND NOT APPLE)
     add_link_options(-static -static-libgcc -static-libstdc++)
   endif()
 endif()
@@ -57,6 +59,10 @@ target_link_libraries(tron_vanity_generator PRIVATE secp256k1)
 
 find_package(Threads REQUIRED)
 target_link_libraries(tron_vanity_generator PRIVATE Threads::Threads)
+
+if(WIN32)
+  target_link_libraries(tron_vanity_generator PRIVATE bcrypt)
+endif()
 
 if(MSVC)
   target_compile_options(tron_vanity_generator PRIVATE /EHsc /utf-8

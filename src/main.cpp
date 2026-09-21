@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -42,32 +43,35 @@ void onSigint(int) {
 }
 
 struct Options {
-    int minLen = 5;
+    int minLen = 6;
     unsigned int threads = 0;
     uint64_t maxAttempts = 0;
-    std::string output = "tron_vanity_matches.txt";
-    std::string backend = "auto";   // auto | cpu | gpu
+    uint64_t seconds = 60;
+    std::string words = "words.txt";
+    std::string output = "results";
+    std::string backend = "auto";   // auto | cpu | opencl
     double benchSeconds = 2.0;
     uint32_t keysPerItem = 1;       // GPU: 每 work-item 处理的私钥数
     uint32_t ecWindow = 0;          // GPU: 固定基点窗口位宽（0=用内置默认）
     uint32_t montN = 0;             // GPU: Montgomery 批量求逆 work-group 大小（0=默认）
     bool verbose = false;
     bool listOnly = false;
+    bool caseSensitive = false;
 };
 
 void printUsage() {
     std::cout <<
-        "TRON 靓号地址生成器 (CPU + 集成显卡自动检测)\n"
-        "规则: 地址结尾满足下列任一即命中并保存:\n"
-        "  - >=N 位相同字符, 如 AAAAA\n"
-        "  - >=N 位连续字符(只认升序: 每位 ASCII +1, 且同类别: 全数字/全小写/全大写), 如 12345 / abcde / WXYZ\n"
-        "    不含: 54321(降序) 89123(跨缺失的0) xyzab(z->a回绕) 9abcd(数字跨字母) FGHJ(跳过缺失的I)\n\n"
+        "TRON vanity generator (CPU + AMD/NVIDIA OpenCL)\n"
+        "Ищет слова из dictionary в любой позиции после начальной T.\n\n"
         "用法: tron_vanity_generator [选项]\n"
-        "  --min N          最小匹配位数，默认 5\n"
+        "  --seconds N      длительность, 0=до Ctrl+C\n"
         "  --threads N      CPU 线程数，默认=逻辑核心数\n"
+        "  --words FILE     словарь, default words.txt\n"
+        "  --out DIR        output directory, default results\n"
         "  --max N          最大尝试次数，0=无限(默认)\n"
-        "  --output FILE    结果文件，默认 tron_vanity_matches.txt\n"
-        "  --backend X      auto | cpu | gpu，默认 auto (按压测算力自动选择)\n"
+        "  --output FILE    direct JSONL output override\n"
+        "  --backend X      auto | cpu | opencl，default auto (CPU+GPU)\n"
+        "  --case-sensitive точный регистр\n"
         "  --bench-seconds S 自动选择时每个后端的压测秒数，默认 2\n"
         "  --keys-per-item N GPU 每个 work-item 连续处理的私钥数，默认 1\n"
         "  --ec-window N     GPU 固定基点窗口位宽 (1=逐bit, 2..8=comb)，默认 7\n"
@@ -88,11 +92,14 @@ bool parseArgs(int argc, char** argv, Options& o) {
             if (i + 1 >= argc) { std::cerr << "缺少参数: " << what << "\n"; return ""; }
             return argv[++i];
         };
-        if (a == "--min") o.minLen = std::stoi(next("--min"));
+        if (a == "--seconds") o.seconds = std::stoull(next("--seconds"));
         else if (a == "--threads") o.threads = static_cast<unsigned int>(std::stoul(next("--threads")));
+        else if (a == "--words") o.words = next("--words");
+        else if (a == "--out") o.output = next("--out");
         else if (a == "--max") o.maxAttempts = std::stoull(next("--max"));
         else if (a == "--output") o.output = next("--output");
         else if (a == "--backend") o.backend = next("--backend");
+        else if (a == "--case-sensitive") o.caseSensitive = true;
         else if (a == "--bench-seconds") o.benchSeconds = std::stod(next("--bench-seconds"));
         else if (a == "--keys-per-item") o.keysPerItem = static_cast<uint32_t>(std::stoul(next("--keys-per-item")));
         else if (a == "--ec-window") o.ecWindow = static_cast<uint32_t>(std::stoul(next("--ec-window")));
@@ -102,7 +109,10 @@ bool parseArgs(int argc, char** argv, Options& o) {
         else if (a == "--help" || a == "-h") { printUsage(); return false; }
         else { std::cerr << "未知参数: " << a << "\n"; printUsage(); return false; }
     }
-    if (o.minLen < 2) { std::cerr << "--min 至少为 2\n"; return false; }
+    if (o.backend == "gpu") o.backend = "opencl";
+    if (o.backend != "auto" && o.backend != "cpu" && o.backend != "opencl") {
+        std::cerr << "--backend must be auto, cpu, or opencl\n"; return false;
+    }
     return true;
 }
 
@@ -112,24 +122,30 @@ public:
 
     void operator()(const FoundKey& fk) {
         std::lock_guard<std::mutex> lk(mu_);
-        bool fresh = !std::ifstream(path_).good();
         std::ofstream out(path_, std::ios::app | std::ios::binary);
         if (out.is_open()) {
-            if (fresh) out << "\xEF\xBB\xBF";  // UTF-8 BOM，方便 Windows 记事本识别
-            out << "类型: " << fk.match.kind << " (" << fk.match.runLen << " 位)\n"
-                << "结尾: " << fk.match.tail << "\n"
-                << "地址: " << fk.address << "\n"
-                << "私钥: " << fk.privHex << "\n"
-                << "----------------------------------------\n";
+            out << "{\"address\":\"" << escape(fk.address) << "\",\"words\":[";
+            for (size_t i = 0; i < fk.words.size(); ++i) {
+                if (i) out << ',';
+                out << "\"" << escape(fk.words[i]) << "\"";
+            }
+            out << "],\"private_key\":\"" << escape(fk.privHex) << "\"}\n";
         } else {
             std::cerr << "无法写入 " << path_ << "\n";
         }
-        std::cout << "[命中 #" << (++shown_) << "] " << fk.match.kind << " "
-                  << fk.match.runLen << " 位  结尾=" << fk.match.tail
-                  << "  地址=" << fk.address << "\n";
+        std::cout << "[match #" << (++shown_) << "] " << fk.address
+                  << " words=" << fk.words.size() << "\n";
     }
 
 private:
+    static std::string escape(const std::string& s) {
+        std::string out;
+        for (unsigned char c : s) {
+            if (c == '\\' || c == '"') { out.push_back('\\'); out.push_back(static_cast<char>(c)); }
+            else if (c >= 0x20) out.push_back(static_cast<char>(c));
+        }
+        return out;
+    }
     std::string path_;
     std::mutex mu_;
     uint64_t shown_ = 0;
@@ -220,7 +236,7 @@ void gpuSetKeysPerItem(uint32_t n);
 void gpuSetEcWindow(uint32_t w);
 void gpuSetMontN(uint32_t n);
 
-int main(int argc, char** argv) {
+int legacyMain(int argc, char** argv) {
     consoleInit();
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];

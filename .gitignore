@@ -1,7 +1,16 @@
 # Build output
 build/
+build-*/
 out/
 cmake-build-*/
+build-local/
+
+# Runtime outputs (never publish wallets or logs)
+results/
+*.jsonl
+*.log
+*.pid
+interesting-addresses-*.tsv
 
 # Generated private keys / match results — NEVER commit these
 tron_vanity_matches*.txt

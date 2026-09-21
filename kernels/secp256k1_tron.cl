@@ -14,9 +14,7 @@
  *   pub = X(Q)||Y(Q)  (BE)
  *   h   = keccak256(pub);  payload = 0x41 || h[12:32]
  *   full= payload || sha256d(payload)[0:4]              (25 字节)
- *   取 full 的低位若干个 base58 字符（地址结尾），判定 相同/连续 >= min_len
- *   连续 = 只认升序（每位 ASCII +1）且同类别（全数字/全小写/全大写）
- *   命中则 atomic 写回 s
+ *   将完整 TRON Base58 地址送入扁平 Aho-Corasick DFA；命中则回传 (s, word_id)
  */
 
 typedef struct { uint n[10]; } fe;
@@ -469,7 +467,7 @@ __constant ulong KECCAK_RC[24] = {
 __constant int KECCAK_RHO[25] = {
     0,1,62,28,27, 36,44,6,55,20, 3,10,43,25,39, 41,45,15,21,8, 18,2,61,56,14 };
 
-inline ulong rotl64(ulong x, int n) { return (x << n) | (x >> (64 - n)); }
+inline ulong rotl64(ulong x, int n) { return n == 0 ? x : ((x << n) | (x >> (64 - n))); }
 
 inline void keccakf(ulong *s) {
     for (int rnd = 0; rnd < 24; rnd++) {
@@ -563,6 +561,7 @@ inline void sha256_short(uchar *out, const uchar *msg, int len) {
 /* ---------------- base58 尾部 + 匹配 ---------------- */
 
 #define TAIL 12
+#define ADDR_LEN 34
 
 __constant char B58[58] = {
     '1','2','3','4','5','6','7','8','9',
@@ -589,6 +588,32 @@ inline void base58_tail(uchar *tc, const uchar *full25) {
             rem = acc % 58;
         }
         tc[it] = B58[rem];
+    }
+}
+
+__constant uchar B58_INDEX[128] = {
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,0,1,2,3,4,5,6,7,8,255,255,255,255,255,255,
+    255,9,10,11,12,13,14,15,16,255,17,18,19,20,21,255,
+    22,23,24,25,26,27,28,29,30,31,32,255,255,255,255,255,
+    33,34,35,36,37,38,39,40,41,42,43,255,44,45,46,47,
+    48,49,50,51,52,53,54,55,56,57,255,255,255,255,255,255
+};
+
+inline void base58_address(uchar *addr, const uchar *full25) {
+    uchar num[25];
+    for (int i = 0; i < 25; ++i) num[i] = full25[i];
+    for (int i = 0; i < ADDR_LEN; ++i) addr[i] = '1';
+    for (int it = 0; it < ADDR_LEN; ++it) {
+        uint rem = 0;
+        for (int i = 0; i < 25; ++i) {
+            uint acc = (rem << 8) | num[i];
+            num[i] = acc / 58;
+            rem = acc % 58;
+        }
+        addr[ADDR_LEN - 1 - it] = B58[rem];
     }
 }
 
@@ -630,23 +655,54 @@ inline void pub_to_tail(const uchar *pub, uchar *tp) {
     base58_tail(tp, full);
 }
 
-inline void emit_if_match(const uchar *pub, uint s, uint min_len,
+inline void emit_if_match(const uchar *pub, uint s,
+                          __global const uint *dfa,
+                          __global const uint *out_start,
+                          __global const uint *out_len,
+                          __global const uint *out_ids,
                           volatile __global uint *out_count,
-                          __global uint *out_s, uint out_cap) {
-    uchar tp[TAIL];
-    pub_to_tail(pub, tp);
-    if ((uint)tail_match_len(tp) >= min_len) {
-        uint idx = atomic_inc(out_count);
-        if (idx < out_cap) out_s[idx] = s;
+                          __global uint *out_hits, uint out_cap) {
+    uchar h[32];
+    keccak256_64(h, pub);
+    uchar payload[21];
+    payload[0] = 0x41;
+    for (int i = 0; i < 20; ++i) payload[1 + i] = h[12 + i];
+    uchar d1[32], d2[32];
+    sha256_short(d1, payload, 21);
+    sha256_short(d2, d1, 32);
+    uchar full[25];
+    for (int i = 0; i < 21; ++i) full[i] = payload[i];
+    for (int i = 0; i < 4; ++i) full[21 + i] = d2[i];
+    uchar addr[ADDR_LEN];
+    base58_address(addr, full);
+    uint state = 0;
+    for (int i = 1; i < ADDR_LEN; ++i) {
+        uchar c = addr[i];
+        uint ai = c < 128 ? (uint)B58_INDEX[c] : 255;
+        if (ai >= 58) { state = 0; continue; }
+        state = dfa[state * 58 + ai];
+        uint start = out_start[state];
+        uint len = out_len[state];
+        for (uint j = 0; j < len; ++j) {
+            uint idx = atomic_inc(out_count);
+            if (idx < out_cap) {
+                out_hits[idx * 2] = s;
+                out_hits[idx * 2 + 1] = out_ids[start + j];
+            }
+        }
     }
 }
 
-inline void probe_one(gej *acc, uint s, uint min_len,
+inline void probe_one(gej *acc, uint s,
+                      __global const uint *dfa,
+                      __global const uint *out_start,
+                      __global const uint *out_len,
+                      __global const uint *out_ids,
                       volatile __global uint *out_count,
-                      __global uint *out_s, uint out_cap) {
+                      __global uint *out_hits, uint out_cap) {
     uchar pub[64];
     gej_to_pub(pub, acc);
-    emit_if_match(pub, s, min_len, out_count, out_s, out_cap);
+    emit_if_match(pub, s, dfa, out_start, out_len, out_ids, out_count, out_hits, out_cap);
 }
 
 /* fe <-> __local uint[10] */
@@ -702,9 +758,12 @@ inline void mont_batch_invert(__local uint *zbuf, __local uint *zinv, int lid) {
 __kernel void tron_vanity_probe(
         __global const uchar *P0_b32,
         __global const uchar *table_b32,
-        const uint min_len,
+        __global const uint *dfa,
+        __global const uint *out_start,
+        __global const uint *out_len,
+        __global const uint *out_ids,
         volatile __global uint *out_count,
-        __global uint *out_s,
+        __global uint *out_hits,
         const uint out_cap) {
     uint gid = get_global_id(0);
     uint base = gid * KPI;
@@ -717,7 +776,7 @@ __kernel void tron_vanity_probe(
 
     #pragma unroll 1
     for (uint i = 0; i < KPI; i++) {
-        probe_one(&acc, base + i, min_len, out_count, out_s, out_cap);
+        probe_one(&acc, base + i, dfa, out_start, out_len, out_ids, out_count, out_hits, out_cap);
         gej_add_ge(&acc, &acc, &Gpt);
     }
 }
@@ -728,9 +787,12 @@ __kernel __attribute__((reqd_work_group_size(MONT_N, 1, 1)))
 void tron_vanity_probe(
         __global const uchar *P0_b32,
         __global const uchar *table_b32,
-        const uint min_len,
+        __global const uint *dfa,
+        __global const uint *out_start,
+        __global const uint *out_len,
+        __global const uint *out_ids,
         volatile __global uint *out_count,
-        __global uint *out_s,
+        __global uint *out_hits,
         const uint out_cap) {
     uint gid = get_global_id(0);
     uint lid = get_local_id(0);
@@ -749,7 +811,7 @@ void tron_vanity_probe(
     fe_ld_l(&zi, &zinv[lid * 10]);
     uchar pub[64];
     jac_to_pub(pub, &acc.x, &acc.y, &zi);
-    emit_if_match(pub, s, min_len, out_count, out_s, out_cap);
+    emit_if_match(pub, s, dfa, out_start, out_len, out_ids, out_count, out_hits, out_cap);
 }
 
 #endif

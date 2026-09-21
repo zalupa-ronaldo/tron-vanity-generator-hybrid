@@ -2,7 +2,7 @@
 #include <cstdint>
 
 static inline uint64_t rotl64(uint64_t x, int n) {
-    return (x << n) | (x >> (64 - n));
+    return n == 0 ? x : ((x << n) | (x >> (64 - n)));
 }
 
 static const uint64_t kRC[24] = {

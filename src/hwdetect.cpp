@@ -5,7 +5,7 @@
 #include <iostream>
 #include <thread>
 
-#if defined(__GNUC__)
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
 #  include <cpuid.h>
 #elif defined(_MSC_VER)
 #  include <intrin.h>

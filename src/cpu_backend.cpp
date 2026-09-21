@@ -71,9 +71,10 @@ uint64_t threadLoop(const RunConfig& cfg, RunState* state, const ReportFn* repor
         if (c.next(xy)) {
             std::string addr = tronAddressFromPubXY(xy);
             if (report) {
-                MatchResult m = evaluateAddress(addr, cfg.minLen);
-                if (m.matched) {
-                    FoundKey fk{addr, c.privHex(), std::move(m)};
+                std::vector<std::string> words = cfg.dictionary ? cfg.dictionary->matchWords(addr) : std::vector<std::string>{};
+                MatchResult m = cfg.dictionary ? MatchResult{} : evaluateAddress(addr, cfg.minLen);
+                if (!words.empty() || m.matched) {
+                    FoundKey fk{addr, c.privHex(), std::move(m), std::move(words)};
                     state->found.fetch_add(1, std::memory_order_relaxed);
                     (*report)(fk);
                 }
@@ -81,7 +82,10 @@ uint64_t threadLoop(const RunConfig& cfg, RunState* state, const ReportFn* repor
             (void)addr;
         }
         ++local;
-        if (countGlobal) state->checked.fetch_add(1, std::memory_order_relaxed);
+        if (countGlobal) {
+            state->checked.fetch_add(1, std::memory_order_relaxed);
+            state->cpuChecked.fetch_add(1, std::memory_order_relaxed);
+        }
     }
     return local;
 }

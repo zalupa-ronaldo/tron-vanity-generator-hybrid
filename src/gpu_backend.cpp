@@ -25,7 +25,7 @@ namespace {
 constexpr uint32_t kBatch = 1u << 16;
 constexpr uint32_t kEcBits = 20;        // 固定基点标量乘覆盖的位数；> log2(kBatch) 也没问题，
                                         // 只是表里高位窗口永远用不到，不影响正确性
-constexpr uint32_t kOutCap = 8192;      // 单批命中回传上限
+constexpr uint32_t kOutCap = 65536;     // 单批命中回传上限（每项两个 uint）
 
 // 每个 work-item 连续处理多少私钥。UHD 730 上实测 N=1 最快（寄存器压力 + 每个私钥仍需一次
 // 模逆，未做 Montgomery 批量求逆）。保留可调，供不同 GPU 找甜点位。
@@ -80,9 +80,20 @@ std::vector<unsigned char> genTable(secp256k1_context* c, uint32_t ecw) {
     return t;
 }
 
+std::shared_ptr<const Dictionary> emptyDictionary() {
+    auto d = std::make_shared<Dictionary>();
+    d->words = {"__benchmark__"};
+    d->dfa.assign(Dictionary::Alphabet, 0);
+    d->outStart = {0};
+    d->outLen = {0};
+    return d;
+}
+
 class GpuBackend : public Backend {
 public:
-    explicit GpuBackend(GpuDevice hw) : hw_(std::move(hw)) {
+    explicit GpuBackend(GpuDevice hw) : GpuBackend(std::move(hw), emptyDictionary()) {}
+    explicit GpuBackend(GpuDevice hw, std::shared_ptr<const Dictionary> dictionary)
+        : hw_(std::move(hw)), dictionary_(std::move(dictionary)) {
         ctx_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     }
 
@@ -114,7 +125,7 @@ public:
         auto start = std::chrono::steady_clock::now();
         uint64_t done = 0;
         while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds) {
-            if (!runBatch(minLen, nullptr, nullptr)) break;
+            if (!runBatch(nullptr, nullptr)) break;
             done += kBatch;
         }
         double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -127,11 +138,13 @@ public:
             if (cfg.maxAttempts && state.checked.load() >= cfg.maxAttempts) { state.stop = true; break; }
             std::vector<uint32_t> hits;
             unsigned char k0[32];
-            if (!runBatch(static_cast<uint32_t>(cfg.minLen), &hits, k0)) {
+            if (!runBatch(&hits, k0)) {
                 std::cerr << "GPU 批次执行失败\n";
                 return;
             }
-            for (uint32_t s : hits) {
+            for (size_t hi = 0; hi + 1 < hits.size(); hi += 2) {
+                uint32_t s = hits[hi];
+                uint32_t wordId = hits[hi + 1];
                 unsigned char k[32];
                 std::memcpy(k, k0, 32);
                 unsigned char tw[32];
@@ -140,13 +153,15 @@ public:
                 unsigned char pub[64];
                 if (!pubXY(ctx_, k, pub)) continue;
                 std::string addr = tronAddressFromPubXY(pub);
-                MatchResult m = evaluateAddress(addr, cfg.minLen);
-                if (!m.matched) continue;   // GPU 误报，丢弃
-                FoundKey fk{addr, bytesToHexUpper(k, 32), std::move(m)};
+                auto words = dictionary_->matchWords(addr);
+                if (wordId >= dictionary_->words.size() || words.empty()) continue;
+                MatchResult m{};
+                FoundKey fk{addr, bytesToHexUpper(k, 32), std::move(m), std::move(words)};
                 state.found.fetch_add(1, std::memory_order_relaxed);
                 report(fk);
             }
             state.checked.fetch_add(kBatch, std::memory_order_relaxed);
+            state.gpuChecked.fetch_add(kBatch, std::memory_order_relaxed);
         }
     }
 
@@ -155,13 +170,15 @@ public:
 
 private:
     GpuDevice hw_;
+    std::shared_ptr<const Dictionary> dictionary_;
     secp256k1_context* ctx_ = nullptr;
     bool tried_ = false, ready_ = false;
     std::string err_;
 
     ocl::Program prog_;
     ocl::id kProbe_ = nullptr;
-    ocl::id bufTable_ = nullptr, bufP0_ = nullptr, bufCount_ = nullptr, bufOutS_ = nullptr;
+    ocl::id bufTable_ = nullptr, bufP0_ = nullptr, bufCount_ = nullptr, bufOutHits_ = nullptr;
+    ocl::id bufDfa_ = nullptr, bufOutStart_ = nullptr, bufOutLen_ = nullptr, bufOutIds_ = nullptr;
     std::vector<unsigned char> table_;
     uint32_t builtKpi_ = 1;
     uint32_t builtEcw_ = 1;
@@ -172,6 +189,7 @@ private:
         tried_ = true;
         if (!ocl::load(&err_)) return false;
         if (!hw_.deviceId) { err_ = "无 OpenCL 设备句柄"; return false; }
+        if (!dictionary_ || dictionary_->words.empty()) { err_ = "字典为空"; return false; }
         builtMont_ = g_montN >= 2 ? g_montN : 1;
         builtKpi_ = builtMont_ >= 2 ? 1 : (g_keysPerItem ? g_keysPerItem : 1);
         while (kBatch % builtKpi_) --builtKpi_;
@@ -187,16 +205,28 @@ private:
         table_ = genTable(ctx_, builtEcw_);
         bufTable_ = prog_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, table_.size(), table_.data(), &err_);
         bufP0_ = prog_.buffer(ocl::MEM_READ_ONLY, 64, nullptr, &err_);
+        bufDfa_ = prog_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
+                               dictionary_->dfa.size() * sizeof(uint32_t),
+                               const_cast<uint32_t*>(dictionary_->dfa.data()), &err_);
+        bufOutStart_ = prog_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
+                                    dictionary_->outStart.size() * sizeof(uint32_t),
+                                    const_cast<uint32_t*>(dictionary_->outStart.data()), &err_);
+        bufOutLen_ = prog_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
+                                  dictionary_->outLen.size() * sizeof(uint32_t),
+                                  const_cast<uint32_t*>(dictionary_->outLen.data()), &err_);
+        bufOutIds_ = prog_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
+                                  dictionary_->outIds.size() * sizeof(uint32_t),
+                                  const_cast<uint32_t*>(dictionary_->outIds.data()), &err_);
         bufCount_ = prog_.buffer(ocl::MEM_READ_WRITE, 4, nullptr, &err_);
-        bufOutS_ = prog_.buffer(ocl::MEM_WRITE_ONLY, kOutCap * 4, nullptr, &err_);
-        if (!bufTable_ || !bufP0_ || !bufCount_ || !bufOutS_) return false;
+        bufOutHits_ = prog_.buffer(ocl::MEM_WRITE_ONLY, kOutCap * 2 * 4, nullptr, &err_);
+        if (!bufTable_ || !bufP0_ || !bufCount_ || !bufOutHits_ || !bufDfa_ || !bufOutStart_ || !bufOutLen_ || !bufOutIds_) return false;
 
         ready_ = true;
         return true;
     }
 
     // 跑一批：随机基私钥 k0，扫描 k0+[0,kBatch)。命中的 s 写入 outHits（可空）。
-    bool runBatch(uint32_t minLen, std::vector<uint32_t>* outHits, unsigned char outK0[32]) {
+    bool runBatch(std::vector<uint32_t>* outHits, unsigned char outK0[32]) {
         unsigned char k0[32], p0[64];
         do {
             if (!randBytes(k0, 32)) return false;
@@ -211,11 +241,14 @@ private:
         size_t local = builtMont_ >= 2 ? builtMont_ : 0;
         if (!prog_.setArg(kProbe_, 0, sizeof(ocl::id), &bufP0_)) return false;
         prog_.setArg(kProbe_, 1, sizeof(ocl::id), &bufTable_);
-        prog_.setArg(kProbe_, 2, sizeof(uint32_t), &minLen);
-        prog_.setArg(kProbe_, 3, sizeof(ocl::id), &bufCount_);
-        prog_.setArg(kProbe_, 4, sizeof(ocl::id), &bufOutS_);
+        prog_.setArg(kProbe_, 2, sizeof(ocl::id), &bufDfa_);
+        prog_.setArg(kProbe_, 3, sizeof(ocl::id), &bufOutStart_);
+        prog_.setArg(kProbe_, 4, sizeof(ocl::id), &bufOutLen_);
+        prog_.setArg(kProbe_, 5, sizeof(ocl::id), &bufOutIds_);
+        prog_.setArg(kProbe_, 6, sizeof(ocl::id), &bufCount_);
+        prog_.setArg(kProbe_, 7, sizeof(ocl::id), &bufOutHits_);
         uint32_t cap = kOutCap;
-        prog_.setArg(kProbe_, 5, sizeof(uint32_t), &cap);
+        prog_.setArg(kProbe_, 8, sizeof(uint32_t), &cap);
 
         if (!prog_.run1D(kProbe_, global, local, &err_)) return false;
         if (!prog_.finish()) return false;
@@ -224,8 +257,8 @@ private:
             uint32_t cnt = 0;
             prog_.read(bufCount_, 4, &cnt);
             if (cnt > kOutCap) cnt = kOutCap;
-            outHits->resize(cnt);
-            if (cnt) prog_.read(bufOutS_, cnt * 4, outHits->data());
+            outHits->resize(cnt * 2);
+            if (cnt) prog_.read(bufOutHits_, cnt * 2 * 4, outHits->data());
         }
         return true;
     }
@@ -344,8 +377,8 @@ int GpuBackend::selfTest(const GpuDevice& hw) {
 
 }  // namespace
 
-std::unique_ptr<Backend> makeGpuBackend(const GpuDevice& dev) {
-    return std::make_unique<GpuBackend>(dev);
+std::unique_ptr<Backend> makeGpuBackend(const GpuDevice& dev, std::shared_ptr<const Dictionary> dictionary) {
+    return std::make_unique<GpuBackend>(dev, std::move(dictionary));
 }
 
 int gpuSelfTest(const GpuDevice& dev) { return GpuBackend::selfTest(dev); }

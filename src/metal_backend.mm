@@ -138,7 +138,10 @@ public:
                 state.stop.store(true);
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(pollMs_));
+            // A completed chunk already polled the ring. Sleep only while it
+            // was empty; productive chunks should immediately keep the GPU fed.
+            if (produced == 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(pollMs_));
         }
     }
 

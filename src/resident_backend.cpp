@@ -141,7 +141,11 @@ public:
             }
             auto now = std::chrono::steady_clock::now();
             auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPoll).count();
-            if (elapsedMs < pollMs_) std::this_thread::sleep_for(std::chrono::milliseconds(pollMs_ - elapsedMs));
+            // runChunk already synchronizes and polls the metadata. Do not add
+            // an unconditional delay after a productive chunk: that throttles
+            // high-match dictionaries and can waste a large fraction of GPU time.
+            if (produced == 0 && elapsedMs < pollMs_)
+                std::this_thread::sleep_for(std::chrono::milliseconds(pollMs_ - elapsedMs));
             lastPoll = std::chrono::steady_clock::now();
         }
     }

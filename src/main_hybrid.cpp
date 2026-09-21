@@ -52,6 +52,7 @@ struct Options {
     bool caseSensitive = false;
     bool verbose = false;
     bool list = false;
+    bool benchResidentOnly = false;
     uint32_t keysPerItem = 1;
     uint32_t gpuBatch = 0;
     uint32_t ecWindow = 0;
@@ -82,6 +83,7 @@ void usage() {
         "  --gpu-poll-ms N   result polling interval, default 50\n"
         "  --gpu-group-size N resident work-group size: 64, 128, or 256 (default 256)\n"
         "  --bench-seconds N seconds per benchmark method; --bench runs all available methods\n"
+        "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL devices and exit\n"
         "  --verbose         more frequent progress updates\n"
@@ -116,6 +118,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--gpu-poll-ms") o.gpuPollMs = std::stoul(next(i, "--gpu-poll-ms"));
             else if (a == "--gpu-group-size") o.gpuGroupSize = std::stoul(next(i, "--gpu-group-size"));
             else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
+            else if (a == "--bench-resident") o.benchResidentOnly = true;
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
             else if (a == "--mont-n") o.montN = std::stoul(next(i, "--mont-n"));
             else if (a == "--backend") o.backend = next(i, "--backend");
@@ -237,16 +240,18 @@ int main(int argc, char** argv) {
     auto dictionary = Dictionary::load(opt.words, opt.caseSensitive, &error);
     if (!dictionary) { std::cerr << error << "\n"; return 1; }
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--bench") {
+        if (std::string(argv[i]) == "--bench" || std::string(argv[i]) == "--bench-resident") {
             const double seconds = opt.benchSeconds;
             const bool all = opt.backend == "auto";
-            const bool wantCpu = all || opt.backend == "cpu";
+            const bool wantCpu = !opt.benchResidentOnly && (all || opt.backend == "cpu");
             const bool wantOpencl = all || opt.backend == "opencl";
             const bool wantMetal = all || opt.backend == "metal";
             const std::vector<std::string> rngs = {"chacha12", "aes-ctr", "philox"};
-            std::cout << "\n=== Full benchmark matrix (" << seconds << " s per method) ===\n"
-                      << "CPU + legacy OpenCL tuning + resident OpenCL/Metal RNGs\n"
-                      << "No wallet output is written by --bench.\n\n"
+            std::cout << "\n=== " << (opt.benchResidentOnly ? "Resident GPU benchmark" : "Full benchmark matrix")
+                      << " (" << seconds << " s per method) ===\n"
+                      << (opt.benchResidentOnly ? "Resident OpenCL/Metal RNGs; legacy tuning skipped\n"
+                                                 : "CPU + legacy OpenCL tuning + resident OpenCL/Metal RNGs\n")
+                      << "No wallet output is written by benchmark mode.\n\n"
                       << std::left << std::setw(38) << "method"
                       << std::right << std::setw(16) << "throughput" << "\n"
                       << std::string(56, '-') << "\n";
@@ -259,7 +264,7 @@ int main(int argc, char** argv) {
             }
 
             if (wantOpencl && !hw.gpus.empty()) {
-                for (const auto& g : hw.gpus) {
+                if (!opt.benchResidentOnly) for (const auto& g : hw.gpus) {
                     std::cout << "\n[legacy OpenCL tuning] " << g.name << "\n";
                     double r = gpuBench(g, seconds);
                     std::cout << std::left << std::setw(38) << ("legacy OpenCL best / " + g.name)

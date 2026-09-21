@@ -124,6 +124,15 @@ restricts the matrix to that backend. The legacy OpenCL section also scans
 EC window, Montgomery batch size, keys-per-item, match length and GPU batch
 size.
 
+On Windows, use `--bench-resident` to skip the legacy tuning matrix and go
+straight to the resident OpenCL RNG comparison (recommended for a quick
+9070 XT check):
+
+```powershell
+.\tron_vanity_generator.exe --backend opencl --bench-resident `
+  --words words.txt --bench-seconds 15 --gpu-chunk-ms 100 --gpu-poll-ms 1000
+```
+
 Use `--bench-seconds` to control the timed duration of each row (default 1
 second; the legacy tuning matrix has additional warm-up passes):
 

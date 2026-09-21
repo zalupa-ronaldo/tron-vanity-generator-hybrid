@@ -78,6 +78,9 @@ public:
                          uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize)
         : dictionary_(std::move(dictionary)), rng_(std::move(rng)),
           bufferMiB_(std::max(8u, bufferMiB)),
+          // Keep Metal chunks bounded too: oversized dispatches make the
+          // result ring and interactive polling sluggish without improving
+          // steady-state throughput on Apple Silicon.
           chunkMs_(std::clamp(chunkMs, 8u, 100u)),
           pollMs_(std::clamp(pollMs, 10u, 1000u)),
           groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256) {

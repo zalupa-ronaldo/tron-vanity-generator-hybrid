@@ -61,6 +61,7 @@ struct Options {
     uint32_t gpuBufferMiB = 128;
     uint32_t gpuChunkMs = 32;
     uint32_t gpuPollMs = 50;
+    double benchSeconds = 1.0;
 };
 
 void usage() {
@@ -78,6 +79,7 @@ void usage() {
         "  --gpu-buffer-mb N device result ring size, default 128\n"
         "  --gpu-chunk-ms N  bounded GPU chunk target, default 32\n"
         "  --gpu-poll-ms N   result polling interval, default 50\n"
+        "  --bench-seconds N seconds per benchmark method; --bench runs all available methods\n"
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL devices and exit\n"
         "  --verbose         more frequent progress updates\n"
@@ -110,6 +112,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--gpu-buffer-mb") o.gpuBufferMiB = std::stoul(next(i, "--gpu-buffer-mb"));
             else if (a == "--gpu-chunk-ms") o.gpuChunkMs = std::stoul(next(i, "--gpu-chunk-ms"));
             else if (a == "--gpu-poll-ms") o.gpuPollMs = std::stoul(next(i, "--gpu-poll-ms"));
+            else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
             else if (a == "--mont-n") o.montN = std::stoul(next(i, "--mont-n"));
             else if (a == "--backend") o.backend = next(i, "--backend");
@@ -123,6 +126,9 @@ bool parse(int argc, char** argv, Options& o) {
     if (o.backend == "gpu") o.backend = "opencl";
     if (o.backend != "auto" && o.backend != "cpu" && o.backend != "opencl" && o.backend != "metal") {
         std::cerr << "backend must be auto, cpu, opencl, or metal\n"; return false;
+    }
+    if (o.benchSeconds <= 0) {
+        std::cerr << "--bench-seconds must be positive\n"; return false;
     }
     return true;
 }
@@ -214,33 +220,74 @@ int main(int argc, char** argv) {
     if (!dictionary) { std::cerr << error << "\n"; return 1; }
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--bench") {
-            bool metalMode = opt.backend == "metal" ||
-#if defined(__APPLE__)
-                (opt.backend == "auto");
-#else
-                false;
-#endif
-            if (metalMode) {
-                auto resident = makeMetalResidentBackend(dictionary, opt.gpuRng,
-                                                         opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
-                if (!resident || !resident->available()) {
-                    std::cerr << "Metal resident unavailable: "
-                              << (resident ? resident->note() : "Metal backend not built") << "\n";
-                    return 1;
+            const double seconds = opt.benchSeconds;
+            const bool all = opt.backend == "auto";
+            const bool wantCpu = all || opt.backend == "cpu";
+            const bool wantOpencl = all || opt.backend == "opencl";
+            const bool wantMetal = all || opt.backend == "metal";
+            const std::vector<std::string> rngs = {"chacha12", "aes-ctr", "philox"};
+            std::cout << "\n=== Full benchmark matrix (" << seconds << " s per method) ===\n"
+                      << "CPU + legacy OpenCL tuning + resident OpenCL/Metal RNGs\n"
+                      << "No wallet output is written by --bench.\n\n"
+                      << std::left << std::setw(30) << "method"
+                      << std::right << std::setw(16) << "keys/s" << "\n"
+                      << std::string(48, '-') << "\n";
+
+            if (wantCpu) {
+                auto cpu = makeCpuBackend();
+                double r = cpu->benchmark(seconds);
+                std::cout << std::left << std::setw(30) << "CPU (all host threads)"
+                          << std::right << std::setw(16) << std::fixed << std::setprecision(0) << r << "\n";
+            }
+
+            if (wantOpencl && !hw.gpus.empty()) {
+                for (const auto& g : hw.gpus) {
+                    std::cout << "\n[legacy OpenCL tuning] " << g.name << "\n";
+                    double r = gpuBench(g, seconds);
+                    std::cout << std::left << std::setw(30) << ("legacy OpenCL best / " + g.name)
+                              << std::right << std::setw(16) << std::fixed << std::setprecision(0)
+                              << r << "\n";
                 }
-                std::cout << "Metal-resident benchmark: " << resident->benchmark(5.0) << " keys/s\n";
-                return 0;
+                for (const auto& g : hw.gpus) {
+                    for (const auto& rng : rngs) {
+                        auto resident = makeResidentGpuBackend(g, dictionary, rng,
+                                                               opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
+                        if (!resident || !resident->available()) {
+                            std::cout << "resident OpenCL " << rng << " / " << g.name
+                                      << ": unavailable (" << (resident ? resident->note() : "not built") << ")\n";
+                            continue;
+                        }
+                        double r = resident->benchmark(seconds);
+                        std::cout << std::left << std::setw(30)
+                                  << ("resident OpenCL " + rng + " / " + g.name)
+                                  << std::right << std::setw(16) << std::fixed << std::setprecision(0)
+                                  << r << "\n";
+                    }
+                }
+            } else if (wantOpencl) {
+                std::cout << "OpenCL: unavailable (" << hw.openclNote << ")\n";
             }
-            if (hw.gpus.empty()) { std::cerr << "no OpenCL GPU: " << hw.openclNote << "\n"; return 1; }
-            if (!opt.gpuResident) return gpuBench(hw.gpus.front(), 5.0);
-            auto resident = makeResidentGpuBackend(hw.gpus.front(), dictionary, opt.gpuRng,
-                                                   opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
-            if (!resident->available()) {
-                std::cerr << "GPU resident unavailable: " << resident->note() << "\n";
-                return 1;
+
+#if defined(__APPLE__)
+            if (wantMetal) {
+                for (const auto& rng : rngs) {
+                    auto metal = makeMetalResidentBackend(dictionary, rng,
+                                                           opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs);
+                    if (!metal || !metal->available()) {
+                        std::cout << "Metal " << rng << ": unavailable ("
+                                  << (metal ? metal->note() : "not built") << ")\n";
+                        continue;
+                    }
+                    double r = metal->benchmark(seconds);
+                    std::cout << std::left << std::setw(30) << ("Metal resident " + rng)
+                              << std::right << std::setw(16) << std::fixed << std::setprecision(0)
+                              << r << "\n";
+                }
             }
-            std::cout << "GPU-resident benchmark: " << resident->name() << "\n";
-            std::cout << "  " << resident->benchmark(5.0) << " keys/s\n";
+#else
+            if (wantMetal) std::cout << "Metal: unavailable (not an Apple build)\n";
+#endif
+            std::cout << "\nBenchmark complete. Use --bench-seconds N to adjust each row.\n";
             return 0;
         }
     }

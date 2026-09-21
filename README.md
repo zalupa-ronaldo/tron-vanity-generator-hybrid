@@ -104,6 +104,27 @@ The MSL kernel is compiled and linked as a Metal library during the macOS
 build. The current release keeps Metal opt-in; `--backend auto` will select it
 after the cross-validation acceptance run.
 
+### Full benchmark matrix
+
+`--bench` compares every backend available on the current machine. With
+`--backend auto` it runs the CPU worker, the legacy OpenCL tuning matrix,
+resident OpenCL for `chacha12`, `aes-ctr` and `philox`, and resident Metal for
+the same three RNGs on Apple Silicon. Explicit `--backend cpu|opencl|metal`
+restricts the matrix to that backend. The legacy OpenCL section also scans
+EC window, Montgomery batch size, keys-per-item, match length and GPU batch
+size.
+
+Use `--bench-seconds` to control the timed duration of each row (default 1
+second; the legacy tuning matrix has additional warm-up passes):
+
+```bash
+./build-mac-metal/tron_vanity_generator --bench --backend auto \
+  --words words.example.txt --bench-seconds 1
+```
+
+The benchmark never writes wallet JSONL or private keys. It reports
+unavailable backends and continues with the methods that the machine supports.
+
 ## Results and security
 
 Runtime output is JSONL with `address`, `words` and `private_key`. Private

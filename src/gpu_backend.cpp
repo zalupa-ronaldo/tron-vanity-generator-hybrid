@@ -5,6 +5,8 @@
 #include "rng.h"
 
 #include <chrono>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -503,7 +505,7 @@ int gpuBench(const GpuDevice& dev, double secs) {
     std::cout << "\n每档预热 " << secs << "s + 计时 " << secs
               << "s（集成显卡持续负载会降频，取稳态值）\n";
 
-    uint32_t savedKpi = g_keysPerItem, savedEcw = g_ecWindow, savedMont = g_montN;
+    uint32_t savedKpi = g_keysPerItem, savedEcw = g_ecWindow, savedMont = g_montN, savedBatch = g_batch;
 
     std::cout << "\n== 固定基点 EC 窗口法扫描（KPI=1，min_len=20）==\n";
     std::cout << "  ECW=1 逐bit(baseline)；ECW=w 用 comb 表，点加从 ~10 降到 ceil(20/w)\n";
@@ -548,6 +550,7 @@ int gpuBench(const GpuDevice& dev, double secs) {
 
     std::cout << "\n== keys-per-item 扫描 (ECW=" << bestEcw << ", MONT_N=1) ==\n";
     g_montN = 1;
+    double bestAll = std::max({bestR, bestMontR});
     for (uint32_t n : {1u, 2u, 4u, 8u}) {
         g_keysPerItem = n;
         GpuBackend b(dev);
@@ -555,6 +558,7 @@ int gpuBench(const GpuDevice& dev, double secs) {
         b.benchN(secs, 20);
         double r = b.benchN(secs, 20);
         std::printf("  N=%-3u : %10.0f keys/s\n", n, r);
+        bestAll = std::max(bestAll, r);
     }
     g_keysPerItem = 1;
 
@@ -566,10 +570,28 @@ int gpuBench(const GpuDevice& dev, double secs) {
     for (uint32_t ml : {5u, 6u, 7u, 8u}) {
         double r = b.benchN(secs, ml);
         std::printf("  相同/连续 >= %u 位 : %10.0f keys/s\n", ml, r);
+        bestAll = std::max(bestAll, r);
+    }
+
+    std::cout << "\n== GPU batch size 扫描 (ECW=" << bestEcw << ", KPI=1, MONT_N=1) ==\n";
+    g_ecWindow = bestEcw;
+    g_keysPerItem = 1;
+    g_montN = 1;
+    for (uint32_t batch : {1u << 14, 1u << 16, 1u << 18, 1u << 20}) {
+        g_batch = batch;
+        GpuBackend batchBackend(dev);
+        if (!batchBackend.available()) continue;
+        batchBackend.benchN(secs, 20);
+        double r = batchBackend.benchN(secs, 20);
+        std::printf("  batch=2^%u (%u) : %10.0f keys/s\n",
+                    static_cast<unsigned>(std::log2(batch)), batch, r);
+        bestAll = std::max(bestAll, r);
     }
 
     g_keysPerItem = savedKpi;
     g_ecWindow = savedEcw;
     g_montN = savedMont;
-    return 0;
+    g_batch = savedBatch;
+    std::printf("  legacy OpenCL best: %.0f keys/s\n", bestAll);
+    return static_cast<int>(bestAll);
 }

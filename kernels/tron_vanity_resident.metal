@@ -257,19 +257,23 @@ static inline uint resident_b58_index(uchar c) {
 
 static inline void resident_base58_address(thread uchar *addr, thread const uchar *full25) {
     const char b58[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    uchar num[25];
-    for (int i = 0; i < 25; ++i) num[i] = full25[i];
+    // Big-endian base-65536 limbs: 13 limbs instead of 25 byte divisions.
+    // The first limb is one byte because the payload is 25 bytes long.
+    ushort num[13];
+    num[0] = full25[0];
+    for (int i = 1; i < 13; ++i)
+        num[i] = ((ushort)full25[1 + (i - 1) * 2] << 8) | full25[2 + (i - 1) * 2];
     for (int i = 0; i < 34; ++i) addr[i] = '1';
     int start = 0;
     for (int it = 0; it < 34; ++it) {
         uint rem = 0;
-        for (int i = start; i < 25; ++i) {
-            uint acc = (rem << 8) | num[i];
-            num[i] = acc / 58;
+        for (int i = start; i < 13; ++i) {
+            uint acc = (rem << 16) | num[i];
+            num[i] = (ushort)(acc / 58);
             rem = acc % 58;
         }
         addr[33 - it] = (uchar)b58[rem];
-        while (start < 25 && num[start] == 0) ++start;
+        while (start < 13 && num[start] == 0) ++start;
     }
 }
 

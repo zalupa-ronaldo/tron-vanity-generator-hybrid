@@ -26,6 +26,7 @@ constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
 constexpr uint32_t kResidentEcbits = 256;
 constexpr uint32_t kResidentEcw = 8;
 constexpr uint32_t kResidentKpi = 2;
+constexpr uint32_t kResidentLocalSize = 64;
 
 std::vector<unsigned char> genResidentTable(secp256k1_context* c) {
     const uint32_t digits = 1u << kResidentEcw;
@@ -236,7 +237,7 @@ private:
 
     bool runChunk(uint32_t* produced, uint32_t* overflow, const ReportFn& report) {
         if (!bindKernel()) { error_ = "setting resident kernel arguments failed"; return false; }
-        if (!program_.run1D(kernel_, workItems_, 0, &error_) || !program_.finish()) return false;
+        if (!program_.run1D(kernel_, workItems_, kResidentLocalSize, &error_) || !program_.finish()) return false;
         std::array<uint32_t, kMetaWords> meta{};
         if (!program_.read(meta_, sizeof(meta), meta.data())) { error_ = "reading resident metadata failed"; return false; }
         const uint32_t writePos = meta[0];
@@ -267,7 +268,7 @@ private:
         }
         readPos_ = writePos;
         if (!program_.writeAt(meta_, sizeof(uint32_t), sizeof(uint32_t), &readPos_)) return false;
-        streamBase_ += static_cast<uint64_t>(workItems_) * kResidentKpi;
+        streamBase_ += workItems_ / kResidentLocalSize;
         return true;
     }
 };

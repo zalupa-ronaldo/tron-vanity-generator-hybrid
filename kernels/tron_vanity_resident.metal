@@ -341,17 +341,51 @@ kernel void tron_vanity_resident(
         volatile device uint *meta,
         device uchar *records,
         constant uint& cap,
-        constant ulong& stream_base, uint3 tid [[thread_position_in_grid]]) {
-    uint gid = tid.x;
+        constant ulong& stream_base,
+        uint3 tid [[thread_position_in_grid]],
+        uint3 tgid [[threadgroup_position_in_grid]],
+        uint3 tlid [[thread_position_in_threadgroup]]) {
+    uint lid = tlid.x;
+    uint group = tgid.x;
+    threadgroup uchar base_sk[32];
+    threadgroup gej base_acc;
+    if (lid == 0) {
+        uchar base_private[32];
+        resident_rng32(seed, stream_base + group, base_private);
+        for (int i = 0; i < 32; ++i) base_sk[i] = base_private[i];
+        if (resident_lt_order(base_private)) {
+            gej base_tmp;
+            resident_ec_mul(&base_tmp, base_private, table_b32);
+            base_acc = base_tmp;
+        }
+        else {
+            for (int i = 0; i < 32; ++i) base_sk[i] = 0;
+            base_acc.inf = 1;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint item = 0; item < KPI; ++item) {
-        ulong seq = stream_base + (ulong)gid * KPI + item;
-        uchar random32[32], sk[32], pub[64];
-        resident_rng32(seed, seq, random32);
-        for (int i = 0; i < 32; ++i) sk[i] = random32[i];
+        uint offset = lid * KPI + item;
+        // Reserve the maximum supported 64-lane threadgroup span so group
+        // sequence ranges never overlap even on wider Apple GPU groups.
+        ulong seq = (stream_base + group) * (uint)(KPI * 64) + offset;
+        uchar sk[32], pub[64];
+        for (int i = 0; i < 32; ++i) sk[i] = base_sk[i];
+        uint carry = offset;
+        for (int i = 31; i >= 0 && carry; --i) {
+            uint sum = sk[i] + (carry & 255U);
+            sk[i] = (uchar)sum;
+            carry = (carry >> 8) + (sum >> 8);
+        }
         resident_atomic_add((volatile device uint*)&meta[4], 1U);
+        if (base_acc.inf) continue;
         if (!resident_lt_order(sk)) continue;
-        gej acc;
-        resident_ec_mul(&acc, sk, table_b32);
+        gej acc = base_acc;
+        if (offset) {
+            ge g;
+            ge_load_g(&g, &table_b32[offset * 64]);
+            gej_add_ge(&acc, &acc, &g);
+        }
         gej_to_pub(pub, &acc);
         resident_emit(sk, pub, dfa, out_start, out_len, out_ids, meta, records, cap, seq);
     }

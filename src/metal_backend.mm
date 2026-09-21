@@ -163,6 +163,7 @@ private:
     id<MTLBuffer> seed_ = nil, table_ = nil, dfa_ = nil, outStart_ = nil, outLen_ = nil, outIds_ = nil;
     id<MTLBuffer> meta_ = nil, records_ = nil;
     std::array<unsigned char, 32> seedBytes_{};
+    uint32_t threadWidth_ = 32;
 
     bool ensureReady() {
         if (tried_) return ready_;
@@ -196,6 +197,7 @@ private:
             error_ = nsError ? std::string([[nsError localizedDescription] UTF8String]) : "Metal pipeline creation failed";
             return false;
         }
+        threadWidth_ = static_cast<uint32_t>(std::max<NSUInteger>(1, [pipeline_ threadExecutionWidth]));
         if (!randBytes(seedBytes_.data(), seedBytes_.size())) { error_ = "OS CSPRNG seed failed"; return false; }
         auto table = genTable(context_);
         auto make = [&](const void* p, size_t n) -> id<MTLBuffer> {
@@ -267,7 +269,7 @@ private:
         }
         readPos_ = writePos;
         meta[1] = readPos_;
-        streamBase_ += static_cast<uint64_t>(workItems_) * kResidentKpi;
+        streamBase_ += workItems_ / threadWidth_;
         return true;
     }
 };

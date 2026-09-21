@@ -86,6 +86,9 @@ std::shared_ptr<const Dictionary> emptyDictionary() {
     d->dfa.assign(Dictionary::Alphabet, 0);
     d->outStart = {0};
     d->outLen = {0};
+    // OpenCL forbids zero-byte buffers. The benchmark never emits matches,
+    // but still needs a valid placeholder for the kernel argument.
+    d->outIds = {0};
     return d;
 }
 

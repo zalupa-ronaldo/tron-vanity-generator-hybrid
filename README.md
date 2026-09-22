@@ -4,7 +4,7 @@
 [![Build](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml/badge.svg)](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Hybrid TRON vanity-address generator with OpenCL on Windows, native CUDA on
+Hybrid TRON vanity-address generator with OpenCL on Windows/Linux/macOS, native CUDA on
 Windows/Linux, and native Metal on Apple Silicon. The Windows release embeds
 CUDA PTX: NVIDIA users need a compatible driver, without installing the CUDA
 Toolkit. AMD GPUs use OpenCL.
@@ -72,7 +72,8 @@ Useful checks:
 ```
 
 If OpenCL is unavailable, `--backend opencl` falls back to CPU. `auto` uses
-CPU plus every available OpenCL GPU. CUDA is explicitly selected with
+CPU plus every available OpenCL GPU on Windows/Linux. On macOS, OpenCL is
+explicitly selected; the existing Metal/CPU defaults are unchanged. CUDA is selected with
 `--backend cuda`; it does not run alongside OpenCL on the same NVIDIA GPU.
 
 Discrete GPUs default to a larger `2^20` GPU batch to reduce command-queue
@@ -88,8 +89,10 @@ libsecp256k1, uploads 64 bytes, and the GPU scans the consecutive range. This
 96-byte round trip and one CPU point multiplication are amortized over the
 whole chunk; after that, the CPU receives only complete matches for independent
 secp256k1/address verification and local JSONL writing. Keeping the full
-256-bit fixed-base multiplication out of OpenCL avoids an observed Windows
-RDNA4 compiler hang. Chunks remain bounded to avoid Windows WDDM timeouts:
+256-bit fixed-base multiplication out of OpenCL reduces compiler load, but
+some Windows RDNA4 drivers still stall while compiling the scan. See the
+compact compiler mode and bounded diagnostic launcher below. OpenCL dispatch
+size adapts toward the requested chunk time; this is not a hard WDDM timeout guarantee:
 
 ```powershell
 .\build\tron_vanity_generator.exe --backend opencl --gpu-resident `
@@ -184,7 +187,8 @@ Resident work-group size can be tuned per GPU without rebuilding:
 ```
 
 Supported values are `64`, `128` and `256`; `256` is the default. If a driver
-reports a compile or launch failure, retry with `128`.
+reports a work-group launch limit, retry with `128` or `64`. This does not
+change the OpenCL compilation path or fix a compiler hang.
 
 Resident startup prints the lightweight RNG/scan compilation, 32-bit offset
 table upload, ring allocation and GPU-CSPRNG/CPU-expansion validation stages
@@ -201,6 +205,72 @@ regular OpenCL path remains available:
   --gpu-batch 1048576 --seconds 60
 ```
 
+### OpenCL startup and optimization diagnostics
+
+The resident path now defaults to `--opencl-compiler compact`: heavy EC
+functions are outlined and the inversion squaring loops are not unrolled.
+The arithmetic and rejection sampling are unchanged. This reduces compiler
+code expansion; **an AMD RX 9070 XT has not yet verified the change**, so it
+is not a confirmed fix for every driver hang. `--opencl-compiler default`
+retains the inlining-oriented alternative for comparison.
+
+`--opencl-inverse pair` uses one field inversion plus three multiplies for
+the two Jacobian points in a work-item, instead of two inversions. It avoids
+work-group barriers and large point arrays; infinity is masked out of the
+product so it cannot corrupt its neighbor. `single` remains the conservative
+default until target-GPU measurements establish the register/throughput tradeoff.
+These options affect resident OpenCL only, not legacy OpenCL, Metal or CUDA.
+
+On Windows, extract the release to a new folder (preserve your own `words.txt`)
+and double-click **`test-opencl.cmd`**, or run it from CMD. It runs the compact
+paired self-test and then a five-second profile. The PowerShell launcher prints
+elapsed time and stops only its own child after 120 seconds if compilation or
+execution stalls. It never writes wallets or prints private keys. The limit is
+per child process and applies only to this diagnostic launcher, not normal search.
+To test the single-inversion reference, run `test-opencl.cmd -Inverse single`.
+
+Manual CMD commands (one command per line):
+
+```bat
+tron_vanity_generator.exe --backend opencl --gpu-resident --opencl-inverse pair --gputest
+tron_vanity_generator.exe --backend opencl --opencl-profile --opencl-inverse single --words words.txt --bench-seconds 5
+tron_vanity_generator.exe --backend opencl --opencl-profile --opencl-inverse pair --words words.txt --bench-seconds 5
+```
+
+The GPU self-test independently verifies 1,024 address/key pairs against
+libsecp256k1. Only after it passes, run a short real search:
+
+```bat
+tron_vanity_generator.exe --backend opencl --gpu-resident --opencl-inverse pair --words words.txt --seconds 60
+```
+
+The profile reports full wall throughput, base-point preparation, scan/wait
+time, remaining host/metadata time, and driver event timestamps. It exercises
+full secp256k1/Keccak/SHA256d/Base58/dictionary math, but excludes CPU match
+verification and wallet output. **Compare wall speed, not kernel-only speed**:
+event timing excludes queueing and transfers and is driver-reported. Initial
+OpenCL work size is 16,384 threads and adapts in work-group multiples, with
+growth capped at 2x per dispatch. Printed private-memory bytes are an OpenCL
+query, not a count of AMD VGPRs or a measurement of spills.
+
+Local checks passed on Apple M4 OpenCL for single/pair inversion and all three
+RNGs; the exact shared kernel also has CPU oracle/boundary tests. A short,
+contended M4 run using 358 words measured 2.66 M/s single versus 4.32 M/s pair,
+with paired repeats near 4.0 M/s. The production Metal worker was left running:
+these are preliminary wall timings, **not an AMD result or an isolated benchmark**.
+Linux CI additionally executes the OpenCL kernels with PoCL on CPU; Windows CI
+builds the binary but does not have an AMD GPU. No RX 9070 XT speed is claimed.
+
+OpenCL objects now have explicit ownership and are released between benchmark
+variants (previously contexts/programs/buffers were kept until process exit).
+The loader also supports Linux and macOS so the actual OpenCL path can be tested
+without substituting Metal. On Linux, install your vendor's OpenCL ICD/runtime;
+normal device selection never treats a CPU-only OpenCL ICD as a GPU.
+
+References: [Khronos event profiling](https://registry.khronos.org/OpenCL/specs/unified/refpages/man/html/clGetEventProfilingInfo.html),
+[kernel resource queries](https://registry.khronos.org/OpenCL/specs/unified/refpages/man/html/clGetKernelWorkGroupInfo.html),
+and [AMD occupancy/register tradeoffs](https://gpuopen.com/learn/occupancy-explained/).
+
 ### Full benchmark matrix
 
 `--bench` compares every backend available on the current machine. With
@@ -212,8 +282,8 @@ EC window, Montgomery batch size, keys-per-item, match length and GPU batch
 size.
 
 On Windows, use `--bench-resident` to skip the legacy tuning matrix and go
-straight to the resident OpenCL RNG comparison (recommended for a quick
-9070 XT check):
+straight to the resident OpenCL RNG comparison. For a 9070 XT that stalls at
+startup, use `test-opencl.cmd` first instead of compiling all three variants:
 
 ```powershell
 .\tron_vanity_generator.exe --backend opencl --bench-resident `

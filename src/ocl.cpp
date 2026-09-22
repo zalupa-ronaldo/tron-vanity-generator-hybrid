@@ -1,10 +1,16 @@
 #include "ocl.h"
 
 #include <cstring>
+#include <algorithm>
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
 #  include <windows.h>
+#else
+#  include <dlfcn.h>
 #endif
 
 namespace ocl {
@@ -32,6 +38,13 @@ cl_int (*pEnqueueReadBuffer)(id, id, cl_uint, size_t, size_t, void*, cl_uint, co
 cl_int (*pEnqueueWriteBuffer)(id, id, cl_uint, size_t, size_t, const void*, cl_uint, const void*, void*);
 cl_int (*pFinish)(id);
 cl_int (*pReleaseMemObject)(id);
+cl_int (*pReleaseKernel)(id);
+cl_int (*pReleaseProgram)(id);
+cl_int (*pReleaseCommandQueue)(id);
+cl_int (*pReleaseContext)(id);
+cl_int (*pReleaseEvent)(id);
+cl_int (*pGetEventProfilingInfo)(id, cl_uint, size_t, void*, size_t*);
+cl_int (*pGetKernelWorkGroupInfo)(id, id, cl_uint, size_t, void*, size_t*);
 
 bool g_loaded = false;
 
@@ -61,10 +74,19 @@ bool loaded() { return g_loaded; }
 bool load(std::string* err) {
     if (g_loaded) return true;
 #if defined(_WIN32)
-    HMODULE lib = LoadLibraryA("OpenCL.dll");
+    HMODULE lib = LoadLibraryExW(L"OpenCL.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!lib) { if (err) *err = "未找到 OpenCL.dll（安装最新 Intel/AMD 显卡驱动）"; return false; }
     auto G = [&](const char* n) { return reinterpret_cast<void*>(GetProcAddress(lib, n)); };
-    #define LD(var, name) *reinterpret_cast<void**>(&var) = G(name); if (!var) { if (err) *err = std::string("OpenCL.dll 缺少 ") + name; return false; }
+#else
+#if defined(__APPLE__)
+    void* lib = dlopen("/System/Library/Frameworks/OpenCL.framework/OpenCL", RTLD_NOW | RTLD_LOCAL);
+#else
+    void* lib = dlopen("libOpenCL.so.1", RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (!lib) { if (err) *err = "OpenCL runtime not found"; return false; }
+    auto G = [&](const char* n) { return dlsym(lib, n); };
+#endif
+    #define LD(var, name) var = reinterpret_cast<decltype(var)>(G(name)); if (!var) { if (err) *err = std::string("OpenCL missing ") + name; return false; }
     LD(pGetPlatformIDs, "clGetPlatformIDs");
     LD(pGetPlatformInfo, "clGetPlatformInfo");
     LD(pGetDeviceIDs, "clGetDeviceIDs");
@@ -82,16 +104,19 @@ bool load(std::string* err) {
     LD(pEnqueueWriteBuffer, "clEnqueueWriteBuffer");
     LD(pFinish, "clFinish");
     LD(pReleaseMemObject, "clReleaseMemObject");
+    LD(pReleaseKernel, "clReleaseKernel");
+    LD(pReleaseProgram, "clReleaseProgram");
+    LD(pReleaseCommandQueue, "clReleaseCommandQueue");
+    LD(pReleaseContext, "clReleaseContext");
+    LD(pReleaseEvent, "clReleaseEvent");
+    LD(pGetEventProfilingInfo, "clGetEventProfilingInfo");
+    LD(pGetKernelWorkGroupInfo, "clGetKernelWorkGroupInfo");
     #undef LD
     g_loaded = true;
     return true;
-#else
-    if (err) *err = "OpenCL backend is currently supported on Windows only";
-    return false;
-#endif
 }
 
-std::vector<DeviceInfo> enumerateGpus() {
+static std::vector<DeviceInfo> enumerateDevices(unsigned long long type) {
     std::vector<DeviceInfo> out;
     if (!g_loaded) return out;
     cl_uint np = 0;
@@ -100,9 +125,9 @@ std::vector<DeviceInfo> enumerateGpus() {
     pGetPlatformIDs(np, plats.data(), nullptr);
     for (id p : plats) {
         cl_uint nd = 0;
-        if (pGetDeviceIDs(p, DEVICE_TYPE_GPU, 0, nullptr, &nd) != 0 || nd == 0) continue;
+        if (pGetDeviceIDs(p, type, 0, nullptr, &nd) != 0 || nd == 0) continue;
         std::vector<id> devs(nd);
-        pGetDeviceIDs(p, DEVICE_TYPE_GPU, nd, devs.data(), nullptr);
+        pGetDeviceIDs(p, type, nd, devs.data(), nullptr);
         for (id d : devs) {
             DeviceInfo di;
             di.platform = p;
@@ -123,14 +148,19 @@ std::vector<DeviceInfo> enumerateGpus() {
     return out;
 }
 
+std::vector<DeviceInfo> enumerateGpus() { return enumerateDevices(DEVICE_TYPE_GPU); }
+std::vector<DeviceInfo> enumerateTestDevices() { return enumerateDevices(0xffffffffULL); }
+
 bool Program::build(id platform, id device, const std::string& source,
-                    const std::string& opts, std::string* err) {
+                    const std::string& opts, std::string* err, bool profiling) {
     (void)platform;
+    if (ctx_ || !load(err)) return false;
+    profiling_ = profiling;
     cl_int e = 0;
     device_ = device;
     ctx_ = pCreateContext(nullptr, 1, &device, nullptr, nullptr, &e);
     if (!ctx_ || e != 0) { if (err) *err = "clCreateContext 失败 " + std::to_string(e); return false; }
-    queue_ = pCreateCommandQueue(ctx_, device, 0, &e);
+    queue_ = pCreateCommandQueue(ctx_, device, profiling ? 2ULL : 0ULL, &e);
     if (!queue_ || e != 0) { if (err) *err = "clCreateCommandQueue 失败 " + std::to_string(e); return false; }
     const char* src = source.c_str();
     size_t len = source.size();
@@ -141,18 +171,28 @@ bool Program::build(id platform, id device, const std::string& source,
         std::vector<char> log(65536);
         size_t n = 0;
         pGetProgramBuildInfo(program_, device, PROGRAM_BUILD_LOG, log.size(), log.data(), &n);
+        n = std::min(n, log.size());
         if (err) *err = "内核编译失败:\n" + std::string(log.data(), n ? n - 1 : 0);
         return false;
     }
     return true;
 }
 
-Program::~Program() {}  // 进程退出时由 OS 回收；不做细粒度释放
+Program::~Program() {
+    if (queue_) pFinish(queue_);
+    if (lastEvent_) pReleaseEvent(lastEvent_);
+    for (id k : kernels_) pReleaseKernel(k);
+    for (id b : buffers_) pReleaseMemObject(b);
+    if (program_) pReleaseProgram(program_);
+    if (queue_) pReleaseCommandQueue(queue_);
+    if (ctx_) pReleaseContext(ctx_);
+}
 
 id Program::kernel(const char* name, std::string* err) {
     cl_int e = 0;
     id k = pCreateKernel(program_, name, &e);
     if (!k || e != 0) { if (err) *err = std::string("clCreateKernel(") + name + ") 失败 " + std::to_string(e); return nullptr; }
+    kernels_.push_back(k);
     return k;
 }
 
@@ -160,6 +200,7 @@ id Program::buffer(unsigned long long flags, size_t bytes, void* host, std::stri
     cl_int e = 0;
     id b = pCreateBuffer(ctx_, flags, bytes, host, &e);
     if (!b || e != 0) { if (err) *err = "clCreateBuffer 失败 " + std::to_string(e); return nullptr; }
+    buffers_.push_back(b);
     return b;
 }
 
@@ -168,8 +209,10 @@ bool Program::setArg(id k, unsigned idx, size_t sz, const void* val) {
 }
 
 bool Program::run1D(id k, size_t global, size_t local, std::string* err) {
+    if (lastEvent_) { pReleaseEvent(lastEvent_); lastEvent_ = nullptr; }
     const size_t* lp = local ? &local : nullptr;
-    cl_int e = pEnqueueNDRangeKernel(queue_, k, 1, nullptr, &global, lp, 0, nullptr, nullptr);
+    cl_int e = pEnqueueNDRangeKernel(queue_, k, 1, nullptr, &global, lp, 0, nullptr,
+                                   profiling_ ? &lastEvent_ : nullptr);
     if (e != 0) { if (err) *err = "clEnqueueNDRangeKernel 失败 " + std::to_string(e); return false; }
     return true;
 }
@@ -187,6 +230,24 @@ bool Program::writeAt(id buf, size_t offset, size_t bytes, const void* src) {
     return pEnqueueWriteBuffer(queue_, buf, TRUE_, offset, bytes, src, 0, nullptr, nullptr) == 0;
 }
 bool Program::finish() { return pFinish(queue_) == 0; }
-void Program::release(id mem) { if (mem) pReleaseMemObject(mem); }
+void Program::release(id mem) {
+    auto it = std::find(buffers_.begin(), buffers_.end(), mem);
+    if (it != buffers_.end()) { pReleaseMemObject(mem); buffers_.erase(it); }
+}
+
+bool Program::lastKernelMilliseconds(double& ms) const {
+    unsigned long long start = 0, end = 0;
+    if (!lastEvent_ || pGetEventProfilingInfo(lastEvent_, 0x1282, sizeof(start), &start, nullptr) ||
+        pGetEventProfilingInfo(lastEvent_, 0x1283, sizeof(end), &end, nullptr) || end <= start) return false;
+    ms = static_cast<double>(end - start) / 1e6;
+    return true;
+}
+
+bool Program::kernelLimits(id kernel, size_t& maxGroup, size_t& preferredMultiple,
+                           unsigned long long& privateBytes) const {
+    return pGetKernelWorkGroupInfo(kernel, device_, 0x11B0, sizeof(maxGroup), &maxGroup, nullptr) == 0 &&
+           pGetKernelWorkGroupInfo(kernel, device_, 0x11B3, sizeof(preferredMultiple), &preferredMultiple, nullptr) == 0 &&
+           pGetKernelWorkGroupInfo(kernel, device_, 0x11B4, sizeof(privateBytes), &privateBytes, nullptr) == 0;
+}
 
 }  // namespace ocl

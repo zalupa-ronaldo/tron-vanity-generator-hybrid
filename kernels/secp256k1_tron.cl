@@ -18,11 +18,24 @@ typedef struct { uint n[10]; } fe;
 typedef struct { fe x, y; int inf; } ge;
 typedef struct { fe x, y, z; int inf; } gej;
 
+#if defined(OPENCL_COMPACT) && OPENCL_COMPACT && !defined(CUDA_BACKEND)
+/* Avoid duplicating the large EC/inversion body at every call site. Kept
+ * opt-out for drivers on which outlined functions reduce throughput. */
+#define EC_HEAVY __attribute__((noinline))
+#define EC_LOOP _Pragma("unroll 1")
+#else
+#define EC_HEAVY inline
+#define EC_LOOP
+#endif
+
 inline void fe_set_int(fe *r, uint v);
 inline void ge_load_g(ge *p, __global const uchar *xy);
-inline void gej_add_ge(gej *r, const gej *a, const ge *b);
+EC_HEAVY void gej_add_ge(gej *r, const gej *a, const ge *b);
 inline void gej_from_ge(gej *r, const ge *a);
 inline void gej_to_pub(uchar *out, gej *a);
+inline void gej_to_pub_zi(uchar *out, const gej *a, const fe *zi);
+inline void fe_mul(fe *r, const fe *a, const fe *b);
+EC_HEAVY void fe_inv(fe *r, const fe *a);
 inline void keccak256_64(uchar *out, const uchar *in);
 inline void sha256_short(uchar *out, const uchar *msg, int len);
 
@@ -38,6 +51,12 @@ inline void sha256_short(uchar *out, const uchar *msg, int len);
 #define RESIDENT_MAX_MATCHES 16
 #ifndef RESIDENT_RNG
 #define RESIDENT_RNG 1
+#endif
+#ifndef RESIDENT_PAIR_INVERSE
+#define RESIDENT_PAIR_INVERSE 0
+#endif
+#if RESIDENT_PAIR_INVERSE && KPI != 2
+#error Pair inversion requires KPI=2
 #endif
 
 #ifdef METAL_BACKEND
@@ -385,15 +404,38 @@ __kernel void tron_vanity_resident_probe(
     gej acc;
     resident_add_offset(&acc, base_pub, table_b32, first_offset);
 
+#if RESIDENT_PAIR_INVERSE
+    /* Montgomery's trick for two points: 1 inversion + 3 multiplies,
+     * instead of 2 inversions. No work-group barriers or large arrays.
+     * An infinity must not zero the product and corrupt the other point. */
+    gej next;
+    gej_add_ge(&next, &acc, &generator);
+    fe z0 = acc.z, z1 = next.z, product, inverse, zi0, zi1;
+    if (acc.inf) fe_set_int(&z0, 1);
+    if (next.inf) fe_set_int(&z1, 1);
+    fe_mul(&product, &z0, &z1);
+    fe_inv(&inverse, &product);
+    fe_mul(&zi0, &inverse, &z1);
+    fe_mul(&zi1, &inverse, &z0);
+#endif
+    #pragma unroll 1
     for (uint item = 0; item < KPI; ++item) {
         uint offset = first_offset + item;
         uchar sk[32], pub[64];
         if (resident_key_with_offset(base_sk, offset, sk)) {
+#if RESIDENT_PAIR_INVERSE
+            gej_to_pub_zi(pub, &acc, item == 0 ? &zi0 : &zi1);
+#else
             gej_to_pub(pub, &acc);
+#endif
             resident_emit(sk, pub, dfa, out_start, out_len, out_ids,
                           meta, records, cap, sequence_base + offset);
         }
+#if RESIDENT_PAIR_INVERSE
+        acc = next;
+#else
         if (item + 1 < KPI) gej_add_ge(&acc, &acc, &generator);
+#endif
     }
 }
 #endif
@@ -705,31 +747,35 @@ inline void fe_get_b32(uchar *r, const fe *a) {
     wbe32(&r[28], (a->n[1] << 26) | a->n[0]);
 }
 
+EC_HEAVY void fe_sqrn(fe *r, int n) {
+    EC_LOOP
+    for (int j = 0; j < n; ++j) fe_sqr(r, r);
+}
+
 /* a^(p-2) mod p —— 费马求逆（libsecp256k1 加法链）*/
-inline void fe_inv(fe *r, const fe *a) {
+EC_HEAVY void fe_inv(fe *r, const fe *a) {
     fe x2, x3, x6, x9, x11, x22, x44, x88, x176, x220, x223, t1;
-    int j;
     fe_sqr(&x2, a);       fe_mul(&x2, &x2, a);
     fe_sqr(&x3, &x2);      fe_mul(&x3, &x3, a);
-    x6 = x3;  for (j = 0; j < 3; j++) fe_sqr(&x6, &x6);   fe_mul(&x6, &x6, &x3);
-    x9 = x6;  for (j = 0; j < 3; j++) fe_sqr(&x9, &x9);   fe_mul(&x9, &x9, &x3);
-    x11 = x9; for (j = 0; j < 2; j++) fe_sqr(&x11, &x11); fe_mul(&x11, &x11, &x2);
-    x22 = x11; for (j = 0; j < 11; j++) fe_sqr(&x22, &x22); fe_mul(&x22, &x22, &x11);
-    x44 = x22; for (j = 0; j < 22; j++) fe_sqr(&x44, &x44); fe_mul(&x44, &x44, &x22);
-    x88 = x44; for (j = 0; j < 44; j++) fe_sqr(&x88, &x88); fe_mul(&x88, &x88, &x44);
-    x176 = x88; for (j = 0; j < 88; j++) fe_sqr(&x176, &x176); fe_mul(&x176, &x176, &x88);
-    x220 = x176; for (j = 0; j < 44; j++) fe_sqr(&x220, &x220); fe_mul(&x220, &x220, &x44);
-    x223 = x220; for (j = 0; j < 3; j++) fe_sqr(&x223, &x223); fe_mul(&x223, &x223, &x3);
-    t1 = x223; for (j = 0; j < 23; j++) fe_sqr(&t1, &t1); fe_mul(&t1, &t1, &x22);
-    for (j = 0; j < 5; j++) fe_sqr(&t1, &t1); fe_mul(&t1, &t1, a);
-    for (j = 0; j < 3; j++) fe_sqr(&t1, &t1); fe_mul(&t1, &t1, &x2);
-    for (j = 0; j < 2; j++) fe_sqr(&t1, &t1); fe_mul(r, &t1, a);
+    x6 = x3;   fe_sqrn(&x6, 3);   fe_mul(&x6, &x6, &x3);
+    x9 = x6;   fe_sqrn(&x9, 3);   fe_mul(&x9, &x9, &x3);
+    x11 = x9;  fe_sqrn(&x11, 2);  fe_mul(&x11, &x11, &x2);
+    x22 = x11; fe_sqrn(&x22, 11); fe_mul(&x22, &x22, &x11);
+    x44 = x22; fe_sqrn(&x44, 22); fe_mul(&x44, &x44, &x22);
+    x88 = x44; fe_sqrn(&x88, 44); fe_mul(&x88, &x88, &x44);
+    x176 = x88; fe_sqrn(&x176, 88); fe_mul(&x176, &x176, &x88);
+    x220 = x176; fe_sqrn(&x220, 44); fe_mul(&x220, &x220, &x44);
+    x223 = x220; fe_sqrn(&x223, 3); fe_mul(&x223, &x223, &x3);
+    t1 = x223; fe_sqrn(&t1, 23); fe_mul(&t1, &t1, &x22);
+    fe_sqrn(&t1, 5); fe_mul(&t1, &t1, a);
+    fe_sqrn(&t1, 3); fe_mul(&t1, &t1, &x2);
+    fe_sqrn(&t1, 2); fe_mul(r, &t1, a);
 }
 
 /* ---------------- 群运算 ---------------- */
 
 /* 统一加法/倍点：r = a + b，b 为仿射点 (b.inf 必须为 0)。移植自 secp256k1_gej_add_ge。 */
-inline void gej_add_ge(gej *r, const gej *a, const ge *b) {
+EC_HEAVY void gej_add_ge(gej *r, const gej *a, const ge *b) {
     fe zz, u1, u2, s1, s2, t, tt, m, n, q, rr, m_alt, rr_alt;
     fe fe_one; fe_set_int(&fe_one, 1);
     int degenerate;
@@ -780,10 +826,15 @@ inline void gej_from_ge(gej *r, const ge *a) {
 
 /* 转仿射并输出 X||Y (各 32 字节大端，私有内存) */
 inline void gej_to_pub(uchar *out, gej *a) {
-    fe zi, z2, z3, x, y;
+    fe zi;
     fe_inv(&zi, &a->z);
-    fe_sqr(&z2, &zi);
-    fe_mul(&z3, &zi, &z2);
+    gej_to_pub_zi(out, a, &zi);
+}
+
+inline void gej_to_pub_zi(uchar *out, const gej *a, const fe *zi) {
+    fe z2, z3, x, y;
+    fe_sqr(&z2, zi);
+    fe_mul(&z3, zi, &z2);
     fe_mul(&x, &a->x, &z2);
     fe_mul(&y, &a->y, &z3);
     fe_normalize(&x);

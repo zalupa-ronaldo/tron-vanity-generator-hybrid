@@ -27,12 +27,17 @@ struct DeviceInfo {
 };
 
 std::vector<DeviceInfo> enumerateGpus();
+// Test harness only: permits a CPU OpenCL implementation on GPU-less CI.
+std::vector<DeviceInfo> enumerateTestDevices();
 
 // 一个设备 + context + queue + program 的薄封装。
 class Program {
 public:
+    Program() = default;
+    Program(const Program&) = delete;
+    Program& operator=(const Program&) = delete;
     bool build(id platform, id device, const std::string& source,
-               const std::string& opts, std::string* err);
+               const std::string& opts, std::string* err, bool profiling = false);
     ~Program();
 
     id kernel(const char* name, std::string* err);
@@ -45,9 +50,17 @@ public:
     bool writeAt(id buf, size_t offset, size_t bytes, const void* src);
     bool finish();
     void release(id mem);
+    // Requires a profiling queue and a completed last dispatch. Device time,
+    // not host enqueue/wait time; unavailable timestamps are not reported as 0.
+    bool lastKernelMilliseconds(double& ms) const;
+    bool kernelLimits(id kernel, size_t& maxGroup, size_t& preferredMultiple,
+                      unsigned long long& privateBytes) const;
 
 private:
     id ctx_ = nullptr, queue_ = nullptr, program_ = nullptr, device_ = nullptr;
+    id lastEvent_ = nullptr;
+    bool profiling_ = false;
+    std::vector<id> kernels_, buffers_;
 };
 
 }  // namespace ocl

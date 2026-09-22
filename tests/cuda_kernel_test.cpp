@@ -73,8 +73,17 @@ int main() {
         const std::array<unsigned char, 32> orderMinusOne = {
             0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xfe,
             0xba,0xae,0xdc,0xe6,0xaf,0x48,0xa0,0x3b,0xbf,0xd2,0x5e,0x8c,0xd0,0x36,0x41,0x40};
+        auto orderMinusTwo = orderMinusOne;
+        --orderMinusTwo[31];
+        std::vector<std::array<unsigned char, 32>> bases{base, orderMinusOne, orderMinusTwo};
+        for (unsigned counter = 100; counter < 108; ++counter) {
+            std::array<unsigned char, 32> nextBase{};
+            kernel::tron_vanity_resident_seed(seed.data(), nextBase.data(), counter);
+            require(secp256k1_ec_seckey_verify(context, nextBase.data()), "test scalar invalid");
+            bases.push_back(nextBase);
+        }
         size_t checked = 0;
-        for (const auto& baseKey : {base, orderMinusOne}) {
+        for (const auto& baseKey : bases) {
             auto pub = pubXY(context, baseKey.data());
             for (uint32_t gid : {0u, 1u, 127u, 128u, 32767u, 32768u, 524287u, 524288u, 0x7fffffffu}) {
                 uint32_t meta[5]{};
@@ -108,6 +117,25 @@ int main() {
                 require(meta[0] == expectedCount && meta[2] == 0, "ring count mismatch");
             }
         }
+        // Exercise a single range with 1,024 consecutive offsets, independent
+        // of the device runtime test and including both lanes of every pair.
+        auto rangePub = pubXY(context, base.data());
+        for (uint32_t gid = 0; gid < 512; ++gid) {
+            kernel::threadIdx.x = gid;
+            uint32_t rangeMeta[5]{};
+            unsigned char rangeRecords[2 * 160]{};
+            kernel::tron_vanity_resident_probe(base.data(), rangePub.data(), table.data(), dfa.data(),
+                &start, &length, &id, rangeMeta, rangeRecords, 2, 0);
+            require(rangeMeta[0] == 2 && rangeMeta[2] == 0, "range count mismatch");
+            for (unsigned item = 0; item < 2; ++item) {
+                const auto* record = rangeRecords + item * 160;
+                require(secp256k1_ec_seckey_verify(context, record), "range scalar invalid");
+                auto expectedPub = pubXY(context, record);
+                require(tronAddressFromPubXY(expectedPub.data()) ==
+                    std::string(reinterpret_cast<const char*>(record + 32), 34), "range address mismatch");
+                ++checked;
+            }
+        }
         kernel::threadIdx.x = 0;
         auto pub = pubXY(context, base.data());
         uint32_t meta[5]{};
@@ -123,7 +151,7 @@ int main() {
             &start, &length, &id, meta, records.data(), 2, 0);
         require(meta[0] == 0, "disabled output still emitted");
         secp256k1_context_destroy(context);
-        std::cout << "CUDA shared kernel RNG " << RESIDENT_RNG << ": " << checked
+        std::cout << "Shared kernel RNG " << RESIDENT_RNG << ", pair inverse " << RESIDENT_PAIR_INVERSE << ": " << checked
                   << " boundary vectors, RNG counters, overflow and disabled-output checks passed\n";
         return 0;
     } catch (const std::exception& e) {

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <filesystem>
 #include <fstream>
@@ -53,7 +54,10 @@ struct Options {
     bool caseSensitive = false;
     bool verbose = false;
     bool list = false;
+    bool help = false;
     bool benchResidentOnly = false;
+    bool openclProfile = false;
+    OpenclResidentOptions openclOptions;
     bool metalProfileStages = false;
     int metalProfileStage = -1;
     bool metalProfileScalarKeccak = true;
@@ -94,6 +98,9 @@ void usage() {
         "  --metal-keys-per-lane N Metal point-walk batch: power of two, 1..1024 (default 32)\n"
         "  --bench-seconds N seconds per benchmark method; --bench runs all available methods\n"
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
+        "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
+        "  --opencl-inverse single|pair  resident field inversion (default single)\n"
+        "  --opencl-compiler compact|default  resident compiler mode (default compact)\n"
         "  --metal-profile-stages  profile the active Metal resident pipeline by stage; no wallets written\n"
         "  --metal-profile-stage N  profile only stage 0..5 (0 is full resident)\n"
         "  --metal-profile-indexed-keccak profile the slower indexed reference Keccak\n"
@@ -115,7 +122,7 @@ bool parse(int argc, char** argv, Options& o) {
     try {
         for (int i = 1; i < argc; ++i) {
             std::string a = argv[i];
-            if (a == "--help" || a == "-h") { usage(); return false; }
+            if (a == "--help" || a == "-h") { o.help = true; usage(); return false; }
             if (a == "--seconds") o.seconds = std::stoull(next(i, "--seconds"));
             else if (a == "--threads") o.threads = std::stoul(next(i, "--threads"));
             else if (a == "--words") o.words = next(i, "--words");
@@ -137,6 +144,17 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--metal-keys-per-lane") o.metalKeysPerLane = std::stoul(next(i, "--metal-keys-per-lane"));
             else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
             else if (a == "--bench-resident") o.benchResidentOnly = true;
+            else if (a == "--opencl-profile") o.openclProfile = true;
+            else if (a == "--opencl-inverse") {
+                const auto value = next(i, "--opencl-inverse");
+                if (value != "single" && value != "pair") throw std::runtime_error("--opencl-inverse must be single or pair");
+                o.openclOptions.pairInverse = value == "pair";
+            }
+            else if (a == "--opencl-compiler") {
+                const auto value = next(i, "--opencl-compiler");
+                if (value != "compact" && value != "default") throw std::runtime_error("--opencl-compiler must be compact or default");
+                o.openclOptions.compact = value == "compact";
+            }
             else if (a == "--metal-profile-stages") o.metalProfileStages = true;
             else if (a == "--metal-profile-stage") o.metalProfileStage = std::stoi(next(i, "--metal-profile-stage"));
             else if (a == "--metal-profile-indexed-keccak") o.metalProfileScalarKeccak = false;
@@ -158,8 +176,8 @@ bool parse(int argc, char** argv, Options& o) {
     if (o.backend != "auto" && o.backend != "cpu" && o.backend != "opencl" && o.backend != "cuda" && o.backend != "metal") {
         std::cerr << "backend must be auto, cpu, opencl, cuda, or metal\n"; return false;
     }
-    if (o.benchSeconds <= 0) {
-        std::cerr << "--bench-seconds must be positive\n"; return false;
+    if (!std::isfinite(o.benchSeconds) || o.benchSeconds <= 0) {
+        std::cerr << "--bench-seconds must be finite and positive\n"; return false;
     }
     if (o.gpuGroupSize != 64 && o.gpuGroupSize != 128 && o.gpuGroupSize != 256) {
         std::cerr << "--gpu-group-size must be 64, 128, or 256\n"; return false;
@@ -274,7 +292,7 @@ int main(int argc, char** argv) {
         if (a == "--matchtest") return matchtest();
     }
     Options opt;
-    if (!parse(argc, argv, opt)) return 0;
+    if (!parse(argc, argv, opt)) return opt.help ? 0 : 1;
     HardwareReport hw = detectHardware();
     if (opt.list) { printDevices(hw); return 0; }
     if (opt.metalHardwareProfile) {
@@ -288,6 +306,11 @@ int main(int argc, char** argv) {
                 return 0;
             }
             if (hw.gpus.empty()) { std::cerr << "no OpenCL GPU: " << hw.openclNote << "\n"; return 1; }
+            if (opt.gpuResident) {
+                for (const auto& device : hw.gpus)
+                    if (openclResidentSelfTest(device, opt.gpuRng, opt.openclOptions)) return 1;
+                return 0;
+            }
             return gpuSelfTest(hw.gpus.front());
         }
     }
@@ -295,6 +318,34 @@ int main(int argc, char** argv) {
     std::string error;
     auto dictionary = Dictionary::load(opt.words, opt.caseSensitive, &error);
     if (!dictionary) { std::cerr << error << "\n"; return 1; }
+    if (opt.openclProfile) {
+        if (opt.backend != "auto" && opt.backend != "opencl") {
+            std::cerr << "--opencl-profile requires --backend opencl\n"; return 1;
+        }
+        if (hw.gpus.empty()) { std::cerr << "OpenCL unavailable: " << hw.openclNote << "\n"; return 1; }
+        std::cout << "OpenCL resident profile; no wallets or private keys written\n"
+                  << "Dictionary: " << dictionary->words.size() << " words; RNG " << opt.gpuRng
+                  << "; compiler " << (opt.openclOptions.compact ? "compact" : "default")
+                  << "; inverse " << (opt.openclOptions.pairInverse ? "pair" : "single")
+                  << "; group " << opt.gpuGroupSize << "\n"
+                  << "Includes full address/dictionary math and metadata drain; excludes CPU match verification/output.\n";
+        for (const auto& device : hw.gpus) {
+            auto p = profileOpenclResident(device, dictionary, opt.gpuRng, opt.gpuBufferMiB,
+                opt.gpuChunkMs, opt.gpuGroupSize, opt.openclOptions, opt.benchSeconds);
+            if (!p.error.empty()) { std::cerr << "OpenCL profile failed: " << p.error << "\n"; return 1; }
+            std::cout << std::fixed << std::setprecision(3) << device.name
+                      << ": " << p.keys << " keys / " << p.dispatches << " dispatches\n"
+                      << "wall " << p.wallSeconds << " s, wall speed " << p.keys / p.wallSeconds / 1e6 << " M/s\n"
+                      << "base preparation " << p.baseSeconds << " s, scan+wait " << p.scanSeconds
+                      << " s, remaining host/drain " << std::max(0.0, p.wallSeconds - p.baseSeconds - p.scanSeconds) << " s\n";
+            if (p.gpuTimingValid && p.gpuSeconds > 0)
+                std::cout << "Driver-reported GPU scan " << p.gpuSeconds << " s, kernel-only speed " << p.keys / p.gpuSeconds / 1e6
+                          << " M/s, max dispatch " << p.maxGpuMs << " ms\n";
+            else std::cout << "GPU event timestamps unavailable (wall timing remains valid)\n";
+            std::cout << "Use wall speed for comparisons; event time excludes queueing, transfers and host work.\n";
+        }
+        return 0;
+    }
     if (opt.metalProfileStages || opt.metalProfileStage >= 0) {
 #if defined(__APPLE__)
         if (opt.backend != "auto" && opt.backend != "metal") {
@@ -370,13 +421,17 @@ int main(int argc, char** argv) {
                     for (const auto& rng : rngs) {
                         auto resident = makeResidentGpuBackend(g, dictionary, rng,
                                                                opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
-                                                               opt.gpuGroupSize);
+                                                               opt.gpuGroupSize, opt.openclOptions);
                         if (!resident || !resident->available()) {
                             std::cout << "resident OpenCL " << rng << " / " << g.name
                                       << ": unavailable (" << (resident ? resident->note() : "not built") << ")\n";
                             continue;
                         }
                         double r = resident->benchmark(seconds);
+                        if (!resident->note().empty()) {
+                            std::cerr << "OpenCL benchmark failed: " << resident->note() << "\n";
+                            return 1;
+                        }
                         std::cout << std::left << std::setw(38)
                                   << ("resident OpenCL " + rng + " / " + g.name)
                                   << std::right << std::setw(16) << benchRate(r) << "\n";
@@ -464,13 +519,13 @@ int main(int argc, char** argv) {
         for (const auto& g : hw.gpus) {
             backends.push_back(makeResidentGpuBackend(g, dictionary, opt.gpuRng,
                                                       opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
-                                                      opt.gpuGroupSize));
+                                                      opt.gpuGroupSize, opt.openclOptions));
         }
         if (hw.gpus.empty() && opt.backend == "opencl") {
             std::cerr << "OpenCL unavailable; falling back to CPU\n";
             backends.push_back(makeCpuBackend());
         }
-    } else if (!opt.gpuResident && (opt.backend == "auto" || opt.backend == "opencl")) {
+    } else if (!opt.gpuResident && ((opt.backend == "auto" && !autoMetal) || opt.backend == "opencl")) {
         for (const auto& g : hw.gpus) backends.push_back(makeGpuBackend(g, dictionary));
         if (hw.gpus.empty() && opt.backend == "opencl") {
             std::cerr << "OpenCL unavailable; falling back to CPU\n";

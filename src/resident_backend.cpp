@@ -81,14 +81,16 @@ class ResidentGpuBackend final : public Backend {
 public:
     ResidentGpuBackend(GpuDevice device, std::shared_ptr<const Dictionary> dictionary,
                        std::string rng, uint32_t bufferMiB,
-                       uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize)
+                       uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize,
+                       OpenclResidentOptions options = {})
         : device_(std::move(device)), dictionary_(std::move(dictionary)),
           rng_(std::move(rng)), bufferMiB_(std::max(8u, bufferMiB)),
           chunkMs_(std::clamp(chunkMs, 8u, 100u)),
-          groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256) {
+          groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256),
+          openclOptions_(options) {
         (void)pollMs; // retained for CLI/API compatibility; dispatch completion is the poll
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-        workItems_ = std::clamp((1u << 18) * chunkMs_ / 32u, 1u << 14, 1u << 20);
+        workItems_ = isCuda ? std::clamp((1u << 18) * chunkMs_ / 32u, 1u << 14, 1u << 20) : 1u << 14;
     }
 
     ~ResidentGpuBackend() override { secp256k1_context_destroy(context_); }
@@ -104,6 +106,9 @@ public:
                             ", chunk " +
                             std::to_string(chunkMs_) + " ms");
         out.lines.push_back(std::to_string(bufferMiB_) + " MiB device result ring");
+        if constexpr (!isCuda) out.lines.push_back(std::string("compiler ") +
+            (openclOptions_.compact ? "compact" : "default") + ", inversion " +
+            (openclOptions_.pairInverse ? "paired" : "single") + ", adaptive dispatch");
         return out;
     }
 
@@ -116,10 +121,25 @@ public:
         uint64_t generated = 0;
         while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds) {
             if (!runChunk(nullptr, nullptr, nullptr)) break;
-            generated += static_cast<uint64_t>(workItems_) * kResidentKpi;
+            generated += lastChunkKeys_;
         }
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         return elapsed > 0 ? generated / elapsed : 0.0;
+    }
+
+    OpenclProfileResult profile(double seconds) {
+        if (!ensureReady()) { profile_.error = error_; return profile_; }
+        // Warm up code/caches and let bounded dispatch size adapt before timing.
+        const auto warm = std::chrono::steady_clock::now();
+        do {
+            if (!runChunk(nullptr, nullptr, nullptr)) { profile_.error = error_; return profile_; }
+        } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - warm).count() < 0.5);
+        profile_ = {};
+        const auto start = std::chrono::steady_clock::now();
+        benchmark(seconds);
+        profile_.wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        profile_.error = error_;
+        return profile_;
     }
 
     void run(const RunConfig& cfg, RunState& state, const ReportFn& report) override {
@@ -139,8 +159,8 @@ public:
                 state.stop.store(true);
                 return;
             }
-            state.checked.fetch_add(static_cast<uint64_t>(workItems_) * kResidentKpi, std::memory_order_relaxed);
-            state.gpuChecked.fetch_add(static_cast<uint64_t>(workItems_) * kResidentKpi, std::memory_order_relaxed);
+            state.checked.fetch_add(lastChunkKeys_, std::memory_order_relaxed);
+            state.gpuChecked.fetch_add(lastChunkKeys_, std::memory_order_relaxed);
             if (overflow) {
                 std::cerr << "GPU resident result ring overflow; stopping to avoid lost matches\n";
                 state.stop.store(true);
@@ -154,6 +174,7 @@ public:
     bool selfTest() {
         if (!ensureReady()) return false;
         workItems_ = 256;
+        adaptive_ = false;
         pruneOutputs_ = false;
         std::unordered_set<std::string> addresses;
         for (int batch = 0; batch < 2; ++batch) {
@@ -161,12 +182,12 @@ public:
             if (!runChunk(&produced, &overflow, [&](const FoundKey& key) {
                     addresses.insert(key.address);
                 }) || overflow || produced != workItems_ * kResidentKpi) {
-                if (error_.empty()) error_ = "CUDA self-test record count/overflow mismatch";
+                if (error_.empty()) error_ = "resident self-test record count/overflow mismatch";
                 return false;
             }
         }
         if (addresses.size() != workItems_ * kResidentKpi * 2) {
-            error_ = "CUDA self-test found duplicate addresses";
+            error_ = "resident self-test found duplicate addresses";
             return false;
         }
         return true;
@@ -180,6 +201,10 @@ private:
     uint32_t workItems_ = 1u << 18;
     uint32_t ringSlots_ = 0;
     uint32_t groupSize_ = kResidentLocalSize;
+    OpenclResidentOptions openclOptions_;
+    OpenclProfileResult profile_;
+    uint64_t lastChunkKeys_ = 0;
+    bool adaptive_ = !isCuda;
     uint64_t rngCounter_ = 0;
     uint64_t sequenceBase_ = 0;
     secp256k1_context* context_ = nullptr;
@@ -225,19 +250,37 @@ private:
                            " -D ECW=" + std::to_string(kResidentEcw) +
                            " -D ECBITS=" + std::to_string(kResidentEcbits) +
                            " -D KPI=" + std::to_string(kResidentKpi) + " -D MONT_N=1";
+        opts += std::string(" -D RESIDENT_PAIR_INVERSE=") + (openclOptions_.pairInverse ? "1" : "0") +
+                " -D OPENCL_COMPACT=" + (openclOptions_.compact ? "1" : "0");
         auto stageStarted = beginStage(isCuda ? "loading native CUDA PTX (first run may populate the driver cache)" :
             "compiling lightweight OpenCL RNG and scan kernels (first run may populate the driver cache)");
         bool built;
         if constexpr (isCuda) built = program_.build(device_.cudaOrdinal, rngMode, &error_);
-        else built = program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_);
+        else built = program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_,
+                                    openclOptions_.profiling);
         if (!built) {
             failStage(stageStarted);
             return false;
         }
         finishStage(stageStarted);
+        stageStarted = beginStage("creating kernels (driver may finalize machine code)");
         seedKernel_ = program_.kernel("tron_vanity_resident_seed", &error_);
         probeKernel_ = program_.kernel("tron_vanity_resident_probe", &error_);
-        if (!seedKernel_ || !probeKernel_) return false;
+        if (!seedKernel_ || !probeKernel_) { failStage(stageStarted); return false; }
+        finishStage(stageStarted);
+        if constexpr (!isCuda) {
+            size_t maxGroup = 0, preferred = 0;
+            unsigned long long privateBytes = 0;
+            if (program_.kernelLimits(probeKernel_, maxGroup, preferred, privateBytes)) {
+                std::cerr << "  OpenCL scan: max group " << maxGroup << ", preferred multiple " << preferred
+                          << ", reported private bytes " << privateBytes << " (not a VGPR count)\n";
+                if (groupSize_ > maxGroup) {
+                    error_ = "scan kernel work-group limit is " + std::to_string(maxGroup) +
+                             "; reduce --gpu-group-size";
+                    return false;
+                }
+            }
+        }
         if (!randBytes(seedBytes_.data(), seedBytes_.size())) {
             error_ = "OS CSPRNG seed generation failed";
             return false;
@@ -425,14 +468,30 @@ private:
     }
 
     bool runChunk(uint32_t* produced, uint32_t* overflow, const ReportFn& report) {
+        const auto baseStart = std::chrono::steady_clock::now();
+        lastChunkKeys_ = static_cast<uint64_t>(workItems_) * kResidentKpi;
         if (!prepareBasePair() || !bindProbeKernel()) {
             if (error_.empty()) error_ = "setting resident scan-kernel arguments failed";
             return false;
         }
+        const auto scanStart = std::chrono::steady_clock::now();
         if (!program_.run1D(probeKernel_, workItems_, groupSize_, &error_) ||
             !program_.finish()) {
             if (error_.empty()) error_ = "resident scan-kernel execution failed";
             return false;
+        }
+        const auto scanEnd = std::chrono::steady_clock::now();
+        const double scanMs = std::chrono::duration<double, std::milli>(scanEnd - scanStart).count();
+        if constexpr (!isCuda) {
+            if (openclOptions_.profiling) {
+                double gpuMs = 0;
+                if (program_.lastKernelMilliseconds(gpuMs)) {
+                    profile_.gpuSeconds += gpuMs / 1000.0;
+                    profile_.maxGpuMs = std::max(profile_.maxGpuMs, gpuMs);
+                } else profile_.gpuTimingValid = false;
+                profile_.baseSeconds += std::chrono::duration<double>(scanStart - baseStart).count();
+                profile_.scanSeconds += scanMs / 1000.0;
+            }
         }
         std::array<uint32_t, kMetaWords> meta{};
         if (!program_.read(meta_, sizeof(meta), meta.data())) { error_ = "reading resident metadata failed"; return false; }
@@ -464,7 +523,17 @@ private:
         }
         readPos_ = writePos;
         if (!program_.writeAt(meta_, sizeof(uint32_t), sizeof(uint32_t), &readPos_)) return false;
-        sequenceBase_ += static_cast<uint64_t>(workItems_) * kResidentKpi;
+        sequenceBase_ += lastChunkKeys_;
+        profile_.keys += lastChunkKeys_;
+        ++profile_.dispatches;
+        if (adaptive_ && scanMs > 0) {
+            // At most 2x growth, immediate reduction after a slow dispatch.
+            // Target is best-effort, not a WDDM hard execution-time guarantee.
+            const double ratio = std::min(2.0, chunkMs_ / scanMs);
+            const uint32_t next = static_cast<uint32_t>(std::clamp(workItems_ * ratio,
+                static_cast<double>(groupSize_), static_cast<double>(1u << 20)));
+            workItems_ = std::max(groupSize_, next / groupSize_ * groupSize_);
+        }
         return true;
     }
 };
@@ -473,9 +542,36 @@ private:
 
 std::unique_ptr<Backend> makeResidentGpuBackend(
     const GpuDevice& device, std::shared_ptr<const Dictionary> dictionary,
-    const std::string& rng, uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize) {
+    const std::string& rng, uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize,
+    OpenclResidentOptions options) {
     return std::make_unique<ResidentGpuBackend<ocl::Program>>(device, std::move(dictionary), rng,
-                                                bufferMiB, chunkMs, pollMs, groupSize);
+                                                bufferMiB, chunkMs, pollMs, groupSize, options);
+}
+
+OpenclProfileResult profileOpenclResident(const GpuDevice& device,
+    std::shared_ptr<const Dictionary> dictionary, const std::string& rng,
+    uint32_t bufferMiB, uint32_t chunkMs, uint32_t groupSize,
+    OpenclResidentOptions options, double seconds) {
+    options.profiling = true;
+    ResidentGpuBackend<ocl::Program> backend(device, std::move(dictionary), rng,
+                                            bufferMiB, chunkMs, 0, groupSize, options);
+    return backend.profile(seconds);
+}
+
+int openclResidentSelfTest(const GpuDevice& device, const std::string& rng, OpenclResidentOptions options) {
+    auto dictionary = std::make_shared<Dictionary>();
+    dictionary->words = {"test"};
+    dictionary->dfa.assign(Dictionary::Alphabet, 0);
+    dictionary->outStart = {0};
+    dictionary->outLen = {1};
+    dictionary->outIds = {0};
+    ResidentGpuBackend<ocl::Program> backend(device, dictionary, rng, 8, 8, 0, 64, options);
+    if (!backend.selfTest()) {
+        std::cerr << "OpenCL resident self-test failed: " << backend.note() << "\n";
+        return 1;
+    }
+    std::cout << "OpenCL " << rng << ": 1024 address/key pairs verified; no wallet output\n";
+    return 0;
 }
 
 std::unique_ptr<Backend> makeCudaBackend(

@@ -105,6 +105,8 @@ public:
         ctx_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     }
 
+    ~GpuBackend() override { secp256k1_context_destroy(ctx_); }
+
     std::string name() const override { return "OpenCL GPU"; }
 
     BackendInfo info() const override {

@@ -63,8 +63,13 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    measure complete wall and GPU-command times in forward/reverse order after
    stopping only a *test* worker under explicit user control. Never trace or
    publish working secret buffers.
-4. Vulkan: no production Vulkan kernel is present yet. A real integration
-   needs Vulkan device selection, SPIR-V for all math stages, descriptor and
+4. Vulkan: `vulkan/probe.comp`, `vulkan/vulkan_probe.cpp` and
+   `src/vulkan_probe.h` implement a deterministic native compute dispatch,
+   built only with `-DTRON_ENABLE_VULKAN=ON`. Linux CI uses Mesa's software
+   Vulkan driver to test shader compilation, descriptors, dispatch, barriers
+   and CPU readback. That is not GPU search or RX 9070 XT evidence. The
+   Windows release uses the stub and cannot run this probe. A real integration
+   still needs SPIR-V for all math stages, descriptor and
    scratch layout, barriers, bounded dispatch, result-ring semantics and
    GPU/CPU correctness. OpenCL running on `clvk` would be a compatibility
    experiment, not evidence of a native Vulkan backend. Khronos's

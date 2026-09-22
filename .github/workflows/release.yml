@@ -22,11 +22,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install nvidia-cuda-nvrtc-cu12==12.6.85
-      - name: Install CPU OpenCL runtime for integration tests
-        run: sudo apt-get update && sudo apt-get install -y pocl-opencl-icd
-      - name: Build CUDA PTX and Linux executable
+      - name: Install CPU GPU-API runtimes for integration tests
+        run: sudo apt-get update && sudo apt-get install -y pocl-opencl-icd libvulkan-dev glslang-tools mesa-vulkan-drivers vulkan-tools
+      - name: Build CUDA PTX, Vulkan probe and Linux executable
         run: |
-          cmake -S . -B build-cuda -DTRON_ENABLE_CUDA=ON
+          cmake -S . -B build-cuda -DTRON_ENABLE_CUDA=ON -DTRON_ENABLE_VULKAN=ON
           cmake --build build-cuda -j 4
       - name: Verify shared CUDA math and missing-driver behavior
         run: |

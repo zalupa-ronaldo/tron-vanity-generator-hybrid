@@ -5,6 +5,7 @@
 #include "metal_hardware_profile.h"
 #include "resident_backend.h"
 #include "run_config.h"
+#include "vulkan_probe.h"
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -131,6 +132,7 @@ void usage() {
         "  --metal-hw-json FILE write hardware profile results as JSON\n"
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL/CUDA devices and exit\n"
+        "  --vulkan-test     native Vulkan compute API smoke test (not wallet search)\n"
         "  --verbose         more frequent progress updates\n"
         "  --selftest | --hashtest | --matchtest | --gputest | --bench\n";
 }
@@ -217,7 +219,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
             else if (a == "--mont-n") o.montN = std::stoul(next(i, "--mont-n"));
             else if (a == "--selftest" || a == "--hashtest" || a == "--matchtest" ||
-                     a == "--gputest" || a == "--bench" || a == "--tune") {
+                     a == "--gputest" || a == "--bench" || a == "--tune" || a == "--vulkan-test") {
                 // handled by main's early command dispatch
             } else { std::cerr << "unknown option: " << a << "\n"; usage(); return false; }
         }
@@ -545,6 +547,8 @@ int main(int argc, char** argv) {
     for (auto& a : effective) effectiveArgv.push_back(a.data());
     Options opt;
     if (!parse(static_cast<int>(effectiveArgv.size()), effectiveArgv.data(), opt)) return opt.help ? 0 : 1;
+    if (std::find(effective.begin(), effective.end(), "--vulkan-test") != effective.end())
+        return vulkanComputeSelfTest();
     HardwareReport hw = detectHardware();
     if (opt.list) { printDevices(hw); return 0; }
     if (!opt.openclDiagnostic.empty()) {

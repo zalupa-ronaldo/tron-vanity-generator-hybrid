@@ -62,7 +62,7 @@ public class Fixture {
 }
 '@
 $cases = @(
-    @{ Mode = "success"; Exit = 0; Calls = "smoke,rng,scan-single,scan-pair,full,profile"; Text = "Self-test passed" },
+    @{ Mode = "success"; Exit = 0; Calls = "smoke,rng,scan-single,scan-pair,full,profile"; Text = "Base self-test passed" },
     @{ Mode = "smoke-fail"; Exit = 1; Calls = "smoke"; Text = "tiny OpenCL kernel failed" },
     @{ Mode = "rng-fail"; Exit = 0; Calls = "smoke,rng,scan-single,scan-pair,profile"; Text = "--opencl-host-seed" },
     @{ Mode = "pair-fail"; Exit = 0; Calls = "smoke,rng,scan-single,scan-pair,full,profile"; Text = "--opencl-inverse single" },

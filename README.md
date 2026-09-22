@@ -63,9 +63,13 @@ on Windows because every compiler attempt is separately time-bounded.
 
 See the measured [M4 Metal profile](docs/apple-m4-metal-hardware-profile.md),
 [RX 9070 XT OpenCL profile](docs/rx9070xt-opencl-research.md), and
-[engineering handoff](docs/next-agent-handoff.md). Vulkan is under
-investigation; this release does **not** claim a working Vulkan wallet
-backend.
+[engineering handoff](docs/next-agent-handoff.md). There is an optional native
+Vulkan compute probe for source builds (`-DTRON_ENABLE_VULKAN=ON`, then
+`tron_vanity_generator --vulkan-test`). It compiles a small SPIR-V shader,
+dispatches it and verifies 256 results against the CPU. This is an API and
+compiler check only: **it does not generate wallets or search addresses**.
+The Windows ZIP does not include this optional probe, and there is no Vulkan
+wallet backend yet.
 
 ## Build on Windows
 

@@ -10,7 +10,9 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -74,6 +76,14 @@ std::string hexUpper(const unsigned char* p, size_t n) {
         out.push_back(hex[p[i] & 15]);
     }
     return out;
+}
+
+std::string elapsedText(std::chrono::steady_clock::time_point started) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(2)
+        << std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count()
+        << " s";
+    return out.str();
 }
 
 class ResidentGpuBackend final : public Backend {
@@ -185,19 +195,40 @@ private:
             error_ = "missing OpenCL device or dictionary";
             return false;
         }
+        const auto initStarted = std::chrono::steady_clock::now();
+        auto beginStage = [](const char* text) {
+            std::cerr << "  resident init: " << text << "..." << std::flush;
+            return std::chrono::steady_clock::now();
+        };
+        auto finishStage = [](std::chrono::steady_clock::time_point started) {
+            std::cerr << " done (" << elapsedText(started) << ")\n";
+        };
+        auto failStage = [this](std::chrono::steady_clock::time_point started) {
+            std::cerr << " failed (" << elapsedText(started) << "): " << error_ << "\n";
+        };
         const int rngMode = rng_ == "philox" ? 2 : (rng_ == "aes-ctr" ? 3 : 1);
-        std::string opts = "-D RESIDENT=1 -D RESIDENT_RNG=" + std::to_string(rngMode) +
+        std::string opts = "-cl-std=CL1.2 -D RESIDENT=1 -D RESIDENT_RNG=" + std::to_string(rngMode) +
                            " -D ECW=" + std::to_string(kResidentEcw) +
                            " -D ECBITS=" + std::to_string(kResidentEcbits) +
                            " -D KPI=" + std::to_string(kResidentKpi) + " -D MONT_N=1";
-        if (!program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_)) return false;
+        auto stageStarted = beginStage("compiling the dedicated OpenCL kernel (first run may populate the driver cache)");
+        if (!program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_)) {
+            failStage(stageStarted);
+            return false;
+        }
+        finishStage(stageStarted);
         kernel_ = program_.kernel("tron_vanity_resident", &error_);
         if (!kernel_) return false;
         if (!randBytes(seedBytes_.data(), seedBytes_.size())) {
             error_ = "OS CSPRNG seed generation failed";
             return false;
         }
+
+        stageStarted = beginStage("building the secp256k1 fixed-base table");
         auto table = genResidentTable(context_);
+        finishStage(stageStarted);
+
+        stageStarted = beginStage("uploading the table and dictionary");
         seed_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, seedBytes_.size(), seedBytes_.data(), &error_);
         table_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, table.size(), table.data(), &error_);
         dfa_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
@@ -212,14 +243,30 @@ private:
         outIds_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
                                   dictionary_->outIds.size() * sizeof(uint32_t),
                                   const_cast<uint32_t*>(dictionary_->outIds.data()), &error_);
+        if (!seed_ || !table_ || !dfa_ || !outStart_ || !outLen_ || !outIds_) {
+            failStage(stageStarted);
+            return false;
+        }
+        finishStage(stageStarted);
+
+        stageStarted = beginStage("allocating the device result ring");
         ringSlots_ = (bufferMiB_ * 1024u * 1024u) / kRecordBytes;
         meta_ = program_.buffer(ocl::MEM_READ_WRITE, kMetaWords * sizeof(uint32_t), nullptr, &error_);
         records_ = program_.buffer(ocl::MEM_READ_WRITE,
                                    static_cast<size_t>(ringSlots_) * kRecordBytes, nullptr, &error_);
         std::array<uint32_t, kMetaWords> zero{};
-        if (!program_.write(meta_, sizeof(zero), zero.data()) ||
-            !seed_ || !table_ || !dfa_ || !outStart_ || !outLen_ || !outIds_ || !meta_ || !records_) return false;
+        if (!meta_ || !records_) {
+            failStage(stageStarted);
+            return false;
+        }
+        if (!program_.write(meta_, sizeof(zero), zero.data())) {
+            error_ = "initializing resident metadata failed";
+            failStage(stageStarted);
+            return false;
+        }
+        finishStage(stageStarted);
         ready_ = true;
+        std::cerr << "  resident init: ready (" << elapsedText(initStarted) << " total)\n";
         return true;
     }
 

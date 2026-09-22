@@ -792,6 +792,8 @@ inline void ge_load_g(ge *p, __global const uchar *xy) {
     p->inf = 0;
 }
 
+/* The resident kernel has its own 256-bit fixed-base walk above. */
+#ifndef RESIDENT
 /* ---------------- 固定基点标量乘 ----------------
  * ECW = 窗口位宽；ECBITS = base 的有效位数（= log2(每次内核扫描的私钥数）
  *   ECW==1 : table[j] (j=0..31) = 2^j * G，逐 bit（baseline）
@@ -826,6 +828,7 @@ inline void ec_load_G(ge *G, __global const uchar *table_b32) {
     ge_load_g(G, &table_b32[1 * 64]);          /* w=0,d=1 -> 1 * G */
 #endif
 }
+#endif /* !RESIDENT */
 
 /* ---------------- keccak-256 ---------------- */
 
@@ -929,6 +932,12 @@ inline void sha256_short(uchar *out, const uchar *msg, int len) {
         out[4*i+3] = st[i];
     }
 }
+
+/* The resident runtime only needs its own Base58/DFA implementation above
+ * plus the shared arithmetic and hashes.  Do not make vendor JITs compile the
+ * legacy scan, profiling and validation code too: on Windows RDNA4 that turns
+ * the first resident launch into a very long (and apparently hung) build. */
+#ifndef RESIDENT
 
 /* ---------------- base58 尾部 + 匹配 ---------------- */
 
@@ -1298,3 +1307,5 @@ void test_mont(__global const uchar *P0_b32,
     if (gid < n) for (int i = 0; i < 64; i++) pubout[gid * 64 + i] = pub[i];
 }
 #endif
+
+#endif /* !RESIDENT */

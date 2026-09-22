@@ -178,6 +178,19 @@ Resident work-group size can be tuned per GPU without rebuilding:
 Supported values are `64`, `128` and `256`; `256` is the default. If a driver
 reports a compile or launch failure, retry with `128`.
 
+Resident startup prints the OpenCL compilation, table upload and ring-allocation
+stages separately. The first launch can spend time in the vendor compiler while
+it populates the driver cache; this is CPU-side initialization and therefore
+does not show as GPU utilization. The resident build excludes the unrelated
+legacy/profile/test kernels to keep that one-time JIT small, which is especially
+important on Windows RDNA4 (`gfx1200`/`gfx1201`). If resident initialization is
+still blocked by a vendor driver, the regular OpenCL path remains available:
+
+```powershell
+.\tron_vanity_generator.exe --backend opencl --ec-window 8 `
+  --gpu-batch 1048576 --seconds 60
+```
+
 ### Full benchmark matrix
 
 `--bench` compares every backend available on the current machine. With

@@ -101,6 +101,7 @@ void usage() {
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
+        "  --opencl-affine-batch 2|4  staged paired inversion points per work-item (default 4)\n"
         "  --opencl-compiler compact|default  resident compiler mode (default compact)\n"
         "  --opencl-pipeline monolithic|staged  resident layout; selecting it enables GPU-resident mode\n"
         "  --opencl-diagnose smoke|rng|scan|full  isolated checks; no wallet output\n"
@@ -164,6 +165,11 @@ bool parse(int argc, char** argv, Options& o) {
                 const auto value = next(i, "--opencl-inverse");
                 if (value != "single" && value != "pair") throw std::runtime_error("--opencl-inverse must be single or pair");
                 o.openclOptions.pairInverse = value == "pair";
+            }
+            else if (a == "--opencl-affine-batch") {
+                o.openclOptions.affineBatch = std::stoul(next(i, "--opencl-affine-batch"));
+                if (o.openclOptions.affineBatch != 2 && o.openclOptions.affineBatch != 4)
+                    throw std::runtime_error("--opencl-affine-batch must be 2 or 4");
             }
             else if (a == "--opencl-compiler") {
                 const auto value = next(i, "--opencl-compiler");
@@ -367,6 +373,7 @@ int main(int argc, char** argv) {
                   << (opt.openclOptions.hostSeed ? "OS CSPRNG" : opt.gpuRng)
                   << "; compiler " << (opt.openclOptions.compact ? "compact" : "default")
                   << "; inverse " << (opt.openclOptions.pairInverse ? "pair" : "single")
+                  << "; affine batch " << opt.openclOptions.affineBatch
                   << "; pipeline " << (opt.openclOptions.staged ? "staged" : "monolithic")
                   << "; group " << opt.gpuGroupSize << "\n"
                   << "Includes full address/dictionary math and metadata drain; excludes CPU match verification/output.\n";

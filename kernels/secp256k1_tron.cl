@@ -21,6 +21,12 @@
 #ifndef RESIDENT_SPLIT_STAGE
 #define RESIDENT_SPLIT_STAGE 0
 #endif
+#ifndef RESIDENT_AFFINE_BATCH
+#define RESIDENT_AFFINE_BATCH 2
+#endif
+#ifndef RESIDENT_OFFSET_WINDOWS
+#define RESIDENT_OFFSET_WINDOWS 4
+#endif
 #if RESIDENT_SPLIT_STAGE && KPI != 2
 #error Staged resident kernels require KPI=2
 #endif
@@ -48,6 +54,13 @@ typedef struct { fe x, y, z; int inf; } gej;
 #define HASH_HEAVY inline
 #define HASH_LOOP
 #endif
+#if RESIDENT_SPLIT_STAGE == 6
+/* Inline only the short-message wrapper so the two fixed lengths (21/32)
+ * constant-fold; keep the 64-round compressor outlined for vendor JITs. */
+#define SHA_SHORT_ATTR inline
+#else
+#define SHA_SHORT_ATTR HASH_HEAVY
+#endif
 
 inline void fe_set_int(fe *r, uint v);
 inline void ge_load_g(ge *p, __global const uchar *xy);
@@ -58,7 +71,7 @@ inline void gej_to_pub_zi(uchar *out, const gej *a, const fe *zi);
 inline void fe_mul(fe *r, const fe *a, const fe *b);
 EC_HEAVY void fe_inv(fe *r, const fe *a);
 HASH_HEAVY void keccak256_64(uchar *out, const uchar *in);
-HASH_HEAVY void sha256_short(uchar *out, const uchar *msg, int len);
+SHA_SHORT_ATTR void sha256_short(uchar *out, const uchar *msg, int len);
 
 #ifdef RESIDENT
 /* ---------------- GPU-resident generator ----------------
@@ -287,14 +300,17 @@ HASH_HEAVY void resident_base58_address(uchar *addr, const uchar *full25) {
     for (int i = 0; i < 34; ++i) addr[i] = '1';
     int start = 0;
     HASH_LOOP
-    for (int it = 0; it < 34; ++it) {
+    for (int it = 0; it < 17; ++it) {
+        /* Two Base58 digits per long division. The largest numerator is
+         * (3363 << 16) | 65535, safely within 32 bits. */
         uint rem = 0;
         for (int i = start; i < 13; ++i) {
             uint acc = (rem << 16) | num[i];
-            num[i] = (ushort)(acc / 58);
-            rem = acc % 58;
+            num[i] = (ushort)(acc / 3364U);
+            rem = acc % 3364U;
         }
-        addr[33 - it] = (uchar)b58[rem];
+        addr[33 - 2 * it] = (uchar)b58[rem % 58U];
+        addr[32 - 2 * it] = (uchar)b58[rem / 58U];
         while (start < 13 && num[start] == 0) ++start;
     }
 }
@@ -314,14 +330,12 @@ static inline void resident_address(const uchar *pub, uchar *addr) {
 #endif
 
 #if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 4
-static inline void resident_match(const uchar *sk, const uchar *addr,
-                                 __global const uint *dfa,
-                                 __global const uint *out_start,
-                                 __global const uint *out_len,
-                                 __global const uint *out_ids,
-                                 volatile __global uint *meta,
-                                 __global uchar *records, uint cap, ulong seq) {
-    uint ids[RESIDENT_MAX_MATCHES];
+static inline void resident_find_matches(const uchar *addr,
+                                         __global const uint *dfa,
+                                         __global const uint *out_start,
+                                         __global const uint *out_len,
+                                         __global const uint *out_ids,
+                                         uint *ids, uint *count_out, uint *flags_out) {
     uint count = 0, state = 0, flags = 0;
     for (int i = 1; i < 34; ++i) {
         uchar c = addr[i];
@@ -338,8 +352,14 @@ static inline void resident_match(const uchar *sk, const uchar *addr,
             }
         }
     }
-    if (!count) return;
+    *count_out = count;
+    *flags_out = flags;
+}
 
+static inline void resident_write_match(const uchar *sk, const uchar *addr,
+                                        const uint *ids, uint count, uint flags,
+                                        volatile __global uint *meta,
+                                        __global uchar *records, uint cap, ulong seq) {
     uint pos = resident_atomic_add((volatile __global uint*)&meta[0], 1U);
     uint read_pos = meta[1];
     if (pos - read_pos >= cap) {
@@ -357,6 +377,18 @@ static inline void resident_match(const uchar *sk, const uchar *addr,
     for (uint i = 0; i < RESIDENT_MAX_MATCHES; ++i) resident_u32(&dst[72 + i * 4], i < count ? ids[i] : 0);
     resident_u32(&dst[136], flags);
     resident_u64(&dst[140], seq);
+}
+
+static inline void resident_match(const uchar *sk, const uchar *addr,
+                                  __global const uint *dfa,
+                                  __global const uint *out_start,
+                                  __global const uint *out_len,
+                                  __global const uint *out_ids,
+                                  volatile __global uint *meta,
+                                  __global uchar *records, uint cap, ulong seq) {
+    uint ids[RESIDENT_MAX_MATCHES], count = 0, flags = 0;
+    resident_find_matches(addr, dfa, out_start, out_len, out_ids, ids, &count, &flags);
+    if (count) resident_write_match(sk, addr, ids, count, flags, meta, records, cap, seq);
 }
 #endif
 
@@ -416,8 +448,8 @@ static inline void resident_add_offset(gej *acc,
     ge p0;
     ge_load_g(&p0, base_pub);
     gej_from_ge(acc, &p0);
-    /* offset is uint; only the first four 8-bit table windows can be nonzero. */
-    for (uint w = 0; w < 4; ++w) {
+    /* Staged offsets stay below 2^22, so their fourth byte is always zero. */
+    for (uint w = 0; w < RESIDENT_OFFSET_WINDOWS; ++w) {
         uint d = (offset >> (w * 8)) & 255U;
         if (d) {
             ge add;
@@ -526,6 +558,41 @@ static inline void resident_load_point(gej *p, __global const uint *src) {
     p->inf = (int)src[30];
 }
 __kernel void resident_stage_affine(__global const uint *points, __global uchar *pubs) {
+#if RESIDENT_PAIR_INVERSE && RESIDENT_AFFINE_BATCH == 4
+    /* Four points share one inversion. Explicit temporaries keep the live
+     * field values visible to the compiler, avoiding indexed point arrays. */
+    uint first = (uint)get_global_id(0) * 4U;
+    gej p0, p1, p2, p3;
+    resident_load_point(&p0, points + first * 32U);
+    resident_load_point(&p1, points + (first + 1U) * 32U);
+    resident_load_point(&p2, points + (first + 2U) * 32U);
+    resident_load_point(&p3, points + (first + 3U) * 32U);
+    fe z0 = p0.z, z1 = p1.z, z2 = p2.z, z3 = p3.z;
+    if (p0.inf) fe_set_int(&z0, 1);
+    if (p1.inf) fe_set_int(&z1, 1);
+    if (p2.inf) fe_set_int(&z2, 1);
+    if (p3.inf) fe_set_int(&z3, 1);
+    fe p01, p012, product, inverse, t, zi0, zi1, zi2, zi3;
+    fe_mul(&p01, &z0, &z1);
+    fe_mul(&p012, &p01, &z2);
+    fe_mul(&product, &p012, &z3);
+    fe_inv(&inverse, &product);
+    fe_mul(&zi3, &inverse, &p012);
+    fe_mul(&t, &inverse, &z3);
+    fe_mul(&zi2, &t, &p01);
+    fe_mul(&t, &t, &z2);
+    fe_mul(&zi1, &t, &z0);
+    fe_mul(&zi0, &t, &z1);
+    uchar pub[64];
+    gej_to_pub_zi(pub, &p0, &zi0);
+    for (uint i = 0; i < 64; ++i) pubs[first * 64U + i] = pub[i];
+    gej_to_pub_zi(pub, &p1, &zi1);
+    for (uint i = 0; i < 64; ++i) pubs[(first + 1U) * 64U + i] = pub[i];
+    gej_to_pub_zi(pub, &p2, &zi2);
+    for (uint i = 0; i < 64; ++i) pubs[(first + 2U) * 64U + i] = pub[i];
+    gej_to_pub_zi(pub, &p3, &zi3);
+    for (uint i = 0; i < 64; ++i) pubs[(first + 3U) * 64U + i] = pub[i];
+#else
     uint first = (uint)get_global_id(0) * 2U;
     gej p0, p1;
     resident_load_point(&p0, points + first * 32U);
@@ -544,6 +611,7 @@ __kernel void resident_stage_affine(__global const uint *points, __global uchar 
     for (uint i = 0; i < 64; ++i) {
         pubs[first * 64U + i] = pub0[i]; pubs[(first + 1U) * 64U + i] = pub1[i];
     }
+#endif
 }
 #endif
 
@@ -597,10 +665,14 @@ __kernel void resident_stage_match(__global const uchar *base_sk,
         __global const uint *out_ids, volatile __global uint *meta,
         __global uchar *records, uint cap, ulong sequence_base, uint offset_base) {
     uint gid = (uint)get_global_id(0), offset = offset_base + gid;
-    uchar sk[32], addr[34];
-    if (!resident_key_with_offset(base_sk, offset, sk)) return;
+    uchar addr[34];
     for (uint i = 0; i < 34; ++i) addr[i] = addresses[gid * 34U + i];
-    resident_match(sk, addr, dfa, out_start, out_len, out_ids, meta, records, cap, sequence_base + offset);
+    uint ids[RESIDENT_MAX_MATCHES], count = 0, flags = 0;
+    resident_find_matches(addr, dfa, out_start, out_len, out_ids, ids, &count, &flags);
+    if (!count) return;
+    uchar sk[32];
+    if (!resident_key_with_offset(base_sk, offset, sk)) return;
+    resident_write_match(sk, addr, ids, count, flags, meta, records, cap, sequence_base + offset);
 }
 #endif
 #endif /* !RESIDENT_SEED_ONLY: scan kernel */
@@ -1108,11 +1180,16 @@ HASH_HEAVY void keccakf(ulong *s) {
 /* keccak256 of exactly 64 bytes */
 HASH_HEAVY void keccak256_64(uchar *out, const uchar *in) {
     ulong s[25];
-    for (int i = 0; i < 25; i++) s[i] = 0;
-    for (int i = 0; i < 64; i++)
-        s[i >> 3] ^= (ulong)in[i] << ((i & 7) * 8);
-    s[8] ^= (ulong)0x01UL << ((64 & 7) * 8);   /* pad at offset 64 -> lane 8, byte 0 */
-    s[16] ^= (ulong)0x80UL << 56;              /* rate 136 -> last lane index 16 */
+    for (int i = 0; i < 8; ++i) {
+        const int j = i * 8;
+        s[i] = (ulong)in[j] | ((ulong)in[j+1] << 8) |
+               ((ulong)in[j+2] << 16) | ((ulong)in[j+3] << 24) |
+               ((ulong)in[j+4] << 32) | ((ulong)in[j+5] << 40) |
+               ((ulong)in[j+6] << 48) | ((ulong)in[j+7] << 56);
+    }
+    for (int i = 8; i < 25; ++i) s[i] = 0;
+    s[8] = 0x01UL;                 /* Keccak pad after the 64 input bytes. */
+    s[16] = 0x8000000000000000UL; /* Rate 136: final byte of lane 16. */
     keccakf(s);
     for (int i = 0; i < 32; i++)
         out[i] = (uchar)(s[i >> 3] >> ((i & 7) * 8));
@@ -1159,7 +1236,7 @@ HASH_HEAVY void sha256_block(uint *st, const uchar *p) {
 }
 
 /* sha256 of a short message (< 56 bytes), single block */
-HASH_HEAVY void sha256_short(uchar *out, const uchar *msg, int len) {
+SHA_SHORT_ATTR void sha256_short(uchar *out, const uchar *msg, int len) {
     uint st[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
     uchar blk[64];
     for (int i = 0; i < 64; i++) blk[i] = 0;

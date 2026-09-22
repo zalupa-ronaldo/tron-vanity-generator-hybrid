@@ -30,6 +30,9 @@ int main() {
     for (const auto& rng : {"chacha12", "aes-ctr", "philox"})
         if (openclResidentSelfTest(device, rng, {true, true, true})) return 1;
     if (openclResidentSelfTest(device, "chacha12", {false, true, true, true, true})) return 1;
+    OpenclResidentOptions pairedTwo{false, true, false, true, true};
+    pairedTwo.affineBatch = 2;
+    if (openclResidentSelfTest(device, "chacha12", pairedTwo)) return 1;
     if (openclResidentSelfTest(device, "chacha12", {false, false, true, true, true})) return 1;
     if (openclResidentSelfTest(device, "chacha12", {true, true, true, true, true})) return 1;
     for (const auto& rng : {"chacha12", "aes-ctr", "philox"})

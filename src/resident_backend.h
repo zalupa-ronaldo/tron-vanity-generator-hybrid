@@ -15,6 +15,7 @@ struct OpenclResidentOptions {
     bool profiling = false;
     bool hostSeed = false;
     bool staged = false;
+    uint32_t affineBatch = 4; // staged paired inversion; 2 retains the previous kernel
 };
 
 struct OpenclProfileResult {

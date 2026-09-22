@@ -46,6 +46,8 @@ std::string openclResidentBuildOptions(const std::string& rng, const OpenclResid
     return "-cl-std=CL1.2 -D RESIDENT=1 -D ECW=8 -D ECBITS=32 -D KPI=2 -D MONT_N=1 -D RESIDENT_RNG=" +
         std::to_string(mode) + " -D RESIDENT_PAIR_INVERSE=" + (options.pairInverse ? "1" : "0") +
         " -D OPENCL_COMPACT=" + (options.compact ? "1" : "0") +
+        " -D RESIDENT_AFFINE_BATCH=" + std::to_string(options.affineBatch) +
+        " -D RESIDENT_OFFSET_WINDOWS=" + (options.staged ? "3" : "4") +
         (options.hostSeed ? " -D RESIDENT_SCAN_ONLY=1" : "");
 }
 
@@ -59,9 +61,9 @@ struct PrivateScalar {
     }
 };
 
-std::vector<unsigned char> genResidentTable(secp256k1_context* c) {
+std::vector<unsigned char> genResidentTable(secp256k1_context* c, uint32_t offsetBits) {
     const uint32_t digits = 1u << kResidentEcw;
-    const uint32_t windows = (kResidentEcbits + kResidentEcw - 1) / kResidentEcw;
+    const uint32_t windows = (offsetBits + kResidentEcw - 1) / kResidentEcw;
     std::vector<unsigned char> table(static_cast<size_t>(windows) * digits * 64, 0);
     for (uint32_t w = 0; w < windows; ++w) {
         for (uint32_t d = 1; d < digits; ++d) {
@@ -69,7 +71,7 @@ std::vector<unsigned char> genResidentTable(secp256k1_context* c) {
             uint32_t value = d;
             for (uint32_t bit = 0; bit < kResidentEcw; ++bit) {
                 uint32_t absolute = w * kResidentEcw + bit;
-                if (absolute < kResidentEcbits && ((value >> bit) & 1u))
+                if (absolute < offsetBits && ((value >> bit) & 1u))
                     sk[31 - absolute / 8] |= static_cast<unsigned char>(1u << (absolute & 7));
             }
             secp256k1_pubkey p;
@@ -315,6 +317,10 @@ private:
             error_ = "resident RNG must be chacha12, aes-ctr, or philox";
             return false;
         }
+        if (openclOptions_.affineBatch != 2 && openclOptions_.affineBatch != 4) {
+            error_ = "staged affine batch must be 2 or 4";
+            return false;
+        }
         if constexpr (!isCuda) { if (!ocl::load(&error_)) return false; }
         if ((isCuda ? device_.cudaOrdinal < 0 : !device_.deviceId) || !dictionary_ || dictionary_->words.empty()) {
             error_ = "missing GPU device or dictionary";
@@ -363,7 +369,10 @@ private:
                 std::cerr << "  OpenCL " << (usesStages() ? kStageNames[i] : "scan")
                           << ": max group " << maxGroup << ", preferred multiple " << preferred
                           << ", reported private bytes " << privateBytes << " (not a VGPR count)\n";
-                if (groupSize_ > maxGroup) {
+                const size_t requestedGroup = usesStages() && i == 1 &&
+                    openclOptions_.pairInverse && openclOptions_.affineBatch == 4 ?
+                    groupSize_ / 2 : groupSize_;
+                if (requestedGroup > maxGroup) {
                     error_ = "scan kernel work-group limit is " + std::to_string(maxGroup) +
                              "; reduce --gpu-group-size";
                     return false;
@@ -376,8 +385,9 @@ private:
             return false;
         }
 
-        stageStarted = beginStage("building the 32-bit secp256k1 offset table");
-        auto table = genResidentTable(context_);
+        stageStarted = beginStage(usesStages() ? "building the 24-bit secp256k1 offset table" :
+                                          "building the 32-bit secp256k1 offset table");
+        auto table = genResidentTable(context_, usesStages() ? 24 : kResidentEcbits);
         finishStage(stageStarted);
 
         stageStarted = beginStage("uploading the table and dictionary");
@@ -624,8 +634,14 @@ private:
                 enqueued = true;
                 for (unsigned i = 0; i < stageKernels_.size(); ++i) {
                     // One in-order queue: no host readback or clFinish between stages.
-                    if (!program_.run1D(stageKernels_[i], i < 2 ? workItems_ : lastChunkKeys_,
-                                        groupSize_, &error_, i != 0)) { enqueued = false; break; }
+                    const bool affineFour = i == 1 && openclOptions_.pairInverse &&
+                                            openclOptions_.affineBatch == 4;
+                    const size_t global = affineFour ? workItems_ / 2 :
+                                          i < 2 ? workItems_ : lastChunkKeys_;
+                    const size_t local = affineFour ? groupSize_ / 2 : groupSize_;
+                    if (!program_.run1D(stageKernels_[i], global, local, &error_, i != 0)) {
+                        enqueued = false; break;
+                    }
                 }
             }
         }

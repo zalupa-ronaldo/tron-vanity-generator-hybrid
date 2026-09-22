@@ -253,24 +253,42 @@ tron_vanity_generator.exe --backend opencl --words words.txt --seconds 60
 The two user-reported runs near 68.8 M/s both selected `staged` and therefore
 used the same resident backend. A separate ordinary OpenCL run was reported at
 about 55 M/s on the same RX 9070 XT, making the v1.7.1 resident rate about 25%
-higher. The new base-reuse optimization has not yet been measured on that GPU.
+higher.
+In the comparable v1.7.2 five-second profile, the user reported 75.474 M/s
+(377,487,360 keys), a 12.9% increase over v1.7.1's 66.870 M/s profile.
 
 The staged resident path now reuses each random base point for up to 4,194,304
 consecutive offsets. The curve and match kernels already accept an offset base;
 the host advances it after each verified chunk and rotates the random base
 before the 32-bit offset range can wrap. This reduces GPU RNG dispatches, GPU
 readback and CPU public-point expansion. The reported v1.7.1 profile spent
-0.652 of 5.000 seconds in base preparation; the speed gain from reuse still
-needs to be measured on the RX 9070 XT. The profile reports new base count so
-the rate of rotation can be checked directly.
+0.652 of 5.000 seconds in base preparation; v1.7.2 spent 0.029 seconds on
+the same RX 9070 XT and reported 90 newly generated bases. The profile reports
+new base count so the rate of rotation can be checked directly.
 Keys derived from one base are consecutive rather than independent random
 samples. This was already true within each resident chunk; reuse extends that
 relationship across chunks. Keep all generated private keys secret: disclosure
 of one key together with its relative offset can reveal other keys from that
 base window.
 
-`--opencl-inverse pair` uses one field inversion plus three multiplies for
-the two Jacobian points in a work-item, instead of two inversions. It avoids
+The next staged OpenCL revision reduces work in all six kernels: the curve
+stage uses three 8-bit offset windows within the bounded 4M-key base window;
+the paired affine stage handles four points per inversion; Keccak packs its
+64-byte input eight bytes at a time; the fixed-size checksum wrapper is
+specialized for its 21- and 32-byte inputs; Base58 divides by 58² to emit two
+digits per pass; and the dictionary stage derives a private scalar only after
+finding a match. The old two-point affine path remains selectable for an A/B
+test with `--opencl-affine-batch 2` (default `4` for staged paired inversion).
+These are implementation changes, not a claim of faster RX 9070 XT throughput;
+compare the same five-second wall profile and all six stage times on that GPU.
+
+```bat
+tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --opencl-affine-batch 4 --gpu-group-size 64 --opencl-profile --words words.txt --bench-seconds 5
+tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --opencl-affine-batch 2 --gpu-group-size 64 --opencl-profile --words words.txt --bench-seconds 5
+```
+
+`--opencl-inverse pair` uses one field inversion for two Jacobian points in the
+monolithic path; staged `--opencl-affine-batch 4` uses one for four. It avoids
 work-group barriers and large point arrays; infinity is masked out of the
 product so it cannot corrupt its neighbor. `single` remains the conservative
 default until target-GPU measurements establish the register/throughput tradeoff.

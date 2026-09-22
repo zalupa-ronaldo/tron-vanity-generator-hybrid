@@ -279,6 +279,13 @@ specialized for its 21- and 32-byte inputs; Base58 divides by 58² to emit two
 digits per pass; and the dictionary stage derives a private scalar only after
 finding a match. The old two-point affine path remains selectable for an A/B
 test with `--opencl-affine-batch 2` (default `4` for staged paired inversion).
+An experimental batch of `8` shares one inversion across eight points while
+reloading full points only as they are converted. On the local M4 OpenCL
+profile, two alternating three-second samples gave 11.399/11.619 M/s for
+batch 4 and 13.304/13.617 M/s for batch 8; the affine stage itself fell from
+about 0.765 to 0.455 ns/key. This is a candidate, not an RX 9070 XT result.
+The batch-8 self-test compares generated addresses and private scalars with
+the CPU, including a base-window transition.
 The implementation changes were benchmarked with the same five-second wall
 profile and six GPU stage timings on the RX 9070 XT:
 The user-reported v1.8.0 run on RX 9070 XT / gfx1201 passed all 13 checks
@@ -292,6 +299,7 @@ not wallet-output search speed.
 ```bat
 tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --opencl-affine-batch 4 --gpu-group-size 64 --opencl-profile --words words.txt --bench-seconds 5
 tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --opencl-affine-batch 2 --gpu-group-size 64 --opencl-profile --words words.txt --bench-seconds 5
+tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --opencl-affine-batch 8 --gpu-group-size 64 --opencl-profile --words words.txt --bench-seconds 5
 ```
 
 For per-stage A/B tests, `--opencl-opt-mask N` accepts a sum of bits:
@@ -304,6 +312,11 @@ each single optimization. Its `summary.txt` keeps the speed and six stage
 times (also normalized as ns/key) for every variant; full build logs stay in
 separate files. A single-bit result is not necessarily additive with the
 others; judge the production default `63` by its measured wall speed.
+For a bounded, no-wallet comparison of all three affine batch sizes on
+Windows, use `test-opencl.cmd -CompareAffineBatches -TimeoutSeconds 120`.
+The launcher runs its normal self-tests first and only compares batches if
+paired inversion passes. Judge both wall M/s and affine ns/key; compilation
+time, register pressure, and the best batch can differ by GPU and driver.
 
 `--opencl-inverse pair` uses one field inversion for two Jacobian points in the
 monolithic path; staged `--opencl-affine-batch 4` uses one for four. It avoids

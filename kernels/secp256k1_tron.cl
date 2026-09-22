@@ -573,8 +573,62 @@ static inline void resident_load_point(gej *p, __global const uint *src) {
     }
     p->inf = (int)src[30];
 }
+#if RESIDENT_PAIR_INVERSE && RESIDENT_AFFINE_BATCH == 8
+static inline void resident_load_z(fe *z, __global const uint *src) {
+    for (uint i = 0; i < 10; ++i) z->n[i] = src[20 + i];
+    if (src[30]) fe_set_int(z, 1);
+}
+
+EC_HEAVY void resident_affine_emit(__global const uint *points, __global uchar *pubs,
+                                   uint index, const fe *zi, fe *z) {
+    gej p;
+    resident_load_point(&p, points + index * 32U);
+    *z = p.z;
+    if (p.inf) fe_set_int(z, 1);
+    uchar pub[64];
+    gej_to_pub_zi(pub, &p, zi);
+    for (uint i = 0; i < 64; ++i) pubs[index * 64U + i] = pub[i];
+}
+#endif
 __kernel void resident_stage_affine(__global const uint *points, __global uchar *pubs) {
-#if RESIDENT_PAIR_INVERSE && RESIDENT_AFFINE_BATCH == 4
+#if RESIDENT_PAIR_INVERSE && RESIDENT_AFFINE_BATCH == 8
+    /* One inversion for eight points. Hold only the seven prefix products;
+     * reload each full point as its inverse is emitted, keeping register
+     * pressure below an array of eight complete Jacobian points. */
+    uint first = (uint)get_global_id(0) * 8U;
+    fe p0, p1, p2, p3, p4, p5, p6, z, product, inverse, zi;
+    resident_load_z(&p0, points + first * 32U);
+    resident_load_z(&z, points + (first + 1U) * 32U); fe_mul(&p1, &p0, &z);
+    resident_load_z(&z, points + (first + 2U) * 32U); fe_mul(&p2, &p1, &z);
+    resident_load_z(&z, points + (first + 3U) * 32U); fe_mul(&p3, &p2, &z);
+    resident_load_z(&z, points + (first + 4U) * 32U); fe_mul(&p4, &p3, &z);
+    resident_load_z(&z, points + (first + 5U) * 32U); fe_mul(&p5, &p4, &z);
+    resident_load_z(&z, points + (first + 6U) * 32U); fe_mul(&p6, &p5, &z);
+    resident_load_z(&z, points + (first + 7U) * 32U); fe_mul(&product, &p6, &z);
+    fe_inv(&inverse, &product);
+    fe_mul(&zi, &inverse, &p6);
+    resident_affine_emit(points, pubs, first + 7U, &zi, &z);
+    fe_mul(&inverse, &inverse, &z);
+    fe_mul(&zi, &inverse, &p5);
+    resident_affine_emit(points, pubs, first + 6U, &zi, &z);
+    fe_mul(&inverse, &inverse, &z);
+    fe_mul(&zi, &inverse, &p4);
+    resident_affine_emit(points, pubs, first + 5U, &zi, &z);
+    fe_mul(&inverse, &inverse, &z);
+    fe_mul(&zi, &inverse, &p3);
+    resident_affine_emit(points, pubs, first + 4U, &zi, &z);
+    fe_mul(&inverse, &inverse, &z);
+    fe_mul(&zi, &inverse, &p2);
+    resident_affine_emit(points, pubs, first + 3U, &zi, &z);
+    fe_mul(&inverse, &inverse, &z);
+    fe_mul(&zi, &inverse, &p1);
+    resident_affine_emit(points, pubs, first + 2U, &zi, &z);
+    fe_mul(&inverse, &inverse, &z);
+    fe_mul(&zi, &inverse, &p0);
+    resident_affine_emit(points, pubs, first + 1U, &zi, &z);
+    fe_mul(&inverse, &inverse, &z);
+    resident_affine_emit(points, pubs, first, &inverse, &z);
+#elif RESIDENT_PAIR_INVERSE && RESIDENT_AFFINE_BATCH == 4
     /* Four points share one inversion. Explicit temporaries keep the live
      * field values visible to the compiler, avoiding indexed point arrays. */
     uint first = (uint)get_global_id(0) * 4U;

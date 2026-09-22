@@ -282,9 +282,9 @@ private:
     uint32_t readPos_ = 0;
 
     bool usesStages() const { return !isCuda && openclOptions_.staged; }
-    bool usesAffineFour() const {
-        return usesStages() && openclOptions_.pairInverse &&
-               (openclOptions_.stageOptMask & 2U) && openclOptions_.affineBatch == 4;
+    uint32_t effectiveAffineBatch() const {
+        return usesStages() && openclOptions_.pairInverse && (openclOptions_.stageOptMask & 2U) ?
+               openclOptions_.affineBatch : 2U;
     }
 
     bool buildStages() {
@@ -324,8 +324,9 @@ private:
             error_ = "resident RNG must be chacha12, aes-ctr, or philox";
             return false;
         }
-        if (openclOptions_.affineBatch != 2 && openclOptions_.affineBatch != 4) {
-            error_ = "staged affine batch must be 2 or 4";
+        if (openclOptions_.affineBatch != 2 && openclOptions_.affineBatch != 4 &&
+            openclOptions_.affineBatch != 8) {
+            error_ = "staged affine batch must be 2, 4, or 8";
             return false;
         }
         if (openclOptions_.stageOptMask > 63) {
@@ -380,8 +381,8 @@ private:
                 std::cerr << "  OpenCL " << (usesStages() ? kStageNames[i] : "scan")
                           << ": max group " << maxGroup << ", preferred multiple " << preferred
                           << ", reported private bytes " << privateBytes << " (not a VGPR count)\n";
-                const size_t requestedGroup = i == 1 && usesAffineFour() ?
-                    groupSize_ / 2 : groupSize_;
+                const size_t requestedGroup = i == 1 ?
+                    groupSize_ * 2 / effectiveAffineBatch() : groupSize_;
                 if (requestedGroup > maxGroup) {
                     error_ = "scan kernel work-group limit is " + std::to_string(maxGroup) +
                              "; reduce --gpu-group-size";
@@ -646,10 +647,10 @@ private:
                 enqueued = true;
                 for (unsigned i = 0; i < stageKernels_.size(); ++i) {
                     // One in-order queue: no host readback or clFinish between stages.
-                    const bool affineFour = i == 1 && usesAffineFour();
-                    const size_t global = affineFour ? workItems_ / 2 :
-                                          i < 2 ? workItems_ : lastChunkKeys_;
-                    const size_t local = affineFour ? groupSize_ / 2 : groupSize_;
+                    const bool affine = i == 1;
+                    const size_t global = affine ? lastChunkKeys_ / effectiveAffineBatch() :
+                                          i == 0 ? workItems_ : lastChunkKeys_;
+                    const size_t local = affine ? groupSize_ * 2 / effectiveAffineBatch() : groupSize_;
                     if (!program_.run1D(stageKernels_[i], global, local, &error_, i != 0)) {
                         enqueued = false; break;
                     }

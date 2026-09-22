@@ -101,7 +101,7 @@ void usage() {
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
-        "  --opencl-affine-batch 2|4  staged paired inversion points per work-item (default 4)\n"
+        "  --opencl-affine-batch 2|4|8  staged paired inversion points per work-item (default 4)\n"
         "  --opencl-opt-mask N  staged optimization bits 0..63; 0=baseline, 63=all (default)\n"
         "  --opencl-compiler compact|default  resident compiler mode (default compact)\n"
         "  --opencl-pipeline monolithic|staged  resident layout; selecting it enables GPU-resident mode\n"
@@ -169,8 +169,9 @@ bool parse(int argc, char** argv, Options& o) {
             }
             else if (a == "--opencl-affine-batch") {
                 o.openclOptions.affineBatch = std::stoul(next(i, "--opencl-affine-batch"));
-                if (o.openclOptions.affineBatch != 2 && o.openclOptions.affineBatch != 4)
-                    throw std::runtime_error("--opencl-affine-batch must be 2 or 4");
+                if (o.openclOptions.affineBatch != 2 && o.openclOptions.affineBatch != 4 &&
+                    o.openclOptions.affineBatch != 8)
+                    throw std::runtime_error("--opencl-affine-batch must be 2, 4, or 8");
             }
             else if (a == "--opencl-opt-mask") {
                 o.openclOptions.stageOptMask = std::stoul(next(i, "--opencl-opt-mask"));

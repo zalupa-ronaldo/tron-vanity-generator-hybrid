@@ -33,6 +33,9 @@ int main() {
     OpenclResidentOptions pairedTwo{false, true, false, true, true};
     pairedTwo.affineBatch = 2;
     if (openclResidentSelfTest(device, "chacha12", pairedTwo)) return 1;
+    OpenclResidentOptions pairedEight{false, true, false, true, true};
+    pairedEight.affineBatch = 8;
+    if (openclResidentSelfTest(device, "chacha12", pairedEight)) return 1;
     for (uint32_t mask : {0U, 1U, 2U, 4U, 8U, 16U, 32U}) {
         OpenclResidentOptions isolated{false, true, false, true, true};
         isolated.stageOptMask = mask;

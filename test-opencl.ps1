@@ -4,10 +4,12 @@ param(
     [ValidateSet("compact", "default")][string]$Compiler = "compact",
     [ValidateSet("staged", "monolithic")][string]$Pipeline = "staged",
     [ValidateRange(30, 600)][int]$TimeoutSeconds = 30,
-    [switch]$CompareStages
+    [switch]$CompareStages,
+    [switch]$CompareAffineBatches
 )
 $ErrorActionPreference = "Stop"
 if ($CompareStages -and $Pipeline -ne "staged") { throw "-CompareStages requires -Pipeline staged." }
+if ($CompareAffineBatches -and $Pipeline -ne "staged") { throw "-CompareAffineBatches requires -Pipeline staged." }
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
 if (-not (Test-Path $exe)) { throw "Extract the release ZIP before running this script." }
 
@@ -166,6 +168,20 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
             if (-not (Invoke-BoundedTest ("07-" + $case.Name) $profileArgs $true)) {
                 Write-Summary
                 exit 1
+            }
+        }
+    }
+    if ($CompareAffineBatches) {
+        if ($selected -ne "pair") {
+            Write-Report "Affine batch comparison skipped: paired inversion did not pass the scan self-test."
+        } else {
+            foreach ($batch in @(2, 4, 8)) {
+                $profileArgs = $selectedArgs + @("--opencl-affine-batch", "$batch", "--opencl-profile",
+                                                 "--words", "words.txt", "--gpu-buffer-mb", "8", "--bench-seconds", "5")
+                if (-not (Invoke-BoundedTest ("08-affine-$batch") $profileArgs $true)) {
+                    Write-Summary
+                    exit 1
+                }
             }
         }
     }

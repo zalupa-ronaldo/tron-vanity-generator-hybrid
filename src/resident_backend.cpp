@@ -23,7 +23,6 @@
 namespace {
 
 constexpr uint32_t kRecordBytes = resident_protocol::kRecordBytes;
-constexpr uint32_t kMaxMatches = resident_protocol::kMaxMatches;
 constexpr uint32_t kMetaWords = resident_protocol::kMetaWords;
 constexpr uint32_t kResidentEcbits = 256;
 constexpr uint32_t kResidentEcw = 8;
@@ -52,19 +51,6 @@ std::vector<unsigned char> genResidentTable(secp256k1_context* c) {
         }
     }
     return table;
-}
-
-uint32_t read32(const unsigned char* p) {
-    return static_cast<uint32_t>(p[0]) |
-           (static_cast<uint32_t>(p[1]) << 8) |
-           (static_cast<uint32_t>(p[2]) << 16) |
-           (static_cast<uint32_t>(p[3]) << 24);
-}
-
-uint64_t read64(const unsigned char* p) {
-    uint64_t v = 0;
-    for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(p[i]) << (i * 8);
-    return v;
 }
 
 std::string hexUpper(const unsigned char* p, size_t n) {
@@ -107,7 +93,8 @@ public:
         out.kind = "GPU-resident";
         out.title = device_.name;
         out.lines.push_back("OpenCL " + device_.platform);
-        out.lines.push_back("CSPRNG " + rng_ + ", chunk " + std::to_string(chunkMs_) + " ms");
+        out.lines.push_back("CSPRNG " + rng_ + ", split seed+scan, chunk " +
+                            std::to_string(chunkMs_) + " ms");
         out.lines.push_back(std::to_string(bufferMiB_) + " MiB device result ring");
         return out;
     }
@@ -171,13 +158,15 @@ private:
     uint32_t workItems_ = 1u << 18;
     uint32_t ringSlots_ = 0;
     uint32_t groupSize_ = kResidentLocalSize;
-    uint64_t streamBase_ = 0;
+    uint64_t rngCounter_ = 0;
+    uint64_t sequenceBase_ = 0;
     secp256k1_context* context_ = nullptr;
     bool tried_ = false, ready_ = false;
     std::string error_;
     ocl::Program program_;
-    ocl::id kernel_ = nullptr;
+    ocl::id seedKernel_ = nullptr, probeKernel_ = nullptr;
     ocl::id seed_ = nullptr, table_ = nullptr, dfa_ = nullptr;
+    ocl::id baseSk_ = nullptr, basePub_ = nullptr;
     ocl::id outStart_ = nullptr, outLen_ = nullptr, outIds_ = nullptr;
     ocl::id meta_ = nullptr, records_ = nullptr;
     std::array<unsigned char, 32> seedBytes_{};
@@ -211,14 +200,15 @@ private:
                            " -D ECW=" + std::to_string(kResidentEcw) +
                            " -D ECBITS=" + std::to_string(kResidentEcbits) +
                            " -D KPI=" + std::to_string(kResidentKpi) + " -D MONT_N=1";
-        auto stageStarted = beginStage("compiling the dedicated OpenCL kernel (first run may populate the driver cache)");
+        auto stageStarted = beginStage("compiling split OpenCL seed and scan kernels (first run may populate the driver cache)");
         if (!program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_)) {
             failStage(stageStarted);
             return false;
         }
         finishStage(stageStarted);
-        kernel_ = program_.kernel("tron_vanity_resident", &error_);
-        if (!kernel_) return false;
+        seedKernel_ = program_.kernel("tron_vanity_resident_seed", &error_);
+        probeKernel_ = program_.kernel("tron_vanity_resident_probe", &error_);
+        if (!seedKernel_ || !probeKernel_) return false;
         if (!randBytes(seedBytes_.data(), seedBytes_.size())) {
             error_ = "OS CSPRNG seed generation failed";
             return false;
@@ -231,6 +221,8 @@ private:
         stageStarted = beginStage("uploading the table and dictionary");
         seed_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, seedBytes_.size(), seedBytes_.data(), &error_);
         table_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, table.size(), table.data(), &error_);
+        baseSk_ = program_.buffer(ocl::MEM_READ_WRITE, 32, nullptr, &error_);
+        basePub_ = program_.buffer(ocl::MEM_READ_WRITE, 64, nullptr, &error_);
         dfa_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
                                dictionary_->dfa.size() * sizeof(uint32_t),
                                const_cast<uint32_t*>(dictionary_->dfa.data()), &error_);
@@ -243,7 +235,8 @@ private:
         outIds_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
                                   dictionary_->outIds.size() * sizeof(uint32_t),
                                   const_cast<uint32_t*>(dictionary_->outIds.data()), &error_);
-        if (!seed_ || !table_ || !dfa_ || !outStart_ || !outLen_ || !outIds_) {
+        if (!seed_ || !table_ || !baseSk_ || !basePub_ ||
+            !dfa_ || !outStart_ || !outLen_ || !outIds_) {
             failStage(stageStarted);
             return false;
         }
@@ -265,28 +258,117 @@ private:
             return false;
         }
         finishStage(stageStarted);
+
+        stageStarted = beginStage("validating the GPU-generated base pair");
+        if (!validateSeedKernel()) {
+            failStage(stageStarted);
+            return false;
+        }
+        finishStage(stageStarted);
         ready_ = true;
         std::cerr << "  resident init: ready (" << elapsedText(initStarted) << " total)\n";
         return true;
     }
 
-    bool bindKernel() {
-        uint64_t stream = streamBase_;
-        return program_.setArg(kernel_, 0, sizeof(ocl::id), &seed_) &&
-               program_.setArg(kernel_, 1, sizeof(ocl::id), &table_) &&
-               program_.setArg(kernel_, 2, sizeof(ocl::id), &dfa_) &&
-               program_.setArg(kernel_, 3, sizeof(ocl::id), &outStart_) &&
-               program_.setArg(kernel_, 4, sizeof(ocl::id), &outLen_) &&
-               program_.setArg(kernel_, 5, sizeof(ocl::id), &outIds_) &&
-               program_.setArg(kernel_, 6, sizeof(ocl::id), &meta_) &&
-               program_.setArg(kernel_, 7, sizeof(ocl::id), &records_) &&
-               program_.setArg(kernel_, 8, sizeof(uint32_t), &ringSlots_) &&
-               program_.setArg(kernel_, 9, sizeof(uint64_t), &stream);
+    bool bindSeedKernel() {
+        uint64_t counter = rngCounter_;
+        return program_.setArg(seedKernel_, 0, sizeof(ocl::id), &seed_) &&
+               program_.setArg(seedKernel_, 1, sizeof(ocl::id), &table_) &&
+               program_.setArg(seedKernel_, 2, sizeof(ocl::id), &baseSk_) &&
+               program_.setArg(seedKernel_, 3, sizeof(ocl::id), &basePub_) &&
+               program_.setArg(seedKernel_, 4, sizeof(uint64_t), &counter);
+    }
+
+    bool bindProbeKernel() {
+        uint64_t sequence = sequenceBase_;
+        return program_.setArg(probeKernel_, 0, sizeof(ocl::id), &baseSk_) &&
+               program_.setArg(probeKernel_, 1, sizeof(ocl::id), &basePub_) &&
+               program_.setArg(probeKernel_, 2, sizeof(ocl::id), &table_) &&
+               program_.setArg(probeKernel_, 3, sizeof(ocl::id), &dfa_) &&
+               program_.setArg(probeKernel_, 4, sizeof(ocl::id), &outStart_) &&
+               program_.setArg(probeKernel_, 5, sizeof(ocl::id), &outLen_) &&
+               program_.setArg(probeKernel_, 6, sizeof(ocl::id), &outIds_) &&
+               program_.setArg(probeKernel_, 7, sizeof(ocl::id), &meta_) &&
+               program_.setArg(probeKernel_, 8, sizeof(ocl::id), &records_) &&
+               program_.setArg(probeKernel_, 9, sizeof(uint32_t), &ringSlots_) &&
+               program_.setArg(probeKernel_, 10, sizeof(uint64_t), &sequence);
+    }
+
+    bool validateSeedKernel() {
+        if (!bindSeedKernel()) {
+            error_ = "setting resident seed-kernel arguments failed";
+            return false;
+        }
+        if (!program_.run1D(seedKernel_, 1, 1, &error_) || !program_.finish()) {
+            if (error_.empty()) error_ = "resident seed-kernel execution failed";
+            return false;
+        }
+
+        std::array<unsigned char, 32> sk{};
+        std::array<unsigned char, 64> gpuPub{};
+        if (!program_.read(baseSk_, sk.size(), sk.data()) ||
+            !program_.read(basePub_, gpuPub.size(), gpuPub.data())) {
+            error_ = "reading resident seed-kernel validation output failed";
+            return false;
+        }
+        secp256k1_pubkey pubkey;
+        unsigned char encoded[65] = {0};
+        size_t encodedLen = sizeof(encoded);
+        const bool valid = secp256k1_ec_seckey_verify(context_, sk.data()) &&
+                           secp256k1_ec_pubkey_create(context_, &pubkey, sk.data()) &&
+                           secp256k1_ec_pubkey_serialize(context_, encoded, &encodedLen, &pubkey,
+                                                        SECP256K1_EC_UNCOMPRESSED) &&
+                           encodedLen == sizeof(encoded) &&
+                           std::memcmp(encoded + 1, gpuPub.data(), gpuPub.size()) == 0;
+        std::fill(sk.begin(), sk.end(), 0);
+        if (!valid) {
+            error_ = "GPU-generated base pair failed CPU secp256k1 validation";
+            return false;
+        }
+        ++rngCounter_; // the validated pair is deliberately not searched
+        return true;
+    }
+
+    bool decodeAndVerifyRecord(const unsigned char* rec, FoundKey& key) {
+        secp256k1_pubkey pubkey;
+        unsigned char encoded[65] = {0};
+        size_t encodedLen = sizeof(encoded);
+        if (!secp256k1_ec_seckey_verify(context_, rec) ||
+            !secp256k1_ec_pubkey_create(context_, &pubkey, rec) ||
+            !secp256k1_ec_pubkey_serialize(context_, encoded, &encodedLen, &pubkey,
+                                           SECP256K1_EC_UNCOMPRESSED) ||
+            encodedLen != sizeof(encoded)) {
+            error_ = "GPU resident returned an invalid private key";
+            return false;
+        }
+        const std::string address = tronAddressFromPubXY(encoded + 1);
+        const std::string recorded(reinterpret_cast<const char*>(rec + 32), 34);
+        if (address != recorded) {
+            error_ = "GPU resident key/address validation mismatch";
+            return false;
+        }
+        auto words = dictionary_->matchWords(address);
+        if (words.empty()) {
+            error_ = "GPU resident returned a false dictionary match";
+            return false;
+        }
+        key.address = address;
+        key.privHex = hexUpper(rec, 32);
+        key.words = std::move(words);
+        return true;
     }
 
     bool runChunk(uint32_t* produced, uint32_t* overflow, const ReportFn& report) {
-        if (!bindKernel()) { error_ = "setting resident kernel arguments failed"; return false; }
-        if (!program_.run1D(kernel_, workItems_, groupSize_, &error_) || !program_.finish()) return false;
+        if (!bindSeedKernel() || !bindProbeKernel()) {
+            error_ = "setting resident split-kernel arguments failed";
+            return false;
+        }
+        if (!program_.run1D(seedKernel_, 1, 1, &error_) ||
+            !program_.run1D(probeKernel_, workItems_, groupSize_, &error_) ||
+            !program_.finish()) {
+            if (error_.empty()) error_ = "resident split-kernel execution failed";
+            return false;
+        }
         std::array<uint32_t, kMetaWords> meta{};
         if (!program_.read(meta_, sizeof(meta), meta.data())) { error_ = "reading resident metadata failed"; return false; }
         const uint32_t writePos = meta[0];
@@ -305,19 +387,14 @@ private:
             for (uint32_t i = 0; i < count; ++i) {
                 const unsigned char* rec = bytes.data() + static_cast<size_t>(i) * kRecordBytes;
                 FoundKey key;
-                key.privHex = hexUpper(rec, 32);
-                key.address.assign(reinterpret_cast<const char*>(rec + 32), 34);
-                uint32_t n = std::min(read32(rec + 68), kMaxMatches);
-                for (uint32_t j = 0; j < n; ++j) {
-                    uint32_t id = read32(rec + 72 + j * 4);
-                    if (id < dictionary_->words.size()) key.words.push_back(dictionary_->words[id]);
-                }
-                if (!key.words.empty()) report(key);
+                if (!decodeAndVerifyRecord(rec, key)) return false;
+                report(key);
             }
         }
         readPos_ = writePos;
         if (!program_.writeAt(meta_, sizeof(uint32_t), sizeof(uint32_t), &readPos_)) return false;
-        streamBase_ += workItems_ / groupSize_;
+        ++rngCounter_;
+        sequenceBase_ += static_cast<uint64_t>(workItems_) * kResidentKpi;
         return true;
     }
 };

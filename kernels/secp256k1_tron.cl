@@ -19,6 +19,7 @@ typedef struct { fe x, y, z; int inf; } gej;
 inline void fe_set_int(fe *r, uint v);
 inline void ge_load_g(ge *p, __global const uchar *xy);
 inline void gej_add_ge(gej *r, const gej *a, const ge *b);
+inline void gej_from_ge(gej *r, const ge *a);
 inline void gej_to_pub(uchar *out, gej *a);
 inline void keccak256_64(uchar *out, const uchar *in);
 inline void sha256_short(uchar *out, const uchar *msg, int len);
@@ -50,6 +51,7 @@ static inline uint resident_load32(const __global uchar *p) {
     return ((uint)p[0]) | ((uint)p[1] << 8) | ((uint)p[2] << 16) | ((uint)p[3] << 24);
 }
 
+#if RESIDENT_RNG == 1
 static inline uint resident_rotl(uint x, uint n) { return (x << n) | (x >> (32 - n)); }
 
 static inline void resident_qr(uint *a, uint *b, uint *c, uint *d) {
@@ -83,7 +85,9 @@ static inline void resident_chacha12(__global const uchar *seed, ulong counter,
         out[i * 4 + 2] = (uchar)(v >> 16); out[i * 4 + 3] = (uchar)(v >> 24);
     }
 }
+#endif
 
+#if RESIDENT_RNG == 2
 static inline void resident_philox4(__global const uchar *seed, ulong counter,
                                     uint domain, __private uchar *out) {
     uint c0 = (uint)counter, c1 = (uint)(counter >> 32), c2 = domain, c3 = 0;
@@ -101,7 +105,9 @@ static inline void resident_philox4(__global const uchar *seed, ulong counter,
         out[i * 4 + 2] = (uchar)(v[i] >> 16); out[i * 4 + 3] = (uchar)(v[i] >> 24);
     }
 }
+#endif
 
+#if RESIDENT_RNG == 3
 __constant uchar resident_aes_sbox[256] = {
     0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
     0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
@@ -165,6 +171,7 @@ static inline void resident_aes128(__global const uchar *seed, ulong counter,
     }
     for (int i = 0; i < 16; ++i) out[i] = s[i];
 }
+#endif
 
 static inline void resident_rng32(__global const uchar *seed, ulong counter,
                                   __private uchar *out) {
@@ -208,13 +215,28 @@ static inline void resident_ec_mul(gej *acc, const uchar *sk,
     acc->x.n[8] = 0; acc->x.n[9] = 0;
     acc->y = acc->x; fe_set_int(&acc->z, 1); acc->inf = 1;
     #if ECW == 1
+    #pragma unroll 1
     for (int bit = 0; bit < 256; ++bit) {
         if (resident_scalar_bit(sk, bit)) {
             ge g; ge_load_g(&g, &table_b32[bit * 64]);
             gej_add_ge(acc, acc, &g);
         }
     }
+    #elif ECW == 8
+    /* OpenCL resident production specialization. Reading one big-endian byte
+     * per window avoids a nested bit loop and the AMD optimizer's tendency to
+     * explode the 32-window fixed-base function during JIT compilation. */
+    #pragma unroll 1
+    for (int w = 0; w < 32; ++w) {
+        uint d = sk[31 - w];
+        if (d) {
+            ge g;
+            ge_load_g(&g, &table_b32[(w * 256 + d) * 64]);
+            gej_add_ge(acc, acc, &g);
+        }
+    }
     #else
+    #pragma unroll 1
     for (int w = 0; w < ECW_WINDOWS; ++w) {
         uint d = 0;
         for (int b = 0; b < ECW; ++b)
@@ -327,8 +349,73 @@ static inline void resident_emit(const uchar *sk, const uchar *pub,
     resident_u64(&dst[140], seq);
 }
 
-__kernel void tron_vanity_resident(
+/* AMD's Windows OpenCL compiler can spend indefinitely optimizing the old
+ * monolithic RNG + 256-bit scalar multiply + address-matching kernel.  Keep
+ * those two call graphs independent.  The first kernel creates one random
+ * base pair per bounded dispatch; the second scans a consecutive range from
+ * that pair, just like the well-tested legacy OpenCL path. */
+__kernel __attribute__((reqd_work_group_size(1, 1, 1)))
+void tron_vanity_resident_seed(
         __global const uchar *seed,
+        __global const uchar *table_b32,
+        __global uchar *base_sk_out,
+        __global uchar *base_pub_out,
+        const ulong rng_counter) {
+    if (get_global_id(0) != 0) return;
+
+    uchar sk[32], pub[64];
+    int valid = 0;
+    /* Invalid 256-bit samples are astronomically rare. Four independent
+     * attempts preserve rejection sampling without an unbounded GPU loop. */
+    for (uint attempt = 0; attempt < 4 && !valid; ++attempt) {
+        resident_rng32(seed, rng_counter * 4UL + attempt, sk);
+        valid = resident_lt_order(sk);
+    }
+    if (!valid) {
+        for (int i = 0; i < 32; ++i) sk[i] = 0;
+        sk[31] = 1;
+    }
+
+    gej base;
+    resident_ec_mul(&base, sk, table_b32);
+    gej_to_pub(pub, &base);
+    for (int i = 0; i < 32; ++i) base_sk_out[i] = sk[i];
+    for (int i = 0; i < 64; ++i) base_pub_out[i] = pub[i];
+}
+
+static inline void resident_add_offset(gej *acc,
+                                       __global const uchar *base_pub,
+                                       __global const uchar *table_b32,
+                                       uint offset) {
+    ge p0;
+    ge_load_g(&p0, base_pub);
+    gej_from_ge(acc, &p0);
+    /* offset is uint; only the first four 8-bit table windows can be nonzero. */
+    for (uint w = 0; w < 4; ++w) {
+        uint d = (offset >> (w * 8)) & 255U;
+        if (d) {
+            ge add;
+            ge_load_g(&add, &table_b32[(w * ECW_DIGITS + d) * 64]);
+            gej_add_ge(acc, acc, &add);
+        }
+    }
+}
+
+static inline int resident_key_with_offset(__global const uchar *base_sk,
+                                           uint offset, uchar *sk) {
+    for (int i = 0; i < 32; ++i) sk[i] = base_sk[i];
+    uint carry = offset;
+    for (int i = 31; i >= 0; --i) {
+        uint sum = (uint)sk[i] + (carry & 255U);
+        sk[i] = (uchar)sum;
+        carry = (carry >> 8) + (sum >> 8);
+    }
+    return carry == 0 && resident_lt_order(sk);
+}
+
+__kernel void tron_vanity_resident_probe(
+        __global const uchar *base_sk,
+        __global const uchar *base_pub,
         __global const uchar *table_b32,
         __global const uint *dfa,
         __global const uint *out_start,
@@ -337,54 +424,22 @@ __kernel void tron_vanity_resident(
         volatile __global uint *meta,
         __global uchar *records,
         const uint cap,
-        const ulong stream_base) {
-    uint lid = get_local_id(0);
-    uint group = get_group_id(0);
-    __local uchar base_sk[32];
-    __local gej base_acc;
-    if (lid == 0) {
-        uchar base_private[32];
-        resident_rng32(seed, stream_base + group, base_private);
-        for (int i = 0; i < 32; ++i) base_sk[i] = base_private[i];
-        if (resident_lt_order(base_private)) {
-            gej base_tmp;
-            resident_ec_mul(&base_tmp, base_private, table_b32);
-            base_acc = base_tmp;
-        }
-        else {
-            for (int i = 0; i < 32; ++i) base_sk[i] = 0;
-            base_acc.inf = 1;
-        }
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
+        const ulong sequence_base) {
+    uint first_offset = get_global_id(0) * KPI;
+    ge generator;
+    ge_load_g(&generator, &table_b32[64]); /* window 0, digit 1 = G */
+    gej acc;
+    resident_add_offset(&acc, base_pub, table_b32, first_offset);
+
     for (uint item = 0; item < KPI; ++item) {
-        uint offset = lid * KPI + item;
-        ulong seq = (stream_base + group) * (get_local_size(0) * KPI) + offset;
+        uint offset = first_offset + item;
         uchar sk[32], pub[64];
-        for (int i = 0; i < 32; ++i) sk[i] = base_sk[i];
-        uint carry = offset;
-        for (int i = 31; i >= 0 && carry; --i) {
-            uint sum = sk[i] + (carry & 255U);
-            sk[i] = (uchar)sum;
-            carry = (carry >> 8) + (sum >> 8);
+        if (resident_key_with_offset(base_sk, offset, sk)) {
+            gej_to_pub(pub, &acc);
+            resident_emit(sk, pub, dfa, out_start, out_len, out_ids,
+                          meta, records, cap, sequence_base + offset);
         }
-        if (base_acc.inf) continue;
-        if (!resident_lt_order(sk)) continue;
-        gej acc = base_acc;
-        uint low = offset & (ECW_DIGITS - 1);
-        uint high = offset >> ECW;
-        if (low) {
-            ge g;
-            ge_load_g(&g, &table_b32[low * 64]);
-            gej_add_ge(&acc, &acc, &g);
-        }
-        if (high) {
-            ge g;
-            ge_load_g(&g, &table_b32[(ECW_DIGITS + high) * 64]);
-            gej_add_ge(&acc, &acc, &g);
-        }
-        gej_to_pub(pub, &acc);
-        resident_emit(sk, pub, dfa, out_start, out_len, out_ids, meta, records, cap, seq);
+        if (item + 1 < KPI) gej_add_ge(&acc, &acc, &generator);
     }
 }
 #endif

@@ -81,8 +81,12 @@ gaps. Integrated GPUs stay at `2^16` to keep desktop responsiveness. Use
 
 `--gpu-resident` keeps the dictionary, 256-bit GPU-generated scalars, address
 checking and a device result ring on the GPU. The CPU receives only complete
-matches for local JSONL writing. Chunks are bounded to avoid Windows WDDM
-timeouts:
+matches for independent secp256k1/address verification and local JSONL writing.
+OpenCL uses two bounded in-order dispatches: a small CSPRNG/fixed-base seed
+kernel followed by a legacy-shaped consecutive range scan. Splitting the call
+graphs avoids the Windows RDNA4 compiler hang caused by the former monolithic
+kernel and amortizes one full 256-bit scalar multiplication over the whole
+chunk. Chunks remain bounded to avoid Windows WDDM timeouts:
 
 ```powershell
 .\build\tron_vanity_generator.exe --backend opencl --gpu-resident `
@@ -178,13 +182,15 @@ Resident work-group size can be tuned per GPU without rebuilding:
 Supported values are `64`, `128` and `256`; `256` is the default. If a driver
 reports a compile or launch failure, retry with `128`.
 
-Resident startup prints the OpenCL compilation, table upload and ring-allocation
-stages separately. The first launch can spend time in the vendor compiler while
-it populates the driver cache; this is CPU-side initialization and therefore
-does not show as GPU utilization. The resident build excludes the unrelated
-legacy/profile/test kernels to keep that one-time JIT small, which is especially
-important on Windows RDNA4 (`gfx1200`/`gfx1201`). If resident initialization is
-still blocked by a vendor driver, the regular OpenCL path remains available:
+Resident startup prints the split-kernel compilation, table upload,
+ring-allocation and GPU base-pair validation stages separately. The first launch
+can spend time in the vendor compiler while it populates the driver cache; this
+is CPU-side initialization and therefore does not show as GPU utilization. The
+resident build also excludes unrelated RNG implementations and the
+legacy/profile/test entry points from each JIT. Every returned private
+key/address/dictionary match is recomputed on the CPU before it can be written.
+If initialization is still blocked by a vendor driver, the regular OpenCL path
+remains available:
 
 ```powershell
 .\tron_vanity_generator.exe --backend opencl --ec-window 8 `

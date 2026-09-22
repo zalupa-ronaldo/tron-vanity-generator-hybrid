@@ -39,19 +39,23 @@ public:
     Program& operator=(const Program&) = delete;
     bool build(id platform, id device, const std::string& source,
                const std::string& opts, std::string* err, bool profiling = false, bool trace = false);
+    // Build a separate program in the same context/queue. Previously created
+    // kernels stay valid; subsequent kernel() calls use the new program.
+    bool buildAdditional(const std::string& source, const std::string& opts, std::string* err);
     ~Program();
 
     id kernel(const char* name, std::string* err);
     id buffer(unsigned long long flags, size_t bytes, void* host, std::string* err);
     bool setArg(id k, unsigned idx, size_t sz, const void* val);
-    bool run1D(id k, size_t global, size_t local, std::string* err);   // local=0 → 让实现选
+    bool run1D(id k, size_t global, size_t local, std::string* err, bool appendTiming = false);
     bool read(id buf, size_t bytes, void* dst);
     bool readAt(id buf, size_t offset, size_t bytes, void* dst);
     bool write(id buf, size_t bytes, const void* src);
     bool writeAt(id buf, size_t offset, size_t bytes, const void* src);
     bool finish();
     void release(id mem);
-    // Requires a profiling queue and a completed last dispatch. Device time,
+    // Requires a profiling queue and completed dispatches. With appendTiming,
+    // sums the events for the entire staged chunk, not just its last kernel. Device time,
     // not host enqueue/wait time; unavailable timestamps are not reported as 0.
     bool lastKernelMilliseconds(double& ms) const;
     bool kernelLimits(id kernel, size_t& maxGroup, size_t& preferredMultiple,
@@ -59,10 +63,9 @@ public:
 
 private:
     id ctx_ = nullptr, queue_ = nullptr, program_ = nullptr, device_ = nullptr;
-    id lastEvent_ = nullptr;
     bool profiling_ = false;
     bool trace_ = false;
-    std::vector<id> kernels_, buffers_;
+    std::vector<id> kernels_, buffers_, programs_, timingEvents_;
 };
 
 }  // namespace ocl

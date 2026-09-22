@@ -210,11 +210,29 @@ regular OpenCL path remains available:
 The resident path now defaults to `--opencl-compiler compact`: heavy EC
 functions are outlined and the inversion squaring loops are not unrolled.
 The arithmetic and rejection sampling are unchanged. This limits compiler
-code expansion; **the v1.6.0 compact/paired test still timed out after 120 seconds
-on the reported RX 9070 XT**. Its old "compiling" message covered context and
-queue creation as well as the build, so that output did not isolate the blocked
-API. This is not a confirmed AMD fix. `--opencl-compiler default`
+code expansion but did not solve the reported RX 9070 XT startup problem.
+**v1.6.1 on gfx1201, driver 3665.0 (PAL,LC):** tiny-kernel and RNG-only checks
+passed in 1.1/0.7 seconds, while both compact scan-only inversion variants hit
+the 30-second limit inside `clBuildProgram`. This isolates the wait to building
+the scan program, not context creation, RNG execution or GPU search execution.
+It does not identify a specific faulty compiler pass or prove an infinite hang.
+`--opencl-compiler default`
 retains the inlining-oriented alternative for comparison.
+
+`--opencl-pipeline staged` now provides an experimental alternative: **four
+separate programs**, compiled independently, for curve additions, affine
+conversion/inversion, address encoding (Keccak/SHA256d/Base58), and dictionary
+matching. A shared context and in-order queue carry the GPU buffers between
+stages, without CPU readback between them. Unrelated implementations are removed
+from each program by preprocessing. This is an architectural attempt to reduce
+compiler complexity, **not a confirmed RX 9070 XT fix or speed improvement**.
+
+Normal CLI search keeps `monolithic` as the pipeline default. Selecting `staged`
+requires `--backend opencl` and implies `--gpu-resident`. The staged path uses
+28.25 MiB of additional scratch for public points/addresses, capped at 65,536
+work-items / 131,072 keys per chunk. It adds three scan dispatches and GPU-memory
+traffic, so its speed must be measured on the target device. GPU event timings
+sum all four stage events; compare wall throughput, not just the last kernel.
 
 `--opencl-inverse pair` uses one field inversion plus three multiplies for
 the two Jacobian points in a work-item, instead of two inversions. It avoids
@@ -225,10 +243,14 @@ These options affect resident OpenCL only, not legacy OpenCL, Metal or CUDA.
 
 On Windows, extract the release to a new folder (preserve your own `words.txt`)
 and double-click **`test-opencl.cmd`**, or run it from CMD. It now runs separate,
-bounded checks: tiny OpenCL kernel, RNG only (no EC/hash code), scan only with
-single and paired inversions (no GPU RNG code), then the combined program if
-its components passed. If both scan variants fail, it stops without launching
-a profile or suggesting a real search. If a scan variant passes, it runs a five-second profile using the
+bounded checks and defaults to the **staged** pipeline: tiny OpenCL kernel,
+RNG only, build-only checks for each stage (both affine inversion variants),
+then full scan self-tests. Build checks continue after a failing stage so the
+report can localize the problematic compilation unit. A build PASS is not an
+execution/correctness PASS. The full scan tests only run if all required units
+and at least one affine variant built successfully. After that, GPU-RNG plus
+staged-scan is tested if RNG passed. If no scan self-test passes, it stops
+without a profile or real-search suggestion. Otherwise it runs a five-second profile using the
 validated configuration. A failed GPU RNG/combined check can select the explicit
 OS-seeded scan-only workaround; this is not a silent CPU search fallback.
 
@@ -240,30 +262,36 @@ Send **`summary.txt`** from the newly created `opencl-diagnostic-*` folder.
 The report includes device/driver versions, flags, separate API begin/return
 markers and stage results. Normal search has no launcher timeout.
 Use `test-opencl.cmd -Inverse single` to prefer single inversion if it passes.
+Use `test-opencl.cmd -Pipeline monolithic` only to retest the old pipeline.
 
 `--opencl-host-seed` uses the OS CSPRNG (BCryptGenRandom on Windows) for each
 base scalar, with secp256k1 rejection validation, and excludes the GPU RNG
 kernel from compilation. Address generation and matching remain on the GPU.
 Use only if the scan-only self-test passes; it cannot bypass a blocked scan
 compiler. This option requires `--backend opencl` and implies `--gpu-resident`.
+The supplied v1.6.1 report already rules out GPU RNG as the cause of that scan
+build timeout: the OS-seeded scan timed out too.
 
 Manual CMD commands (one command per line; unlike the launcher, not time-bounded):
 
 ```bat
 tron_vanity_generator.exe --backend opencl --opencl-diagnose smoke
 tron_vanity_generator.exe --backend opencl --opencl-diagnose rng
-tron_vanity_generator.exe --backend opencl --opencl-diagnose scan --opencl-inverse pair
-tron_vanity_generator.exe --backend opencl --opencl-diagnose full --opencl-inverse pair
-tron_vanity_generator.exe --backend opencl --opencl-profile --opencl-inverse single --words words.txt --bench-seconds 5
-tron_vanity_generator.exe --backend opencl --opencl-profile --opencl-inverse pair --words words.txt --bench-seconds 5
+tron_vanity_generator.exe --backend opencl --opencl-diagnose build-curve
+tron_vanity_generator.exe --backend opencl --opencl-diagnose build-affine --opencl-inverse pair
+tron_vanity_generator.exe --backend opencl --opencl-diagnose build-address
+tron_vanity_generator.exe --backend opencl --opencl-diagnose build-match
+tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-diagnose scan --opencl-inverse pair
+tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-diagnose full --opencl-inverse pair
+tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-profile --opencl-inverse pair --words words.txt --bench-seconds 5
 ```
 
 Each scan/full self-test independently verifies 1,024 address/key pairs against
 libsecp256k1. The launcher prints an optional search command for the validated
-configuration but never executes it. For a passing combined/paired test:
+configuration but never executes it. For a passing staged GPU-RNG/paired test:
 
 ```bat
-tron_vanity_generator.exe --backend opencl --gpu-resident --opencl-inverse pair --words words.txt --seconds 60
+tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --words words.txt --seconds 60
 ```
 
 The profile reports full wall throughput, base-point preparation, scan/wait
@@ -275,9 +303,10 @@ OpenCL work size is 16,384 threads and adapts in work-group multiples, with
 growth capped at 2x per dispatch. Printed private-memory bytes are an OpenCL
 query, not a count of AMD VGPRs or a measurement of spills.
 
-Local checks passed on Apple M4 OpenCL for single/pair inversion and all three
-RNGs; the exact shared kernel also has CPU oracle/boundary tests. A short,
-contended M4 run using 358 words measured 2.66 M/s single versus 4.32 M/s pair,
+Local checks passed on Apple M4 OpenCL for monolithic/staged single/pair inversion
+and all three RNGs. CPU oracle tests compare both exact pipelines, including
+order-boundary/infinity handling, 32-bit offsets, ring overflow and disabled matches. A short,
+contended **monolithic** M4 run using 358 words measured 2.66 M/s single versus 4.32 M/s pair,
 with paired repeats near 4.0 M/s. The production Metal worker was left running:
 these are preliminary wall timings, **not an AMD result or an isolated benchmark**.
 Linux CI additionally executes the OpenCL kernels with PoCL on CPU; Windows CI

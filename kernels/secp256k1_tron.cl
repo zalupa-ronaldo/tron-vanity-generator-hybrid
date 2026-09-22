@@ -14,6 +14,16 @@
 #define ECW_DIGITS (1 << ECW)
 #define ECW_WINDOWS ((ECBITS + ECW - 1) / ECW)
 
+/* Separate compilation units for the optional OpenCL staged pipeline.
+ * 0 = original monolithic path (also CUDA), 1 = curve, 2 = affine,
+ * 3 = address encoding, 4 = dictionary and result ring. */
+#ifndef RESIDENT_SPLIT_STAGE
+#define RESIDENT_SPLIT_STAGE 0
+#endif
+#if RESIDENT_SPLIT_STAGE && KPI != 2
+#error Staged resident kernels require KPI=2
+#endif
+
 typedef struct { uint n[10]; } fe;
 typedef struct { fe x, y; int inf; } ge;
 typedef struct { fe x, y, z; int inf; } gej;
@@ -229,6 +239,7 @@ static inline int resident_lt_order(const uchar *sk) {
 }
 
 #ifndef RESIDENT_SEED_ONLY
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 4
 static inline void resident_u32(__global uchar *p, uint v) {
     p[0] = (uchar)v; p[1] = (uchar)(v >> 8); p[2] = (uchar)(v >> 16); p[3] = (uchar)(v >> 24);
 }
@@ -251,7 +262,9 @@ __constant uchar resident_b58_map[128] = {
 static inline uint resident_b58_index(uchar c) {
     return c < 128 ? resident_b58_map[c] : 255;
 }
+#endif
 
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 3
 static inline void resident_base58_address(uchar *addr, const uchar *full25) {
     const char b58[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     // Big-endian base-65536 limbs: 13 limbs instead of 25 byte divisions.
@@ -274,14 +287,8 @@ static inline void resident_base58_address(uchar *addr, const uchar *full25) {
     }
 }
 
-static inline void resident_emit(const uchar *sk, const uchar *pub,
-                                 __global const uint *dfa,
-                                 __global const uint *out_start,
-                                 __global const uint *out_len,
-                                 __global const uint *out_ids,
-                                 volatile __global uint *meta,
-                                 __global uchar *records, uint cap, ulong seq) {
-    uchar h[32], payload[21], d1[32], d2[32], full[25], addr[34];
+static inline void resident_address(const uchar *pub, uchar *addr) {
+    uchar h[32], payload[21], d1[32], d2[32], full[25];
     keccak256_64(h, pub);
     payload[0] = 0x41;
     for (int i = 0; i < 20; ++i) payload[1 + i] = h[12 + i];
@@ -289,7 +296,17 @@ static inline void resident_emit(const uchar *sk, const uchar *pub,
     for (int i = 0; i < 21; ++i) full[i] = payload[i];
     for (int i = 0; i < 4; ++i) full[21 + i] = d2[i];
     resident_base58_address(addr, full);
+}
+#endif
 
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 4
+static inline void resident_match(const uchar *sk, const uchar *addr,
+                                 __global const uint *dfa,
+                                 __global const uint *out_start,
+                                 __global const uint *out_len,
+                                 __global const uint *out_ids,
+                                 volatile __global uint *meta,
+                                 __global uchar *records, uint cap, ulong seq) {
     uint ids[RESIDENT_MAX_MATCHES];
     uint count = 0, state = 0, flags = 0;
     for (int i = 1; i < 34; ++i) {
@@ -327,13 +344,24 @@ static inline void resident_emit(const uchar *sk, const uchar *pub,
     resident_u32(&dst[136], flags);
     resident_u64(&dst[140], seq);
 }
+#endif
+
+#if RESIDENT_SPLIT_STAGE == 0
+static inline void resident_emit(const uchar *sk, const uchar *pub,
+                                 __global const uint *dfa, __global const uint *out_start,
+                                 __global const uint *out_len, __global const uint *out_ids,
+                                 volatile __global uint *meta, __global uchar *records,
+                                 uint cap, ulong seq) {
+    uchar addr[34];
+    resident_address(pub, addr);
+    resident_match(sk, addr, dfa, out_start, out_len, out_ids, meta, records, cap, seq);
+}
+#endif
 
 #endif /* !RESIDENT_SEED_ONLY: address/match helpers */
 
 #ifndef RESIDENT_SCAN_ONLY
-/* AMD's Windows OpenCL compiler can spend indefinitely optimizing a full
- * 256-bit fixed-base multiplication, even when it lives in a separate tiny
- * kernel.  Keep that operation off the OpenCL compiler entirely: this kernel
+/* Keep full 256-bit fixed-base multiplication off the OpenCL compiler: this kernel
  * generates one private scalar, the host expands it to a public point once,
  * and the second kernel scans a large consecutive range from that point. */
 __kernel
@@ -366,6 +394,7 @@ void tron_vanity_resident_seed(
 #endif /* !RESIDENT_SCAN_ONLY: RNG kernel */
 
 #ifndef RESIDENT_SEED_ONLY
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 1
 static inline void resident_add_offset(gej *acc,
                                        __global const uchar *base_pub,
                                        __global const uchar *table_b32,
@@ -383,7 +412,9 @@ static inline void resident_add_offset(gej *acc,
         }
     }
 }
+#endif
 
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 4
 static inline int resident_key_with_offset(__global const uchar *base_sk,
                                            uint offset, uchar *sk) {
     for (int i = 0; i < 32; ++i) sk[i] = base_sk[i];
@@ -395,7 +426,9 @@ static inline int resident_key_with_offset(__global const uchar *base_sk,
     }
     return carry == 0 && resident_lt_order(sk);
 }
+#endif
 
+#if RESIDENT_SPLIT_STAGE == 0
 __kernel void tron_vanity_resident_probe(
         __global const uchar *base_sk,
         __global const uchar *base_pub,
@@ -448,10 +481,86 @@ __kernel void tron_vanity_resident_probe(
 #endif
     }
 }
+#endif
+
+#if RESIDENT_SPLIT_STAGE == 1 || defined(RESIDENT_SPLIT_TEST)
+__kernel void resident_stage_curve(__global const uchar *base_pub,
+                                   __global const uchar *table, __global uint *points,
+                                   uint offset_base) {
+    uint first = (uint)get_global_id(0) * 2U;
+    ge generator;
+    ge_load_g(&generator, &table[64]);
+    gej acc;
+    resident_add_offset(&acc, base_pub, table, offset_base + first);
+    for (uint item = 0; item < 2; ++item) {
+        /* Fixed 128-byte wire layout; no host/compiler struct ABI assumption. */
+        __global uint *dst = points + (first + item) * 32U;
+        for (uint i = 0; i < 10; ++i) {
+            dst[i] = acc.x.n[i]; dst[10 + i] = acc.y.n[i]; dst[20 + i] = acc.z.n[i];
+        }
+        dst[30] = (uint)acc.inf; dst[31] = 0;
+        if (item == 0) gej_add_ge(&acc, &acc, &generator);
+    }
+}
+#endif
+
+#if RESIDENT_SPLIT_STAGE == 2 || defined(RESIDENT_SPLIT_TEST)
+static inline void resident_load_point(gej *p, __global const uint *src) {
+    for (uint i = 0; i < 10; ++i) {
+        p->x.n[i] = src[i]; p->y.n[i] = src[10 + i]; p->z.n[i] = src[20 + i];
+    }
+    p->inf = (int)src[30];
+}
+__kernel void resident_stage_affine(__global const uint *points, __global uchar *pubs) {
+    uint first = (uint)get_global_id(0) * 2U;
+    gej p0, p1;
+    resident_load_point(&p0, points + first * 32U);
+    resident_load_point(&p1, points + (first + 1U) * 32U);
+    uchar pub0[64], pub1[64];
+#if RESIDENT_PAIR_INVERSE
+    fe z0 = p0.z, z1 = p1.z, product, inverse, zi0, zi1;
+    if (p0.inf) fe_set_int(&z0, 1);
+    if (p1.inf) fe_set_int(&z1, 1);
+    fe_mul(&product, &z0, &z1); fe_inv(&inverse, &product);
+    fe_mul(&zi0, &inverse, &z1); fe_mul(&zi1, &inverse, &z0);
+    gej_to_pub_zi(pub0, &p0, &zi0); gej_to_pub_zi(pub1, &p1, &zi1);
+#else
+    gej_to_pub(pub0, &p0); gej_to_pub(pub1, &p1);
+#endif
+    for (uint i = 0; i < 64; ++i) {
+        pubs[first * 64U + i] = pub0[i]; pubs[(first + 1U) * 64U + i] = pub1[i];
+    }
+}
+#endif
+
+#if RESIDENT_SPLIT_STAGE == 3 || defined(RESIDENT_SPLIT_TEST)
+__kernel void resident_stage_address(__global const uchar *pubs, __global uchar *addresses) {
+    uint gid = (uint)get_global_id(0);
+    uchar pub[64], addr[34];
+    for (uint i = 0; i < 64; ++i) pub[i] = pubs[gid * 64U + i];
+    resident_address(pub, addr);
+    for (uint i = 0; i < 34; ++i) addresses[gid * 34U + i] = addr[i];
+}
+#endif
+
+#if RESIDENT_SPLIT_STAGE == 4 || defined(RESIDENT_SPLIT_TEST)
+__kernel void resident_stage_match(__global const uchar *base_sk,
+        __global const uchar *addresses, __global const uint *dfa,
+        __global const uint *out_start, __global const uint *out_len,
+        __global const uint *out_ids, volatile __global uint *meta,
+        __global uchar *records, uint cap, ulong sequence_base, uint offset_base) {
+    uint gid = (uint)get_global_id(0), offset = offset_base + gid;
+    uchar sk[32], addr[34];
+    if (!resident_key_with_offset(base_sk, offset, sk)) return;
+    for (uint i = 0; i < 34; ++i) addr[i] = addresses[gid * 34U + i];
+    resident_match(sk, addr, dfa, out_start, out_len, out_ids, meta, records, cap, sequence_base + offset);
+}
+#endif
 #endif /* !RESIDENT_SEED_ONLY: scan kernel */
 #endif /* RESIDENT */
 
 #ifndef RESIDENT_SEED_ONLY
+#if RESIDENT_SPLIT_STAGE <= 2
 /* TRON 靓号 OpenCL 批处理内核
  * secp256k1 域/群运算移植自 bitcoin-core/libsecp256k1 (field_10x26 / group_impl，MIT)。
  * keccak-256 / sha-256 与 CPU 侧 src/ 实现同参数。
@@ -759,6 +868,7 @@ inline void fe_get_b32(uchar *r, const fe *a) {
     wbe32(&r[28], (a->n[1] << 26) | a->n[0]);
 }
 
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 2
 EC_HEAVY void fe_sqrn(fe *r, int n) {
     EC_LOOP
     for (int j = 0; j < n; ++j) fe_sqr(r, r);
@@ -783,10 +893,12 @@ EC_HEAVY void fe_inv(fe *r, const fe *a) {
     fe_sqrn(&t1, 3); fe_mul(&t1, &t1, &x2);
     fe_sqrn(&t1, 2); fe_mul(r, &t1, a);
 }
+#endif
 
 /* ---------------- 群运算 ---------------- */
 
 /* 统一加法/倍点：r = a + b，b 为仿射点 (b.inf 必须为 0)。移植自 secp256k1_gej_add_ge。 */
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 1
 EC_HEAVY void gej_add_ge(gej *r, const gej *a, const ge *b) {
     fe zz, u1, u2, s1, s2, t, tt, m, n, q, rr, m_alt, rr_alt;
     fe fe_one; fe_set_int(&fe_one, 1);
@@ -835,8 +947,10 @@ EC_HEAVY void gej_add_ge(gej *r, const gej *a, const ge *b) {
 inline void gej_from_ge(gej *r, const ge *a) {
     r->x = a->x; r->y = a->y; fe_set_int(&r->z, 1); r->inf = a->inf;
 }
+#endif
 
 /* 转仿射并输出 X||Y (各 32 字节大端，私有内存) */
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 2
 inline void gej_to_pub(uchar *out, gej *a) {
     fe zi;
     fe_inv(&zi, &a->z);
@@ -854,8 +968,10 @@ inline void gej_to_pub_zi(uchar *out, const gej *a, const fe *zi) {
     fe_get_b32(&out[0], &x);
     fe_get_b32(&out[32], &y);
 }
+#endif
 
 /* 从 global 大端 64 字节载入 ge (仿射) */
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 1
 inline void ge_load_g(ge *p, __global const uchar *xy) {
     uchar t[64];
     for (int i = 0; i < 64; i++) t[i] = xy[i];
@@ -863,6 +979,7 @@ inline void ge_load_g(ge *p, __global const uchar *xy) {
     fe_set_b32(&p->y, &t[32]);
     p->inf = 0;
 }
+#endif
 
 /* The resident path receives its full base point from the host and only walks
  * a bounded 32-bit offset range on the GPU. */
@@ -903,6 +1020,8 @@ inline void ec_load_G(ge *G, __global const uchar *table_b32) {
 }
 #endif /* !RESIDENT */
 
+#endif /* EC implementations */
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 3
 /* ---------------- keccak-256 ---------------- */
 
 __constant ulong KECCAK_RC[24] = {
@@ -1006,10 +1125,12 @@ inline void sha256_short(uchar *out, const uchar *msg, int len) {
     }
 }
 
+#endif /* hash implementations */
+
 /* The resident runtime only needs its own Base58/DFA implementation above
  * plus the shared arithmetic and hashes.  Do not make vendor JITs compile the
- * legacy scan, profiling and validation code too: on Windows RDNA4 that turns
- * the first resident launch into a very long (and apparently hung) build. */
+ * legacy scan, profiling and validation code too. Each staged program also
+ * excludes unrelated resident implementations at preprocessing time. */
 #ifndef RESIDENT
 
 /* ---------------- base58 尾部 + 匹配 ---------------- */

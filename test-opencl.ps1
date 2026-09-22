@@ -2,6 +2,7 @@
 param(
     [ValidateSet("single", "pair")][string]$Inverse = "pair",
     [ValidateSet("compact", "default")][string]$Compiler = "compact",
+    [ValidateSet("staged", "monolithic")][string]$Pipeline = "staged",
     [ValidateRange(30, 600)][int]$TimeoutSeconds = 30
 )
 $ErrorActionPreference = "Stop"
@@ -82,7 +83,7 @@ function Write-Summary {
     Write-Report "Send summary.txt from: $logDir"
 }
 
-$common = @("--backend", "opencl", "--gpu-group-size", "64", "--opencl-compiler", $Compiler)
+$common = @("--backend", "opencl", "--gpu-group-size", "64", "--opencl-compiler", $Compiler, "--opencl-pipeline", $Pipeline)
 $smokeOk = Invoke-BoundedTest "01-smoke" ($common + @("--opencl-diagnose", "smoke"))
 if (-not $smokeOk) {
     Write-Report "Even the tiny OpenCL kernel failed/timed out. EC/RNG optimization is not isolated as the cause. Stopping."
@@ -90,8 +91,34 @@ if (-not $smokeOk) {
     exit 1
 }
 $rngOk = Invoke-BoundedTest "02-rng-only" ($common + @("--opencl-diagnose", "rng"))
-$singleOk = Invoke-BoundedTest "03-scan-single" ($common + @("--opencl-diagnose", "scan", "--opencl-inverse", "single"))
-$pairOk = Invoke-BoundedTest "04-scan-pair" ($common + @("--opencl-diagnose", "scan", "--opencl-inverse", "pair"))
+$singleBuildOk = $true
+$pairBuildOk = $true
+if ($Pipeline -eq "staged") {
+    $buildsOk = $true
+    foreach ($stage in @("curve", "affine-single", "affine-pair", "address", "match")) {
+        # Each program gets a fresh bounded child, including after another
+        # stage times out. These are BUILD checks, not execution self-tests.
+        if ($stage.StartsWith("affine-")) {
+            $mode = $stage.Substring(7)
+            $built = Invoke-BoundedTest "02-build-$stage" ($common + @("--opencl-diagnose", "build-affine", "--opencl-inverse", $mode))
+            if ($mode -eq "single") { $singleBuildOk = $built } else { $pairBuildOk = $built }
+        } else {
+            $built = Invoke-BoundedTest "02-build-$stage" ($common + @("--opencl-diagnose", "build-$stage"))
+            if (-not $built) { $buildsOk = $false }
+        }
+    }
+    if (-not $buildsOk -or (-not $singleBuildOk -and -not $pairBuildOk)) {
+        Write-Report "At least one staged program did not build. No scan/profile or real search will be launched."
+        Write-Summary
+        exit 1
+    }
+}
+$singleOk = $false
+$pairOk = $false
+if ($singleBuildOk) { $singleOk = Invoke-BoundedTest "03-scan-single" ($common + @("--opencl-diagnose", "scan", "--opencl-inverse", "single")) }
+else { Write-Report "Single scan skipped: its affine program did not build." }
+if ($pairBuildOk) { $pairOk = Invoke-BoundedTest "04-scan-pair" ($common + @("--opencl-diagnose", "scan", "--opencl-inverse", "pair")) }
+else { Write-Report "Paired scan skipped: its affine program did not build." }
 $selected = if ($Inverse -eq "single" -and $singleOk) { "single" } elseif ($pairOk) { "pair" } elseif ($singleOk) { "single" } else { "" }
 if (-not $selected) {
     Write-Report "Both scan-only variants failed/timed out. No working resident mode confirmed."

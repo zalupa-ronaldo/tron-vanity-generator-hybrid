@@ -17,6 +17,7 @@ unsigned __umulhi(unsigned a, unsigned b) { return (static_cast<uint64_t>(a) * b
 #define __forceinline__ inline
 #define __global__
 #define __constant__
+#define RESIDENT_SPLIT_TEST 1
 #include "../kernels/tron_vanity_cuda.cu"
 #undef inline
 #undef __global
@@ -34,6 +35,33 @@ unsigned __umulhi(unsigned a, unsigned b) { return (static_cast<uint64_t>(a) * b
 
 void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
+}
+
+// CPU-execute all four exact staged kernels with tiny buffers. offset_base
+// exercises the full 32-bit offset space without allocating huge test arrays.
+void checkedProbe(const unsigned char* base, const unsigned char* pub, const unsigned char* table,
+                  const uint32_t* dfa, const uint32_t* start, const uint32_t* length, const uint32_t* id,
+                  uint32_t* meta, unsigned char* records, uint32_t capacity, uint64_t sequence) {
+    const uint32_t gid = kernel::threadIdx.x;
+    uint32_t stagedMeta[5];
+    unsigned char stagedRecords[320];
+    std::memcpy(stagedMeta, meta, sizeof(stagedMeta));
+    std::memcpy(stagedRecords, records, sizeof(stagedRecords));
+    kernel::tron_vanity_resident_probe(base, pub, table, dfa, start, length, id, meta, records, capacity, sequence);
+    uint32_t points[64]{};
+    unsigned char pubs[128]{}, addresses[68]{};
+    kernel::threadIdx.x = 0;
+    kernel::resident_stage_curve(pub, table, points, gid * 2U);
+    kernel::resident_stage_affine(points, pubs);
+    for (unsigned item = 0; item < 2; ++item) {
+        kernel::threadIdx.x = item;
+        kernel::resident_stage_address(pubs, addresses);
+        kernel::resident_stage_match(base, addresses, dfa, start, length, id,
+                                     stagedMeta, stagedRecords, capacity, sequence, gid * 2U);
+    }
+    kernel::threadIdx.x = gid;
+    require(std::memcmp(meta, stagedMeta, sizeof(stagedMeta)) == 0, "staged metadata mismatch");
+    require(std::memcmp(records, stagedRecords, sizeof(stagedRecords)) == 0, "staged record mismatch");
 }
 std::array<unsigned char, 64> pubXY(secp256k1_context* context, const unsigned char* sk) {
     secp256k1_pubkey pub;
@@ -89,7 +117,7 @@ int main() {
                 uint32_t meta[5]{};
                 unsigned char records[2 * 160]{};
                 kernel::threadIdx.x = gid;
-                kernel::tron_vanity_resident_probe(baseKey.data(), pub.data(), table.data(), dfa.data(),
+                checkedProbe(baseKey.data(), pub.data(), table.data(), dfa.data(),
                     &start, &length, &id, meta, records, 2, 100);
                 unsigned expectedCount = 0;
                 for (uint32_t item = 0; item < 2; ++item) {
@@ -124,7 +152,7 @@ int main() {
             kernel::threadIdx.x = gid;
             uint32_t rangeMeta[5]{};
             unsigned char rangeRecords[2 * 160]{};
-            kernel::tron_vanity_resident_probe(base.data(), rangePub.data(), table.data(), dfa.data(),
+            checkedProbe(base.data(), rangePub.data(), table.data(), dfa.data(),
                 &start, &length, &id, rangeMeta, rangeRecords, 2, 0);
             require(rangeMeta[0] == 2 && rangeMeta[2] == 0, "range count mismatch");
             for (unsigned item = 0; item < 2; ++item) {
@@ -141,18 +169,18 @@ int main() {
         uint32_t meta[5]{};
         std::array<unsigned char, 2 * 160> records{};
         records.fill(0xa5);
-        kernel::tron_vanity_resident_probe(base.data(), pub.data(), table.data(), dfa.data(),
+        checkedProbe(base.data(), pub.data(), table.data(), dfa.data(),
             &start, &length, &id, meta, records.data(), 1, 0);
         require(meta[0] == 2 && meta[2] == 1 && meta[3] == 1, "overflow not flagged");
         for (size_t i = 160; i < records.size(); ++i) require(records[i] == 0xa5, "ring wrote past capacity");
         length = 0;
         std::memset(meta, 0, sizeof(meta));
-        kernel::tron_vanity_resident_probe(base.data(), pub.data(), table.data(), dfa.data(),
+        checkedProbe(base.data(), pub.data(), table.data(), dfa.data(),
             &start, &length, &id, meta, records.data(), 2, 0);
         require(meta[0] == 0, "disabled output still emitted");
         secp256k1_context_destroy(context);
         std::cout << "Shared kernel RNG " << RESIDENT_RNG << ", pair inverse " << RESIDENT_PAIR_INVERSE << ": " << checked
-                  << " boundary vectors, RNG counters, overflow and disabled-output checks passed\n";
+                  << " boundary vectors (monolithic + staged), RNG counters, overflow and disabled-output checks passed\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";

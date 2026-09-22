@@ -102,7 +102,9 @@ void usage() {
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-compiler compact|default  resident compiler mode (default compact)\n"
+        "  --opencl-pipeline monolithic|staged  resident program layout (default monolithic)\n"
         "  --opencl-diagnose smoke|rng|scan|full  isolated checks; no wallet output\n"
+        "                    build-curve|build-affine|build-address|build-match (compile only)\n"
         "  --opencl-host-seed  use OS CSPRNG, exclude GPU RNG from resident OpenCL\n"
         "  --metal-profile-stages  profile the active Metal resident pipeline by stage; no wallets written\n"
         "  --metal-profile-stage N  profile only stage 0..5 (0 is full resident)\n"
@@ -150,6 +152,13 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--opencl-profile") o.openclProfile = true;
             else if (a == "--opencl-diagnose") o.openclDiagnostic = next(i, "--opencl-diagnose");
             else if (a == "--opencl-host-seed") { o.openclOptions.hostSeed = true; o.gpuResident = true; }
+            else if (a == "--opencl-pipeline") {
+                const auto value = next(i, "--opencl-pipeline");
+                if (value != "monolithic" && value != "staged")
+                    throw std::runtime_error("--opencl-pipeline must be monolithic or staged");
+                o.openclOptions.staged = value == "staged";
+                o.gpuResident = true;
+            }
             else if (a == "--opencl-inverse") {
                 const auto value = next(i, "--opencl-inverse");
                 if (value != "single" && value != "pair") throw std::runtime_error("--opencl-inverse must be single or pair");
@@ -188,9 +197,14 @@ bool parse(int argc, char** argv, Options& o) {
     if (o.openclOptions.hostSeed && o.backend != "opencl") {
         std::cerr << "--opencl-host-seed requires --backend opencl\n"; return false;
     }
+    if (o.openclOptions.staged && o.backend != "opencl") {
+        std::cerr << "--opencl-pipeline staged requires --backend opencl\n"; return false;
+    }
     if (!o.openclDiagnostic.empty() && o.openclDiagnostic != "smoke" && o.openclDiagnostic != "rng" &&
-        o.openclDiagnostic != "scan" && o.openclDiagnostic != "full") {
-        std::cerr << "--opencl-diagnose must be smoke, rng, scan, or full\n"; return false;
+        o.openclDiagnostic != "scan" && o.openclDiagnostic != "full" &&
+        o.openclDiagnostic != "build-curve" && o.openclDiagnostic != "build-affine" &&
+        o.openclDiagnostic != "build-address" && o.openclDiagnostic != "build-match") {
+        std::cerr << "unknown --opencl-diagnose stage; see --help\n"; return false;
     }
     if (o.gpuGroupSize != 64 && o.gpuGroupSize != 128 && o.gpuGroupSize != 256) {
         std::cerr << "--gpu-group-size must be 64, 128, or 256\n"; return false;
@@ -350,6 +364,7 @@ int main(int argc, char** argv) {
                   << (opt.openclOptions.hostSeed ? "OS CSPRNG" : opt.gpuRng)
                   << "; compiler " << (opt.openclOptions.compact ? "compact" : "default")
                   << "; inverse " << (opt.openclOptions.pairInverse ? "pair" : "single")
+                  << "; pipeline " << (opt.openclOptions.staged ? "staged" : "monolithic")
                   << "; group " << opt.gpuGroupSize << "\n"
                   << "Includes full address/dictionary math and metadata drain; excludes CPU match verification/output.\n";
         for (const auto& device : hw.gpus) {
@@ -357,13 +372,13 @@ int main(int argc, char** argv) {
                 opt.gpuChunkMs, opt.gpuGroupSize, opt.openclOptions, opt.benchSeconds);
             if (!p.error.empty()) { std::cerr << "OpenCL profile failed: " << p.error << "\n"; return 1; }
             std::cout << std::fixed << std::setprecision(3) << device.name
-                      << ": " << p.keys << " keys / " << p.dispatches << " dispatches\n"
+                      << ": " << p.keys << " keys / " << p.dispatches << " chunks\n"
                       << "wall " << p.wallSeconds << " s, wall speed " << p.keys / p.wallSeconds / 1e6 << " M/s\n"
                       << "base preparation " << p.baseSeconds << " s, scan+wait " << p.scanSeconds
                       << " s, remaining host/drain " << std::max(0.0, p.wallSeconds - p.baseSeconds - p.scanSeconds) << " s\n";
             if (p.gpuTimingValid && p.gpuSeconds > 0)
                 std::cout << "Driver-reported GPU scan " << p.gpuSeconds << " s, kernel-only speed " << p.keys / p.gpuSeconds / 1e6
-                          << " M/s, max dispatch " << p.maxGpuMs << " ms\n";
+                          << " M/s, max chunk GPU time " << p.maxGpuMs << " ms\n";
             else std::cout << "GPU event timestamps unavailable (wall timing remains valid)\n";
             std::cout << "Use wall speed for comparisons; event time excludes queueing, transfers and host work.\n";
         }

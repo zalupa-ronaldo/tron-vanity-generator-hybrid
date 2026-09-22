@@ -13,6 +13,7 @@ struct OpenclResidentOptions {
     bool compact = true;
     bool profiling = false;
     bool hostSeed = false;
+    bool staged = false;
 };
 
 struct OpenclProfileResult {

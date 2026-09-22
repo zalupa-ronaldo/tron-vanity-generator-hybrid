@@ -20,11 +20,18 @@ int main() {
     if (diagnoseOpencl(device, "smoke", "chacha12")) return 1;
     for (const auto& rng : {"chacha12", "aes-ctr", "philox"})
         if (diagnoseOpencl(device, "rng", rng)) return 1;
+    for (const auto& stage : {"build-curve", "build-affine", "build-address", "build-match"})
+        if (diagnoseOpencl(device, stage, "chacha12", {true, true, false})) return 1;
     if (diagnoseOpencl(device, "scan", "chacha12", {false, true, false})) return 1;
     if (diagnoseOpencl(device, "scan", "chacha12", {true, true, false})) return 1;
     if (openclResidentSelfTest(device, "chacha12", {false, true, true})) return 1;
     for (const auto& rng : {"chacha12", "aes-ctr", "philox"})
         if (openclResidentSelfTest(device, rng, {true, true, true})) return 1;
+    if (openclResidentSelfTest(device, "chacha12", {false, true, true, true, true})) return 1;
+    if (openclResidentSelfTest(device, "chacha12", {false, false, true, true, true})) return 1;
+    if (openclResidentSelfTest(device, "chacha12", {true, true, true, true, true})) return 1;
+    for (const auto& rng : {"chacha12", "aes-ctr", "philox"})
+        if (openclResidentSelfTest(device, rng, {true, true, true, false, true})) return 1;
     auto dictionary = std::make_shared<Dictionary>();
     dictionary->words = {"benchmark"};
     dictionary->dfa.assign(Dictionary::Alphabet, 0);
@@ -50,5 +57,13 @@ int main() {
         return 1;
     }
     // Each self-test creates/destroys its context, programs, events and memory.
+    auto stagedProfile = profileOpenclResident(device, dictionary, "chacha12", 8, 8, 64,
+                                               {true, true, true, true, true}, 0.05);
+    if (!stagedProfile.error.empty() || !stagedProfile.keys || !stagedProfile.dispatches ||
+        !stagedProfile.gpuTimingValid || stagedProfile.gpuSeconds <= 0 ||
+        stagedProfile.keys > stagedProfile.dispatches * (1u << 17)) {
+        std::cerr << "Staged profile/event/cap integration failed: " << stagedProfile.error << "\n";
+        return 1;
+    }
     return 0;
 }

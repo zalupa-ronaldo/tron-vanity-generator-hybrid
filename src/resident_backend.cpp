@@ -31,6 +31,10 @@ constexpr uint32_t kResidentEcbits = 32;
 constexpr uint32_t kResidentEcw = 8;
 constexpr uint32_t kResidentKpi = 2;
 constexpr uint32_t kResidentLocalSize = 256;
+constexpr uint32_t kStagedMaxWorkItems = 1u << 16;
+constexpr const char* kStageNames[] = {"curve", "affine", "address", "match"};
+constexpr const char* kStageKernels[] = {"resident_stage_curve", "resident_stage_affine",
+                                       "resident_stage_address", "resident_stage_match"};
 
 std::string openclResidentBuildOptions(const std::string& rng, const OpenclResidentOptions& options) {
     const int mode = rng == "philox" ? 2 : (rng == "aes-ctr" ? 3 : 1);
@@ -127,7 +131,9 @@ public:
         out.lines.push_back(std::to_string(bufferMiB_) + " MiB device result ring");
         if constexpr (!isCuda) out.lines.push_back(std::string("compiler ") +
             (openclOptions_.compact ? "compact" : "default") + ", inversion " +
-            (openclOptions_.pairInverse ? "paired" : "single") + ", adaptive dispatch");
+            (openclOptions_.pairInverse ? "paired" : "single") +
+            (openclOptions_.staged ? ", staged pipeline (four separate programs)" : ", monolithic pipeline") +
+            ", adaptive dispatch");
         return out;
     }
 
@@ -237,11 +243,44 @@ private:
     ocl::id baseSk_ = nullptr, basePub_ = nullptr;
     ocl::id outStart_ = nullptr, outLen_ = nullptr, outIds_ = nullptr;
     ocl::id meta_ = nullptr, records_ = nullptr;
+    std::array<ocl::id, 4> stageKernels_{};
+    ocl::id points_ = nullptr, pubs_ = nullptr, addresses_ = nullptr;
     std::array<unsigned char, 32> seedBytes_{};
     std::vector<uint32_t> activeWords_;
     std::vector<uint32_t> activeOutLen_;
     std::vector<uint32_t> activeOutIds_;
     uint32_t readPos_ = 0;
+
+    bool usesStages() const { return !isCuda && openclOptions_.staged; }
+
+    bool buildStages() {
+        if constexpr (isCuda) return false;
+        else {
+            auto scanOptions = openclOptions_;
+            scanOptions.hostSeed = true; // physically exclude RNG from each scan program
+            const auto scanFlags = openclResidentBuildOptions(rng_, scanOptions);
+            for (unsigned i = 0; i < stageKernels_.size(); ++i) {
+                std::cerr << "\n  OpenCL staged build " << i + 1 << "/4: " << kStageNames[i] << std::endl;
+                const auto flags = scanFlags + " -D RESIDENT_SPLIT_STAGE=" + std::to_string(i + 1);
+                const bool ok = i == 0 ? program_.build(device_.platformId, device_.deviceId,
+                    kGpuKernelSource, flags, &error_, openclOptions_.profiling, true) :
+                    program_.buildAdditional(kGpuKernelSource, flags, &error_);
+                if (!ok) return false;
+                stageKernels_[i] = program_.kernel(kStageKernels[i], &error_);
+                if (!stageKernels_[i]) return false;
+                std::cerr << "  OpenCL staged build " << kStageNames[i] << " ready" << std::endl;
+            }
+            probeKernel_ = stageKernels_.back();
+            if (!openclOptions_.hostSeed) {
+                std::cerr << "  OpenCL staged build: isolated RNG" << std::endl;
+                const auto flags = openclResidentBuildOptions(rng_, openclOptions_) + " -D RESIDENT_SEED_ONLY=1";
+                if (!program_.buildAdditional(kGpuKernelSource, flags, &error_)) return false;
+                seedKernel_ = program_.kernel("tron_vanity_resident_seed", &error_);
+                if (!seedKernel_) return false;
+            }
+            return true;
+        }
+    }
 
     bool ensureReady() {
         if (tried_) return ready_;
@@ -273,23 +312,30 @@ private:
             "creating OpenCL context and building RNG + scan program");
         bool built;
         if constexpr (isCuda) built = program_.build(device_.cudaOrdinal, rngMode, &error_);
-        else built = program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_,
-                                    openclOptions_.profiling, true);
+        else built = usesStages() ? buildStages() :
+            program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_,
+                           openclOptions_.profiling, true);
         if (!built) {
             failStage(stageStarted);
             return false;
         }
         finishStage(stageStarted);
         stageStarted = beginStage("creating kernels (driver may finalize machine code)");
-        if (!openclOptions_.hostSeed) seedKernel_ = program_.kernel("tron_vanity_resident_seed", &error_);
-        probeKernel_ = program_.kernel("tron_vanity_resident_probe", &error_);
+        if (!usesStages()) {
+            if (!openclOptions_.hostSeed) seedKernel_ = program_.kernel("tron_vanity_resident_seed", &error_);
+            probeKernel_ = program_.kernel("tron_vanity_resident_probe", &error_);
+        }
         if ((!openclOptions_.hostSeed && !seedKernel_) || !probeKernel_) { failStage(stageStarted); return false; }
         finishStage(stageStarted);
         if constexpr (!isCuda) {
+          const std::vector<ocl::id> kernels = usesStages() ?
+              std::vector<ocl::id>(stageKernels_.begin(), stageKernels_.end()) : std::vector<ocl::id>{probeKernel_};
+          for (size_t i = 0; i < kernels.size(); ++i) {
             size_t maxGroup = 0, preferred = 0;
             unsigned long long privateBytes = 0;
-            if (program_.kernelLimits(probeKernel_, maxGroup, preferred, privateBytes)) {
-                std::cerr << "  OpenCL scan: max group " << maxGroup << ", preferred multiple " << preferred
+            if (program_.kernelLimits(kernels[i], maxGroup, preferred, privateBytes)) {
+                std::cerr << "  OpenCL " << (usesStages() ? kStageNames[i] : "scan")
+                          << ": max group " << maxGroup << ", preferred multiple " << preferred
                           << ", reported private bytes " << privateBytes << " (not a VGPR count)\n";
                 if (groupSize_ > maxGroup) {
                     error_ = "scan kernel work-group limit is " + std::to_string(maxGroup) +
@@ -297,6 +343,7 @@ private:
                     return false;
                 }
             }
+          }
         }
         if (!openclOptions_.hostSeed && !randBytes(seedBytes_.data(), seedBytes_.size())) {
             error_ = "OS CSPRNG seed generation failed";
@@ -352,6 +399,16 @@ private:
         }
         finishStage(stageStarted);
 
+        if (usesStages()) {
+            stageStarted = beginStage("allocating 28.25 MiB staged scratch (public points/addresses only)");
+            const size_t keys = static_cast<size_t>(kStagedMaxWorkItems) * kResidentKpi;
+            points_ = program_.buffer(ocl::MEM_READ_WRITE, keys * 128, nullptr, &error_);
+            pubs_ = program_.buffer(ocl::MEM_READ_WRITE, keys * 64, nullptr, &error_);
+            addresses_ = program_.buffer(ocl::MEM_READ_WRITE, keys * 34, nullptr, &error_);
+            if (!points_ || !pubs_ || !addresses_) { failStage(stageStarted); return false; }
+            finishStage(stageStarted);
+        }
+
         stageStarted = beginStage(openclOptions_.hostSeed ? "validating OS CSPRNG and CPU base expansion" :
                                   "validating GPU CSPRNG and CPU base expansion");
         if (!prepareBasePair()) {
@@ -373,6 +430,21 @@ private:
 
     bool bindProbeKernel() {
         uint64_t sequence = sequenceBase_;
+        if (usesStages()) {
+            const uint32_t offsetBase = 0;
+            auto args = [&](ocl::id kernel, std::initializer_list<ocl::id> buffers) {
+                unsigned i = 0;
+                for (auto buffer : buffers) if (!program_.setArg(kernel, i++, sizeof(buffer), &buffer)) return false;
+                return true;
+            };
+            return args(stageKernels_[0], {basePub_, table_, points_}) &&
+                program_.setArg(stageKernels_[0], 3, sizeof(offsetBase), &offsetBase) &&
+                args(stageKernels_[1], {points_, pubs_}) && args(stageKernels_[2], {pubs_, addresses_}) &&
+                args(stageKernels_[3], {baseSk_, addresses_, dfa_, outStart_, outLen_, outIds_, meta_, records_}) &&
+                program_.setArg(stageKernels_[3], 8, sizeof(ringSlots_), &ringSlots_) &&
+                program_.setArg(stageKernels_[3], 9, sizeof(sequence), &sequence) &&
+                program_.setArg(stageKernels_[3], 10, sizeof(offsetBase), &offsetBase);
+        }
         return program_.setArg(probeKernel_, 0, sizeof(ocl::id), &baseSk_) &&
                program_.setArg(probeKernel_, 1, sizeof(ocl::id), &basePub_) &&
                program_.setArg(probeKernel_, 2, sizeof(ocl::id), &table_) &&
@@ -500,8 +572,19 @@ private:
             return false;
         }
         const auto scanStart = std::chrono::steady_clock::now();
-        if (!program_.run1D(probeKernel_, workItems_, groupSize_, &error_) ||
-            !program_.finish()) {
+        bool enqueued = false;
+        if constexpr (!isCuda) {
+            if (usesStages()) {
+                enqueued = true;
+                for (unsigned i = 0; i < stageKernels_.size(); ++i) {
+                    // One in-order queue: no host readback or clFinish between stages.
+                    if (!program_.run1D(stageKernels_[i], i < 2 ? workItems_ : lastChunkKeys_,
+                                        groupSize_, &error_, i != 0)) { enqueued = false; break; }
+                }
+            }
+        }
+        if (!usesStages()) enqueued = program_.run1D(probeKernel_, workItems_, groupSize_, &error_);
+        if (!enqueued || !program_.finish()) {
             if (error_.empty()) error_ = "resident scan-kernel execution failed";
             return false;
         }
@@ -556,7 +639,7 @@ private:
             // Target is best-effort, not a WDDM hard execution-time guarantee.
             const double ratio = std::min(2.0, chunkMs_ / scanMs);
             const uint32_t next = static_cast<uint32_t>(std::clamp(workItems_ * ratio,
-                static_cast<double>(groupSize_), static_cast<double>(1u << 20)));
+                static_cast<double>(groupSize_), static_cast<double>(usesStages() ? kStagedMaxWorkItems : 1u << 20)));
             workItems_ = std::max(groupSize_, next / groupSize_ * groupSize_);
         }
         return true;
@@ -609,6 +692,19 @@ int diagnoseOpencl(const GpuDevice& device, const std::string& stage,
     if (!ocl::load(&error)) { std::cerr << error << std::endl; return 1; }
     std::cout << "OpenCL diagnostic " << stage << ": " << ocl::deviceDescription(device.deviceId)
               << "\nNo wallets or private keys are printed or saved." << std::endl;
+    for (unsigned i = 0; i < 4; ++i) {
+        if (stage != std::string("build-") + kStageNames[i]) continue;
+        options.hostSeed = true;
+        ocl::Program program;
+        std::cout << "BUILD ONLY: " << kStageNames[i] << "; execution/correctness not tested here" << std::endl;
+        const auto flags = openclResidentBuildOptions(rng, options) + " -D RESIDENT_SPLIT_STAGE=" + std::to_string(i + 1);
+        if (!program.build(device.platformId, device.deviceId, kGpuKernelSource, flags, &error, false, true) ||
+            !program.kernel(kStageKernels[i], &error)) {
+            std::cerr << error << std::endl; return 1;
+        }
+        std::cout << "OpenCL isolated build " << kStageNames[i] << " PASS (build only)" << std::endl;
+        return 0;
+    }
     if (stage == "scan" || stage == "full") {
         options.hostSeed = stage == "scan";
         std::cout << (options.hostSeed ? "SCAN ONLY: OS CSPRNG, no RNG kernel in the program\n" :

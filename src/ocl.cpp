@@ -185,19 +185,33 @@ bool Program::build(id platform, id device, const std::string& source,
     queue_ = pCreateCommandQueue(ctx_, device, profiling ? 2ULL : 0ULL, &e);
     mark("clCreateCommandQueue returned");
     if (!queue_ || e != 0) { if (err) *err = "clCreateCommandQueue 失败 " + std::to_string(e); return false; }
+    return buildAdditional(source, opts, err);
+}
+
+bool Program::buildAdditional(const std::string& source, const std::string& opts, std::string* err) {
+    if (!ctx_ || !queue_) { if (err) *err = "OpenCL context is not initialized"; return false; }
+    const auto started = std::chrono::steady_clock::now();
+    auto mark = [&](const char* message) {
+        if (trace_) std::cerr << "\n  OpenCL build +"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count()
+            << " ms: " << message << std::endl;
+    };
+    if (trace_) std::cerr << "  Program options: " << opts << std::endl;
+    cl_int e = 0;
     const char* src = source.c_str();
     size_t len = source.size();
     mark("clCreateProgramWithSource BEGIN");
     program_ = pCreateProgramWithSource(ctx_, 1, &src, &len, &e);
     mark("clCreateProgramWithSource returned");
     if (!program_ || e != 0) { if (err) *err = "clCreateProgramWithSource 失败 " + std::to_string(e); return false; }
+    programs_.push_back(program_);
     mark("clBuildProgram BEGIN");
-    e = pBuildProgram(program_, 1, &device, opts.c_str(), nullptr, nullptr);
+    e = pBuildProgram(program_, 1, &device_, opts.c_str(), nullptr, nullptr);
     mark("clBuildProgram returned");
     if (e != 0) {
         std::vector<char> log(65536);
         size_t n = 0;
-        pGetProgramBuildInfo(program_, device, PROGRAM_BUILD_LOG, log.size(), log.data(), &n);
+        pGetProgramBuildInfo(program_, device_, PROGRAM_BUILD_LOG, log.size(), log.data(), &n);
         n = std::min(n, log.size());
         if (err) *err = "内核编译失败:\n" + std::string(log.data(), n ? n - 1 : 0);
         return false;
@@ -207,10 +221,10 @@ bool Program::build(id platform, id device, const std::string& source,
 
 Program::~Program() {
     if (queue_) pFinish(queue_);
-    if (lastEvent_) pReleaseEvent(lastEvent_);
+    for (id event : timingEvents_) pReleaseEvent(event);
     for (id k : kernels_) pReleaseKernel(k);
     for (id b : buffers_) pReleaseMemObject(b);
-    if (program_) pReleaseProgram(program_);
+    for (id program : programs_) pReleaseProgram(program);
     if (queue_) pReleaseCommandQueue(queue_);
     if (ctx_) pReleaseContext(ctx_);
 }
@@ -237,11 +251,16 @@ bool Program::setArg(id k, unsigned idx, size_t sz, const void* val) {
     return pSetKernelArg(k, idx, sz, val) == 0;
 }
 
-bool Program::run1D(id k, size_t global, size_t local, std::string* err) {
-    if (lastEvent_) { pReleaseEvent(lastEvent_); lastEvent_ = nullptr; }
+bool Program::run1D(id k, size_t global, size_t local, std::string* err, bool appendTiming) {
+    if (!appendTiming) {
+        for (id event : timingEvents_) pReleaseEvent(event);
+        timingEvents_.clear();
+    }
+    id event = nullptr;
     const size_t* lp = local ? &local : nullptr;
     cl_int e = pEnqueueNDRangeKernel(queue_, k, 1, nullptr, &global, lp, 0, nullptr,
-                                   profiling_ ? &lastEvent_ : nullptr);
+                                   profiling_ ? &event : nullptr);
+    if (event) timingEvents_.push_back(event);
     if (e != 0) { if (err) *err = "clEnqueueNDRangeKernel 失败 " + std::to_string(e); return false; }
     return true;
 }
@@ -265,10 +284,14 @@ void Program::release(id mem) {
 }
 
 bool Program::lastKernelMilliseconds(double& ms) const {
-    unsigned long long start = 0, end = 0;
-    if (!lastEvent_ || pGetEventProfilingInfo(lastEvent_, 0x1282, sizeof(start), &start, nullptr) ||
-        pGetEventProfilingInfo(lastEvent_, 0x1283, sizeof(end), &end, nullptr) || end <= start) return false;
-    ms = static_cast<double>(end - start) / 1e6;
+    if (timingEvents_.empty()) return false;
+    ms = 0;
+    for (id event : timingEvents_) {
+        unsigned long long start = 0, end = 0;
+        if (pGetEventProfilingInfo(event, 0x1282, sizeof(start), &start, nullptr) ||
+            pGetEventProfilingInfo(event, 0x1283, sizeof(end), &end, nullptr) || end <= start) return false;
+        ms += static_cast<double>(end - start) / 1e6;
+    }
     return true;
 }
 

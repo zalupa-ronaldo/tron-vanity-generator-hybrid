@@ -18,6 +18,7 @@ public class Fixture {
         string stage = Value(args, "--opencl-diagnose");
         if (Array.IndexOf(args, "--opencl-profile") >= 0) stage = "profile";
         string name = stage == "scan" ? "scan-" + Value(args, "--opencl-inverse") : stage;
+        if (stage == "build-affine") name += "-" + Value(args, "--opencl-inverse");
         File.AppendAllText("calls.txt", name + Environment.NewLine);
         Console.WriteLine("fixture " + name);
         Console.Error.WriteLine("OpenCL API: fixture BEGIN");
@@ -25,10 +26,12 @@ public class Fixture {
         if (stage == "profile") {
             bool needsHostSeed = mode == "rng-fail" || mode == "rng-timeout" || mode == "combined-fail";
             if (needsHostSeed != (Array.IndexOf(args, "--opencl-host-seed") >= 0)) return 3;
-            if (mode == "pair-fail" && Value(args, "--opencl-inverse") != "single") return 3;
+            if ((mode == "pair-fail" || mode == "affine-pair-fail") && Value(args, "--opencl-inverse") != "single") return 3;
         }
         if (mode == "rng-timeout" && stage == "rng") Thread.Sleep(60000);
         if (mode == "smoke-fail" && stage == "smoke") return 2;
+        if (mode == "curve-build-fail" && stage == "build-curve") return 2;
+        if (mode == "affine-pair-fail" && name == "build-affine-pair") return 2;
         if (mode == "rng-fail" && stage == "rng") return 2;
         if (mode == "pair-fail" && name == "scan-pair") return 2;
         if (mode == "combined-fail" && stage == "full") return 2;
@@ -48,6 +51,11 @@ $cases = @(
     @{ Mode = "profile-fail"; Exit = 1; Calls = "smoke,rng,scan-single,scan-pair,full,profile"; Text = "FAIL (exit 2)" },
     @{ Mode = "rng-timeout"; Exit = 0; Calls = "smoke,rng,scan-single,scan-pair,profile"; Text = "TIMEOUT" }
 )
+$builds = ",build-curve,build-affine-single,build-affine-pair,build-address,build-match"
+foreach ($case in $cases) { $case.Calls = $case.Calls.Replace(",scan-single", $builds + ",scan-single") }
+$cases += @{ Mode = "curve-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
+$cases += @{ Mode = "affine-pair-fail"; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,full,profile"; Text = "Paired scan skipped" }
+$cases += @{ Mode = "monolithic"; Pipeline = "monolithic"; Exit = 0; Calls = "smoke,rng,scan-single,scan-pair,full,profile"; Text = "--opencl-pipeline monolithic" }
 $previousMode = $env:TRON_LAUNCHER_FIXTURE
 try {
     foreach ($case in $cases) {
@@ -58,7 +66,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../test-opencl.ps1") -Destination $dir
         Set-Content -LiteralPath (Join-Path $dir "words.txt") -Value "energy" -Encoding ASCII
         $env:TRON_LAUNCHER_FIXTURE = $case.Mode
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir "test-opencl.ps1") -TimeoutSeconds 30 2>&1
+        $pipeline = if ($case.Pipeline) { $case.Pipeline } else { "staged" }
+        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir "test-opencl.ps1") -TimeoutSeconds 30 -Pipeline $pipeline 2>&1
         if ($LASTEXITCODE -ne $case.Exit) { throw "$($case.Mode) exit mismatch: $LASTEXITCODE`n$($output -join "`n")" }
         $calls = (Get-Content -LiteralPath (Join-Path $dir "calls.txt")) -join ","
         if ($calls -ne $case.Calls) { throw "$($case.Mode) stage mismatch: $calls" }

@@ -23,7 +23,24 @@ function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments) {
     Write-Report ("`n[" + $Name + "] " + ($TestArguments -join " "))
     $stdoutPath = Join-Path $logDir "$Name.stdout.txt"
     $stderrPath = Join-Path $logDir "$Name.stderr.txt"
-    $process = Start-Process -FilePath $exe -ArgumentList $TestArguments -WorkingDirectory $PSScriptRoot -NoNewWindow -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    # Keep the original process handle. Start-Process -PassThru on Windows
+    # PowerShell 5.1 can return a null ExitCode after WaitForExit.
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $exe
+    # All arguments here are fixed CLI tokens/validated choices, without spaces.
+    $start.Arguments = $TestArguments -join " "
+    $start.WorkingDirectory = $PSScriptRoot
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    if (-not $process.Start()) { throw "Could not start diagnostic child: $exe" }
+    # Drain both pipes concurrently so a verbose compiler cannot block on a
+    # full pipe while the launcher waits for the process to finish.
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     $timedOut = $false
     while (-not $process.WaitForExit(5000)) {
@@ -39,6 +56,15 @@ function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments) {
         }
     }
     $status = if ($timedOut) { "TIMEOUT" } elseif ($process.ExitCode -eq 0) { "PASS" } else { "FAIL (exit $($process.ExitCode))" }
+    foreach ($capture in @(@{ Task = $stdoutTask; Path = $stdoutPath }, @{ Task = $stderrTask; Path = $stderrPath })) {
+        if ($capture.Task.Wait(5000)) {
+            Set-Content -LiteralPath $capture.Path -Value $capture.Task.Result -Encoding UTF8
+        } else {
+            # Do not hang if some driver-created child inherited a pipe handle.
+            Write-Report "Log capture did not finish: $($capture.Path)"
+            $status = "FAIL (log capture timeout)"
+        }
+    }
     foreach ($file in @($stdoutPath, $stderrPath)) {
         if (Test-Path -LiteralPath $file) {
             $text = Get-Content -LiteralPath $file -Raw -Encoding UTF8
@@ -47,6 +73,7 @@ function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments) {
     }
     $results.Add([pscustomobject]@{ Test = $Name; Result = $status; Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1) })
     Write-Report ("[" + $Name + "] " + $status)
+    $process.Dispose()
     return $status -eq "PASS"
 }
 

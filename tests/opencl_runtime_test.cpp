@@ -44,6 +44,9 @@ int main() {
     OpenclResidentOptions rollingSha{false, true, false, true, true};
     rollingSha.shaRing = true;
     if (openclResidentSelfTest(device, "chacha12", rollingSha)) return 1;
+    OpenclResidentOptions queuedMeta{false, true, false, true, true};
+    queuedMeta.asyncMetaRead = true;
+    if (openclResidentSelfTest(device, "chacha12", queuedMeta)) return 1;
     for (uint32_t mask : {0U, 1U, 2U, 4U, 8U, 16U, 32U}) {
         OpenclResidentOptions isolated{false, true, false, true, true};
         isolated.stageOptMask = mask;
@@ -71,6 +74,15 @@ int main() {
     }
     if (!profile.gpuTimingValid || profile.gpuSeconds <= 0) {
         std::cerr << "OpenCL profiling queue did not return valid timestamps\n";
+        return 1;
+    }
+    auto queuedProfileOptions = OpenclResidentOptions{true, true, true, true, true};
+    queuedProfileOptions.asyncMetaRead = true;
+    auto queuedProfile = profileOpenclResident(device, dictionary, "chacha12", 8, 8, 64,
+                                               queuedProfileOptions, 0.05);
+    if (!queuedProfile.error.empty() || !queuedProfile.keys || !queuedProfile.gpuTimingValid ||
+        queuedProfile.metaReadSeconds <= 0) {
+        std::cerr << "Queued OpenCL metadata read profile failed: " << queuedProfile.error << "\n";
         return 1;
     }
     if (profile.enqueueSeconds <= 0 || profile.waitSeconds <= 0 || profile.metaReadSeconds <= 0 ||

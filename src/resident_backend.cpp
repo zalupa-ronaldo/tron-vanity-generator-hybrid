@@ -268,6 +268,9 @@ private:
     secp256k1_context* context_ = nullptr;
     bool tried_ = false, ready_ = false, pruneOutputs_ = true;
     std::string error_;
+    // A queued OpenCL read may still be in flight if finish() reports an error.
+    // Keep its destination alive until Program's destructor drains the queue.
+    std::array<uint32_t, kMetaWords> metaScratch_{};
     Program program_;
     ocl::id seedKernel_ = nullptr, probeKernel_ = nullptr;
     ocl::id seed_ = nullptr, table_ = nullptr, dfa_ = nullptr;
@@ -666,6 +669,19 @@ private:
             }
         }
         if (!usesStages()) enqueued = program_.run1D(probeKernel_, workItems_, groupSize_, &error_);
+        auto& meta = metaScratch_;
+        bool metaQueued = false;
+        if constexpr (!isCuda) {
+            if (enqueued && openclOptions_.asyncMetaRead) {
+                // This in-order queue runs the read after the match kernel.
+                // meta outlives Program even if finish() fails below.
+                const auto readStart = openclOptions_.profiling ? std::chrono::steady_clock::now() : scanStart;
+                metaQueued = program_.readAsync(meta_, sizeof(meta), meta.data());
+                if (!metaQueued) { error_ = "enqueuing resident metadata read failed"; return false; }
+                if (openclOptions_.profiling)
+                    profile_.metaReadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - readStart).count();
+            }
+        }
         const auto enqueueEnd = openclOptions_.profiling ? std::chrono::steady_clock::now() : scanStart;
         const bool finished = enqueued && program_.finish();
         const auto scanEnd = std::chrono::steady_clock::now();
@@ -695,11 +711,12 @@ private:
                 profile_.scanSeconds += scanMs / 1000.0;
             }
         }
-        std::array<uint32_t, kMetaWords> meta{};
-        const auto metaReadStart = openclOptions_.profiling ? std::chrono::steady_clock::now() : scanEnd;
-        if (!program_.read(meta_, sizeof(meta), meta.data())) { error_ = "reading resident metadata failed"; return false; }
-        if constexpr (!isCuda) if (openclOptions_.profiling)
-            profile_.metaReadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - metaReadStart).count();
+        if (!metaQueued) {
+            const auto metaReadStart = openclOptions_.profiling ? std::chrono::steady_clock::now() : scanEnd;
+            if (!program_.read(meta_, sizeof(meta), meta.data())) { error_ = "reading resident metadata failed"; return false; }
+            if constexpr (!isCuda) if (openclOptions_.profiling)
+                profile_.metaReadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - metaReadStart).count();
+        }
         const uint32_t writePos = meta[0];
         const uint32_t available = writePos - readPos_;
         const uint32_t count = std::min(available, ringSlots_);

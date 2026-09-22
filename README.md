@@ -346,6 +346,16 @@ checks GPU/CPU address and private-scalar agreement at each new group size
 before profiling it; an unsupported group stops the comparison without
 starting a real search. Compare wall M/s and per-stage ns/key rather than
 assuming a larger group is faster on every GPU.
+The optional `--opencl-async-meta-read` queues the small result-metadata
+read after the last staged kernel, before the existing `clFinish`, instead
+of issuing a separate blocking read afterward. The same in-order queue and
+finish still guard consumption of the result. It is off by default until the
+target GPU is measured. Run
+`test-opencl.cmd -CompareMetaRead -TimeoutSeconds 120` for a bounded,
+no-wallet scan self-test followed by five-second blocking/queued profiles.
+The `metadata read API` time measures only the enqueue call in queued mode;
+its completion is part of `finish wait`. Judge the wall M/s and total host
+overhead, not that API number alone.
 
 `--opencl-inverse pair` uses one field inversion for two Jacobian points in the
 monolithic path; staged `--opencl-affine-batch 4` uses one for four. It avoids

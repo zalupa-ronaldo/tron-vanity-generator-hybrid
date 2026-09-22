@@ -8,7 +8,8 @@ param(
     [switch]$CompareAffineBatches,
     [switch]$CompareCurveBatches,
     [switch]$CompareShaRing,
-    [switch]$CompareGroupSizes
+    [switch]$CompareGroupSizes,
+    [switch]$CompareMetaRead
 )
 $ErrorActionPreference = "Stop"
 if ($CompareStages -and $Pipeline -ne "staged") { throw "-CompareStages requires -Pipeline staged." }
@@ -16,6 +17,7 @@ if ($CompareAffineBatches -and $Pipeline -ne "staged") { throw "-CompareAffineBa
 if ($CompareCurveBatches -and $Pipeline -ne "staged") { throw "-CompareCurveBatches requires -Pipeline staged." }
 if ($CompareShaRing -and $Pipeline -ne "staged") { throw "-CompareShaRing requires -Pipeline staged." }
 if ($CompareGroupSizes -and $Pipeline -ne "staged") { throw "-CompareGroupSizes requires -Pipeline staged." }
+if ($CompareMetaRead -and $Pipeline -ne "staged") { throw "-CompareMetaRead requires -Pipeline staged." }
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
 if (-not (Test-Path $exe)) { throw "Extract the release ZIP before running this script." }
 
@@ -232,6 +234,24 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
                 Write-Summary
                 exit 1
             }
+        }
+    }
+    if ($CompareMetaRead) {
+        $profileArgs = $selectedArgs + @("--opencl-profile", "--words", "words.txt",
+                                         "--gpu-buffer-mb", "8", "--bench-seconds", "5")
+        if (-not (Invoke-BoundedTest "12-meta-blocking" $profileArgs $true)) {
+            Write-Summary
+            exit 1
+        }
+        # The queued read must preserve GPU/CPU address and scalar agreement
+        # before its throughput is compared. This never writes wallets.
+        if (-not (Invoke-BoundedTest "12-meta-queued-scan" ($selectedArgs + @("--opencl-async-meta-read", "--opencl-diagnose", "scan")))) {
+            Write-Summary
+            exit 1
+        }
+        if (-not (Invoke-BoundedTest "12-meta-queued" ($profileArgs + "--opencl-async-meta-read") $true)) {
+            Write-Summary
+            exit 1
         }
     }
 } else { Write-Report "words.txt not found: profile skipped, self-tests did not need a dictionary." }

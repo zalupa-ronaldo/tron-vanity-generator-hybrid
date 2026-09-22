@@ -60,6 +60,7 @@ constexpr cl_uint DEVICE_HOST_UNIFIED_MEMORY = 0x1035;
 constexpr cl_uint PROGRAM_BUILD_LOG = 0x1183;
 constexpr unsigned long long DEVICE_TYPE_GPU = 1ull << 2;
 constexpr cl_uint TRUE_ = 1;
+constexpr cl_uint FALSE_ = 0;
 
 std::string infoStr(id obj, cl_uint param, bool device) {
     char buf[1024] = {0};
@@ -267,6 +268,9 @@ bool Program::run1D(id k, size_t global, size_t local, std::string* err, bool ap
 
 bool Program::read(id buf, size_t bytes, void* dst) {
     return readAt(buf, 0, bytes, dst);
+}
+bool Program::readAsync(id buf, size_t bytes, void* dst) {
+    return pEnqueueReadBuffer(queue_, buf, FALSE_, 0, bytes, dst, 0, nullptr, nullptr) == 0;
 }
 bool Program::readAt(id buf, size_t offset, size_t bytes, void* dst) {
     return pEnqueueReadBuffer(queue_, buf, TRUE_, offset, bytes, dst, 0, nullptr, nullptr) == 0;

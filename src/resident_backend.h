@@ -19,6 +19,7 @@ struct OpenclResidentOptions {
     uint32_t curveBatch = 2; // staged consecutive public points per work-item; 4/8 experimental
     uint32_t stageOptMask = 63; // curve, affine, keccak, checksum, Base58, match
     bool shaRing = false; // experimental 16-word SHA-256 message schedule
+    bool asyncMetaRead = false; // enqueue metadata read before the chunk's clFinish
 };
 
 struct OpenclProfileResult {

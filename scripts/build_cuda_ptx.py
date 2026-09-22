@@ -12,12 +12,19 @@ def load_nvrtc():
         raise RuntimeError("Install the build dependency: python -m pip install nvidia-cuda-nvrtc-cu12==12.6.85")
     root = Path(next(iter(spec.submodule_search_locations)))
     candidates = list(root.rglob("nvrtc64_*.dll")) if os.name == "nt" else list(root.rglob("libnvrtc.so*"))
+    # The Windows wheel also ships an alternative compiler but does not ship
+    # its matching nvrtc-builtins.alt DLL. Use the normal compiler explicitly.
+    candidates = [path for path in candidates if ".alt." not in path.name]
     if not candidates:
         raise RuntimeError("NVIDIA NVRTC library not found in " + str(root))
     path = sorted(candidates)[0]
     # Keep the DLL search cookie alive until compilation finishes.
     cookie = os.add_dll_directory(str(path.parent)) if os.name == "nt" else None
     lib = ct.CDLL(str(path))
+    if os.name == "nt":
+        # NVRTC loads builtins internally; keep them loaded by absolute path so
+        # its legacy LoadLibrary call also works without modifying system PATH.
+        lib._builtins = [ct.CDLL(str(p)) for p in path.parent.glob("nvrtc-builtins64_*.dll")]
     signatures = {
         "nvrtcCreateProgram": [ct.POINTER(ct.c_void_p), ct.c_char_p, ct.c_char_p, ct.c_int, ct.POINTER(ct.c_char_p), ct.POINTER(ct.c_char_p)],
         "nvrtcCompileProgram": [ct.c_void_p, ct.c_int, ct.POINTER(ct.c_char_p)],

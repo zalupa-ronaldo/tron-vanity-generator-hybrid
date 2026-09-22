@@ -283,14 +283,17 @@ void Program::release(id mem) {
     if (it != buffers_.end()) { pReleaseMemObject(mem); buffers_.erase(it); }
 }
 
-bool Program::lastKernelMilliseconds(double& ms) const {
+bool Program::lastKernelMilliseconds(double& ms, std::vector<double>* eventMs) const {
     if (timingEvents_.empty()) return false;
     ms = 0;
+    if (eventMs) { eventMs->clear(); eventMs->reserve(timingEvents_.size()); }
     for (id event : timingEvents_) {
         unsigned long long start = 0, end = 0;
         if (pGetEventProfilingInfo(event, 0x1282, sizeof(start), &start, nullptr) ||
             pGetEventProfilingInfo(event, 0x1283, sizeof(end), &end, nullptr) || end <= start) return false;
-        ms += static_cast<double>(end - start) / 1e6;
+        const double duration = static_cast<double>(end - start) / 1e6;
+        ms += duration;
+        if (eventMs) eventMs->push_back(duration);
     }
     return true;
 }

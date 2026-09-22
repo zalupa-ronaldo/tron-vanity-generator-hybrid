@@ -229,7 +229,12 @@ The three address operations use independent programs; compact mode outlines
 their heavy functions and limits loop unrolling. A shared context and in-order
 queue carry the GPU buffers between stages without CPU readback. Unrelated
 implementations are removed from each program by preprocessing. This addresses
-the observed compiler bottleneck, but is **not yet confirmed on RX 9070 XT**.
+the observed compiler bottleneck. **v1.7.1 on RX 9070 XT / gfx1201, driver
+3665.0 (PAL,LC):** all staged builds, both inversion self-tests, GPU RNG and
+the five-second profile passed. With a 358-word dictionary and paired inversion,
+the user-reported profile measured 66.870 M keys/s wall throughput (334,364,672
+keys in 5.000 seconds); the driver reported 93.099 M/s for GPU kernel time only.
+This is a profile result, not a measurement of wallet-output throughput.
 
 Normal CLI search keeps `monolithic` as the pipeline default. Selecting `staged`
 requires `--backend opencl` and implies `--gpu-resident`. The staged path uses
@@ -238,6 +243,31 @@ addresses, capped at 65,536 work-items / 131,072 keys per chunk. It adds five
 scan dispatches and GPU-memory traffic, so its speed must be measured on the
 target device. GPU event timings sum all six stage events; compare wall
 throughput, not just the last kernel.
+`--opencl-pipeline staged` selects GPU-resident mode even when `--gpu-resident`
+is omitted. To compare with ordinary OpenCL search, omit both options:
+
+```bat
+tron_vanity_generator.exe --backend opencl --words words.txt --seconds 60
+```
+
+The two user-reported runs near 68.8 M/s both selected `staged` and therefore
+used the same resident backend. A separate ordinary OpenCL run was reported at
+about 55 M/s on the same RX 9070 XT, making the v1.7.1 resident rate about 25%
+higher. The new base-reuse optimization has not yet been measured on that GPU.
+
+The staged resident path now reuses each random base point for up to 4,194,304
+consecutive offsets. The curve and match kernels already accept an offset base;
+the host advances it after each verified chunk and rotates the random base
+before the 32-bit offset range can wrap. This reduces GPU RNG dispatches, GPU
+readback and CPU public-point expansion. The reported v1.7.1 profile spent
+0.652 of 5.000 seconds in base preparation; the speed gain from reuse still
+needs to be measured on the RX 9070 XT. The profile reports new base count so
+the rate of rotation can be checked directly.
+Keys derived from one base are consecutive rather than independent random
+samples. This was already true within each resident chunk; reuse extends that
+relationship across chunks. Keep all generated private keys secret: disclosure
+of one key together with its relative offset can reveal other keys from that
+base window.
 
 `--opencl-inverse pair` uses one field inversion plus three multiplies for
 the two Jacobian points in a work-item, instead of two inversions. It avoids
@@ -293,16 +323,20 @@ tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-dia
 tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-profile --opencl-inverse pair --words words.txt --bench-seconds 5
 ```
 
-Each scan/full self-test independently verifies 1,024 address/key pairs against
-libsecp256k1. The launcher prints an optional search command for the validated
+Each staged scan/full self-test independently verifies 1,536 address/key pairs
+against libsecp256k1: two consecutive chunks using one base and a third after
+forced base rotation. Monolithic self-tests verify 1,024 pairs. The launcher
+prints an optional search command for the validated
 configuration but never executes it. For a passing staged GPU-RNG/paired test:
 
 ```bat
 tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --words words.txt --seconds 60
 ```
 
-The profile reports full wall throughput, base-point preparation, scan/wait
-time, remaining host/metadata time, and driver event timestamps. It exercises
+The profile reports full wall throughput, the number of newly generated base
+points, base-point preparation, scan/wait
+time, remaining host/metadata time, and driver event timestamps, including the
+six separate GPU stage totals for the staged path. It exercises
 full secp256k1/Keccak/SHA256d/Base58/dictionary math, but excludes CPU match
 verification and wallet output. **Compare wall speed, not kernel-only speed**:
 event timing excludes queueing and transfers and is driver-reported. Initial
@@ -317,7 +351,8 @@ contended **monolithic** M4 run using 358 words measured 2.66 M/s single versus 
 with paired repeats near 4.0 M/s. The production Metal worker was left running:
 these are preliminary wall timings, **not an AMD result or an isolated benchmark**.
 Linux CI additionally executes the OpenCL kernels with PoCL on CPU; Windows CI
-builds the binary but does not have an AMD GPU. No RX 9070 XT speed is claimed.
+builds the binary but does not have an AMD GPU. New optimizations still require
+measurement on the RX 9070 XT before claiming a speed improvement.
 
 OpenCL objects now have explicit ownership and are released between benchmark
 variants (previously contexts/programs/buffers were kept until process exit).

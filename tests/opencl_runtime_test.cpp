@@ -1,6 +1,7 @@
 #include "hwdetect.h"
 #include "ocl.h"
 #include "resident_backend.h"
+#include <cmath>
 #include <iostream>
 
 int main() {
@@ -60,8 +61,11 @@ int main() {
     // Each self-test creates/destroys its context, programs, events and memory.
     auto stagedProfile = profileOpenclResident(device, dictionary, "chacha12", 8, 8, 64,
                                                {true, true, true, true, true}, 0.05);
+    double stageSeconds = 0;
+    for (double seconds : stagedProfile.stageSeconds) stageSeconds += seconds;
     if (!stagedProfile.error.empty() || !stagedProfile.keys || !stagedProfile.dispatches ||
         !stagedProfile.gpuTimingValid || stagedProfile.gpuSeconds <= 0 ||
+        stageSeconds <= 0 || std::abs(stageSeconds - stagedProfile.gpuSeconds) > 1e-6 ||
         stagedProfile.keys > stagedProfile.dispatches * (1u << 17)) {
         std::cerr << "Staged profile/event/cap integration failed: " << stagedProfile.error << "\n";
         return 1;

@@ -102,7 +102,7 @@ void usage() {
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-compiler compact|default  resident compiler mode (default compact)\n"
-        "  --opencl-pipeline monolithic|staged  resident program layout (default monolithic)\n"
+        "  --opencl-pipeline monolithic|staged  resident layout; selecting it enables GPU-resident mode\n"
         "  --opencl-diagnose smoke|rng|scan|full  isolated checks; no wallet output\n"
         "                    build-curve|build-affine|build-keccak|build-checksum|build-base58|build-match\n"
         "                    build-address (legacy combined stage; compile only)\n"
@@ -375,7 +375,8 @@ int main(int argc, char** argv) {
                 opt.gpuChunkMs, opt.gpuGroupSize, opt.openclOptions, opt.benchSeconds);
             if (!p.error.empty()) { std::cerr << "OpenCL profile failed: " << p.error << "\n"; return 1; }
             std::cout << std::fixed << std::setprecision(3) << device.name
-                      << ": " << p.keys << " keys / " << p.dispatches << " chunks\n"
+                      << ": " << p.keys << " keys / " << p.dispatches << " chunks / "
+                      << p.basePairs << " new bases\n"
                       << "wall " << p.wallSeconds << " s, wall speed " << p.keys / p.wallSeconds / 1e6 << " M/s\n"
                       << "base preparation " << p.baseSeconds << " s, scan+wait " << p.scanSeconds
                       << " s, remaining host/drain " << std::max(0.0, p.wallSeconds - p.baseSeconds - p.scanSeconds) << " s\n";
@@ -383,6 +384,12 @@ int main(int argc, char** argv) {
                 std::cout << "Driver-reported GPU scan " << p.gpuSeconds << " s, kernel-only speed " << p.keys / p.gpuSeconds / 1e6
                           << " M/s, max chunk GPU time " << p.maxGpuMs << " ms\n";
             else std::cout << "GPU event timestamps unavailable (wall timing remains valid)\n";
+            if (opt.openclOptions.staged && p.gpuTimingValid) {
+                constexpr const char* stageNames[] = {"curve", "affine", "keccak", "checksum", "base58", "match"};
+                std::cout << "GPU stage time (six kernels; sum excludes queueing/transfers):\n";
+                for (size_t i = 0; i < p.stageSeconds.size(); ++i)
+                    std::cout << "  " << stageNames[i] << " " << p.stageSeconds[i] << " s\n";
+            }
             std::cout << "Use wall speed for comparisons; event time excludes queueing, transfers and host work.\n";
         }
         return 0;

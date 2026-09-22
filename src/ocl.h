@@ -57,7 +57,7 @@ public:
     // Requires a profiling queue and completed dispatches. With appendTiming,
     // sums the events for the entire staged chunk, not just its last kernel. Device time,
     // not host enqueue/wait time; unavailable timestamps are not reported as 0.
-    bool lastKernelMilliseconds(double& ms) const;
+    bool lastKernelMilliseconds(double& ms, std::vector<double>* eventMs = nullptr) const;
     bool kernelLimits(id kernel, size_t& maxGroup, size_t& preferredMultiple,
                       unsigned long long& privateBytes) const;
 

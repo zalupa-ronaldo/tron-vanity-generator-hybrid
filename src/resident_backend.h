@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <memory>
 #include <string>
 
@@ -17,9 +18,10 @@ struct OpenclResidentOptions {
 };
 
 struct OpenclProfileResult {
-    uint64_t keys = 0, dispatches = 0;
+    uint64_t keys = 0, dispatches = 0, basePairs = 0;
     double wallSeconds = 0, baseSeconds = 0, scanSeconds = 0, gpuSeconds = 0;
     double maxGpuMs = 0;
+    std::array<double, 6> stageSeconds{};
     bool gpuTimingValid = true;
     std::string error;
 };

@@ -32,6 +32,9 @@ constexpr uint32_t kResidentEcw = 8;
 constexpr uint32_t kResidentKpi = 2;
 constexpr uint32_t kResidentLocalSize = 256;
 constexpr uint32_t kStagedMaxWorkItems = 1u << 16;
+// Keep a random base for 4M consecutive offsets (about 32 full GPU chunks).
+// The offset stays well inside the 32-bit range accepted by the kernels.
+constexpr uint32_t kStagedBaseWindowKeys = 1u << 22;
 constexpr const char* kStageNames[] = {"curve", "affine", "keccak", "checksum", "base58", "match"};
 constexpr const char* kStageKernels[] = {"resident_stage_curve", "resident_stage_affine",
                                        "resident_stage_keccak", "resident_stage_checksum",
@@ -219,6 +222,23 @@ public:
             error_ = "resident self-test found duplicate addresses";
             return false;
         }
+        if (usesStages() && (rngCounter_ != 1 || stagedOffsetBase_ != 2 * workItems_ * kResidentKpi)) {
+            error_ = "staged base reuse/offset progression mismatch";
+            return false;
+        }
+        if (usesStages()) {
+            // Exercise the window rollover without scanning millions of keys.
+            stagedOffsetBase_ = kStagedBaseWindowKeys;
+            uint32_t produced = 0, overflow = 0;
+            if (!runChunk(&produced, &overflow, [&](const FoundKey& key) {
+                    addresses.insert(key.address);
+                }) || overflow || produced != workItems_ * kResidentKpi ||
+                rngCounter_ != 2 || stagedOffsetBase_ != workItems_ * kResidentKpi ||
+                addresses.size() != 3 * workItems_ * kResidentKpi) {
+                if (error_.empty()) error_ = "staged base rollover/verification mismatch";
+                return false;
+            }
+        }
         return true;
     }
 
@@ -236,6 +256,8 @@ private:
     bool adaptive_ = !isCuda;
     uint64_t rngCounter_ = 0;
     uint64_t sequenceBase_ = 0;
+    uint32_t stagedOffsetBase_ = 0;
+    bool basePairReady_ = false;
     secp256k1_context* context_ = nullptr;
     bool tried_ = false, ready_ = false, pruneOutputs_ = true;
     std::string error_;
@@ -437,9 +459,12 @@ private:
     }
 
     bool bindProbeKernel() {
-        uint64_t sequence = sequenceBase_;
+        // The match kernel adds the offset to this sequence value. When a
+        // staged base spans chunks, subtract its current offset so the
+        // reported sequence remains global and monotonic.
+        uint64_t sequence = sequenceBase_ - (usesStages() ? stagedOffsetBase_ : 0);
         if (usesStages()) {
-            const uint32_t offsetBase = 0;
+            const uint32_t offsetBase = stagedOffsetBase_;
             auto args = [&](ocl::id kernel, std::initializer_list<ocl::id> buffers) {
                 unsigned i = 0;
                 for (auto buffer : buffers) if (!program_.setArg(kernel, i++, sizeof(buffer), &buffer)) return false;
@@ -509,6 +534,8 @@ private:
             return false;
         }
         ++rngCounter_;
+        ++profile_.basePairs;
+        basePairReady_ = true;
         return true;
     }
 
@@ -578,7 +605,15 @@ private:
     bool runChunk(uint32_t* produced, uint32_t* overflow, const ReportFn& report) {
         const auto baseStart = std::chrono::steady_clock::now();
         lastChunkKeys_ = static_cast<uint64_t>(workItems_) * kResidentKpi;
-        if (!prepareBasePair() || !bindProbeKernel()) {
+        if (usesStages()) {
+            if (!basePairReady_ || uint64_t(stagedOffsetBase_) + lastChunkKeys_ > kStagedBaseWindowKeys) {
+                stagedOffsetBase_ = 0;
+                if (!prepareBasePair()) return false;
+            }
+        } else if (!prepareBasePair()) {
+            return false;
+        }
+        if (!bindProbeKernel()) {
             if (error_.empty()) error_ = "setting resident scan-kernel arguments failed";
             return false;
         }
@@ -604,9 +639,15 @@ private:
         if constexpr (!isCuda) {
             if (openclOptions_.profiling) {
                 double gpuMs = 0;
-                if (program_.lastKernelMilliseconds(gpuMs)) {
+                std::vector<double> stageMs;
+                if (program_.lastKernelMilliseconds(gpuMs, usesStages() ? &stageMs : nullptr)) {
                     profile_.gpuSeconds += gpuMs / 1000.0;
                     profile_.maxGpuMs = std::max(profile_.maxGpuMs, gpuMs);
+                    if (usesStages()) {
+                        if (stageMs.size() != stageKernels_.size()) profile_.gpuTimingValid = false;
+                        else for (size_t i = 0; i < stageMs.size(); ++i)
+                            profile_.stageSeconds[i] += stageMs[i] / 1000.0;
+                    }
                 } else profile_.gpuTimingValid = false;
                 profile_.baseSeconds += std::chrono::duration<double>(scanStart - baseStart).count();
                 profile_.scanSeconds += scanMs / 1000.0;
@@ -643,6 +684,7 @@ private:
         readPos_ = writePos;
         if (!program_.writeAt(meta_, sizeof(uint32_t), sizeof(uint32_t), &readPos_)) return false;
         sequenceBase_ += lastChunkKeys_;
+        if (usesStages()) stagedOffsetBase_ += static_cast<uint32_t>(lastChunkKeys_);
         profile_.keys += lastChunkKeys_;
         ++profile_.dispatches;
         if (adaptive_ && scanMs > 0) {
@@ -690,7 +732,8 @@ int openclResidentSelfTest(const GpuDevice& device, const std::string& rng, Open
         return 1;
     }
     std::cout << "OpenCL " << (options.hostSeed ? "OS CSPRNG" : rng)
-              << ": 1024 address/key pairs verified; no wallet output\n";
+              << ": " << (options.staged ? 1536 : 1024)
+              << " address/key pairs verified; no wallet output\n";
     return 0;
 }
 

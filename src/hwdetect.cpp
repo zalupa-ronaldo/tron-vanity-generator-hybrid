@@ -1,5 +1,6 @@
 #include "hwdetect.h"
 #include "ocl.h"
+#include "cuda_driver.h"
 
 #include <cstring>
 #include <iostream>
@@ -78,5 +79,6 @@ HardwareReport detectHardware() {
     HardwareReport rep;
     rep.cpu = detectCpu();
     detectGpus(rep);
+    rep.cudaGpus = cuda::enumerateGpus(&rep.cudaNote);
     return rep;
 }

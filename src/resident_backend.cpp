@@ -3,6 +3,7 @@
 #include "crypto.h"
 #include "hwdetect.h"
 #include "ocl.h"
+#include "cuda_driver.h"
 #include "rng.h"
 #include "resident_protocol.h"
 
@@ -14,6 +15,8 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <type_traits>
+#include <unordered_set>
 #include <vector>
 
 #include <secp256k1.h>
@@ -72,7 +75,9 @@ std::string elapsedText(std::chrono::steady_clock::time_point started) {
     return out.str();
 }
 
+template<class Program>
 class ResidentGpuBackend final : public Backend {
+    static constexpr bool isCuda = std::is_same_v<Program, cuda::Program>;
 public:
     ResidentGpuBackend(GpuDevice device, std::shared_ptr<const Dictionary> dictionary,
                        std::string rng, uint32_t bufferMiB,
@@ -80,19 +85,21 @@ public:
         : device_(std::move(device)), dictionary_(std::move(dictionary)),
           rng_(std::move(rng)), bufferMiB_(std::max(8u, bufferMiB)),
           chunkMs_(std::clamp(chunkMs, 8u, 100u)),
-          pollMs_(std::clamp(pollMs, 10u, 1000u)),
           groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256) {
+        (void)pollMs; // retained for CLI/API compatibility; dispatch completion is the poll
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
         workItems_ = std::clamp((1u << 18) * chunkMs_ / 32u, 1u << 14, 1u << 20);
     }
 
-    std::string name() const override { return "OpenCL GPU resident"; }
+    ~ResidentGpuBackend() override { secp256k1_context_destroy(context_); }
+
+    std::string name() const override { return isCuda ? "CUDA GPU resident" : "OpenCL GPU resident"; }
 
     BackendInfo info() const override {
         BackendInfo out;
-        out.kind = "GPU-resident";
+        out.kind = isCuda ? "CUDA-resident" : "GPU-resident";
         out.title = device_.name;
-        out.lines.push_back("OpenCL " + device_.platform);
+        out.lines.push_back((isCuda ? "CUDA " : "OpenCL ") + device_.platform);
         out.lines.push_back("GPU CSPRNG + CPU base expansion + GPU scan, " + rng_ +
                             ", chunk " +
                             std::to_string(chunkMs_) + " ms");
@@ -120,7 +127,6 @@ public:
             std::cerr << "GPU resident unavailable: " << error_ << "\n";
             return;
         }
-        auto lastPoll = std::chrono::steady_clock::now();
         while (!state.stop.load(std::memory_order_relaxed)) {
             if (cfg.maxAttempts && state.checked.load() >= cfg.maxAttempts) break;
             uint32_t produced = 0, overflow = 0;
@@ -140,31 +146,46 @@ public:
                 state.stop.store(true);
                 return;
             }
-            auto now = std::chrono::steady_clock::now();
-            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPoll).count();
-            // runChunk already synchronizes and polls the metadata. Do not add
-            // an unconditional delay after a productive chunk: that throttles
-            // high-match dictionaries and can waste a large fraction of GPU time.
-            if (produced == 0 && elapsedMs < pollMs_)
-                std::this_thread::sleep_for(std::chrono::milliseconds(pollMs_ - elapsedMs));
-            lastPoll = std::chrono::steady_clock::now();
+            // Bounded dispatches already synchronize and drain the ring. A
+            // post-dispatch polling sleep would idle fast GPUs on rare matches.
         }
+    }
+
+    bool selfTest() {
+        if (!ensureReady()) return false;
+        workItems_ = 256;
+        pruneOutputs_ = false;
+        std::unordered_set<std::string> addresses;
+        for (int batch = 0; batch < 2; ++batch) {
+            uint32_t produced = 0, overflow = 0;
+            if (!runChunk(&produced, &overflow, [&](const FoundKey& key) {
+                    addresses.insert(key.address);
+                }) || overflow || produced != workItems_ * kResidentKpi) {
+                if (error_.empty()) error_ = "CUDA self-test record count/overflow mismatch";
+                return false;
+            }
+        }
+        if (addresses.size() != workItems_ * kResidentKpi * 2) {
+            error_ = "CUDA self-test found duplicate addresses";
+            return false;
+        }
+        return true;
     }
 
 private:
     GpuDevice device_;
     std::shared_ptr<const Dictionary> dictionary_;
     std::string rng_;
-    uint32_t bufferMiB_, chunkMs_, pollMs_;
+    uint32_t bufferMiB_, chunkMs_;
     uint32_t workItems_ = 1u << 18;
     uint32_t ringSlots_ = 0;
     uint32_t groupSize_ = kResidentLocalSize;
     uint64_t rngCounter_ = 0;
     uint64_t sequenceBase_ = 0;
     secp256k1_context* context_ = nullptr;
-    bool tried_ = false, ready_ = false;
+    bool tried_ = false, ready_ = false, pruneOutputs_ = true;
     std::string error_;
-    ocl::Program program_;
+    Program program_;
     ocl::id seedKernel_ = nullptr, probeKernel_ = nullptr;
     ocl::id seed_ = nullptr, table_ = nullptr, dfa_ = nullptr;
     ocl::id baseSk_ = nullptr, basePub_ = nullptr;
@@ -183,9 +204,9 @@ private:
             error_ = "resident RNG must be chacha12, aes-ctr, or philox";
             return false;
         }
-        if (!ocl::load(&error_)) return false;
-        if (!device_.deviceId || !dictionary_ || dictionary_->words.empty()) {
-            error_ = "missing OpenCL device or dictionary";
+        if constexpr (!isCuda) { if (!ocl::load(&error_)) return false; }
+        if ((isCuda ? device_.cudaOrdinal < 0 : !device_.deviceId) || !dictionary_ || dictionary_->words.empty()) {
+            error_ = "missing GPU device or dictionary";
             return false;
         }
         const auto initStarted = std::chrono::steady_clock::now();
@@ -204,8 +225,12 @@ private:
                            " -D ECW=" + std::to_string(kResidentEcw) +
                            " -D ECBITS=" + std::to_string(kResidentEcbits) +
                            " -D KPI=" + std::to_string(kResidentKpi) + " -D MONT_N=1";
-        auto stageStarted = beginStage("compiling lightweight OpenCL RNG and scan kernels (first run may populate the driver cache)");
-        if (!program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_)) {
+        auto stageStarted = beginStage(isCuda ? "loading native CUDA PTX (first run may populate the driver cache)" :
+            "compiling lightweight OpenCL RNG and scan kernels (first run may populate the driver cache)");
+        bool built;
+        if constexpr (isCuda) built = program_.build(device_.cudaOrdinal, rngMode, &error_);
+        else built = program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_);
+        if (!built) {
             failStage(stageStarted);
             return false;
         }
@@ -322,7 +347,8 @@ private:
                            secp256k1_ec_pubkey_serialize(context_, encoded, &encodedLen, &pubkey,
                                                         SECP256K1_EC_UNCOMPRESSED) &&
                            encodedLen == sizeof(encoded);
-        std::fill(sk.begin(), sk.end(), 0);
+        volatile unsigned char* secret = sk.data();
+        for (size_t i = 0; i < sk.size(); ++i) secret[i] = 0;
         if (!valid) {
             error_ = "GPU CSPRNG returned an invalid secp256k1 scalar";
             return false;
@@ -362,9 +388,11 @@ private:
         for (uint32_t id : ids) {
             if (id >= dictionary_->words.size()) continue;
             const uint32_t mask = 1U << (id & 31);
-            if (activeWords_[id >> 5] & mask) {
-                activeWords_[id >> 5] &= ~mask;
-                outputsChanged = true;
+            if (!pruneOutputs_ || (activeWords_[id >> 5] & mask)) {
+                if (pruneOutputs_) {
+                    activeWords_[id >> 5] &= ~mask;
+                    outputsChanged = true;
+                }
                 key.words.push_back(dictionary_->words[id]);
             }
         }
@@ -411,6 +439,10 @@ private:
         const uint32_t writePos = meta[0];
         const uint32_t available = writePos - readPos_;
         const uint32_t count = std::min(available, ringSlots_);
+        if (meta[2] || meta[3] || available > ringSlots_) {
+            error_ = "GPU result ring overflow/error; stopping to avoid lost matches";
+            return false;
+        }
         if (produced) *produced = count;
         if (overflow) *overflow = meta[2];
         if (report && count) {
@@ -442,6 +474,33 @@ private:
 std::unique_ptr<Backend> makeResidentGpuBackend(
     const GpuDevice& device, std::shared_ptr<const Dictionary> dictionary,
     const std::string& rng, uint32_t bufferMiB, uint32_t chunkMs, uint32_t pollMs, uint32_t groupSize) {
-    return std::make_unique<ResidentGpuBackend>(device, std::move(dictionary), rng,
+    return std::make_unique<ResidentGpuBackend<ocl::Program>>(device, std::move(dictionary), rng,
                                                 bufferMiB, chunkMs, pollMs, groupSize);
+}
+
+std::unique_ptr<Backend> makeCudaBackend(
+    const GpuDevice& device, std::shared_ptr<const Dictionary> dictionary,
+    const std::string& rng, uint32_t bufferMiB, uint32_t chunkMs, uint32_t groupSize) {
+    return std::make_unique<ResidentGpuBackend<cuda::Program>>(device, std::move(dictionary), rng,
+                                                               bufferMiB, chunkMs, 0, groupSize);
+}
+
+int cudaSelfTest(const GpuDevice& device) {
+    // A synthetic DFA accepts every address, forcing every result through the
+    // independent CPU secp256k1/Keccak/Base58 verifier. Nothing is saved.
+    auto dictionary = std::make_shared<Dictionary>();
+    dictionary->words = {"test"};
+    dictionary->dfa.assign(Dictionary::Alphabet, 0);
+    dictionary->outStart = {0};
+    dictionary->outLen = {1};
+    dictionary->outIds = {0};
+    for (const auto& rng : {"chacha12", "aes-ctr", "philox"}) {
+        ResidentGpuBackend<cuda::Program> backend(device, dictionary, rng, 8, 8, 0, 64);
+        if (!backend.selfTest()) {
+            std::cerr << "CUDA self-test " << rng << " failed: " << backend.note() << "\n";
+            return 1;
+        }
+        std::cout << "CUDA " << rng << ": 1024 address/key pairs verified; no wallet output\n";
+    }
+    return 0;
 }

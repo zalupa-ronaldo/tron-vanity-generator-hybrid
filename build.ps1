@@ -5,7 +5,8 @@
 # Requires: Visual Studio 2022/2026 or Build Tools with the C++ workload, git, GitHub access.
 # The resulting exe statically links the runtime and can be copied to another x64 Windows PC.
 param(
-    [string]$Config = "Release"
+    [string]$Config = "Release",
+    [switch]$EnableCuda
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -57,12 +58,21 @@ if (Test-Path $ninja) {
     $gen = @("-G", "NMake Makefiles")
 }
 
-& $cmake -B build $gen "-DCMAKE_BUILD_TYPE=$Config"
+$cudaOption = if ($EnableCuda) { "ON" } else { "OFF" }
+& $cmake -B build $gen "-DCMAKE_BUILD_TYPE=$Config" "-DTRON_ENABLE_CUDA=$cudaOption"
 if ($LASTEXITCODE) { throw "cmake configure failed" }
 & $cmake --build build --config $Config
 if ($LASTEXITCODE) { throw "build failed" }
+& $cmake --build build --config $Config --target test
+if ($LASTEXITCODE) { throw "kernel correctness tests failed" }
 
 Write-Host ""
 Write-Host "Done: $root\build\tron_vanity_generator.exe"
 & "$root\build\tron_vanity_generator.exe" --selftest
+if ($LASTEXITCODE) { throw "selftest failed" }
+& "$root\build\tron_vanity_generator.exe" --hashtest
+if ($LASTEXITCODE) { throw "hashtest failed" }
+& "$root\build\tron_vanity_generator.exe" --matchtest
+if ($LASTEXITCODE) { throw "matchtest failed" }
 & "$root\build\tron_vanity_generator.exe" --list
+if ($LASTEXITCODE) { throw "device listing failed" }

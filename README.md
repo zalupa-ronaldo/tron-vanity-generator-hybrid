@@ -1,13 +1,13 @@
-# TRON Vanity Generator — CPU + OpenCL + Metal
+# TRON Vanity Generator — CPU + OpenCL + CUDA + Metal
 
 [![Windows release](https://img.shields.io/github/v/release/zalupa-ronaldo/tron-vanity-generator-hybrid?display_name=tag)](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/releases)
 [![Build](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml/badge.svg)](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Hybrid TRON vanity-address generator for Windows and Apple Silicon. It can run
-the CPU worker with detected OpenCL GPUs on Windows, or use the native Metal
-resident backend on macOS. OpenCL covers both AMD and NVIDIA cards, so version
-1 does not require the CUDA Toolkit.
+Hybrid TRON vanity-address generator with OpenCL on Windows, native CUDA on
+Windows/Linux, and native Metal on Apple Silicon. The Windows release embeds
+CUDA PTX: NVIDIA users need a compatible driver, without installing the CUDA
+Toolkit. AMD GPUs use OpenCL.
 
 The GPU architecture is based on and attributes
 [hlzzhqb/tron-vanity-generator](https://github.com/hlzzhqb/tron-vanity-generator)
@@ -24,7 +24,7 @@ therefore measure different workloads and hardware.
 
 `--words` supplies a Base58-compatible dictionary. Every address is scanned
 after its initial `T`; lowercase and uppercase variants are matched unless
-`--case-sensitive` is used. The OpenCL kernel uses a flattened Aho–Corasick
+`--case-sensitive` is used. The OpenCL/CUDA kernel uses a flattened Aho–Corasick
 automaton, so CPU and GPU use the same matching semantics.
 
 `words.example.txt` is a curated starter dictionary with 350+ entries across
@@ -68,10 +68,12 @@ Useful checks:
 .\build\tron_vanity_generator.exe --backend opencl --seconds 60
 .\build\tron_vanity_generator.exe --backend opencl --gpu-batch 1048576 --seconds 60
 .\build\tron_vanity_generator.exe --backend opencl --gpu-resident --gpu-rng chacha12 --seconds 60
+.\build\tron_vanity_generator.exe --backend cuda --seconds 60
 ```
 
 If OpenCL is unavailable, `--backend opencl` falls back to CPU. `auto` uses
-CPU plus every available OpenCL GPU.
+CPU plus every available OpenCL GPU. CUDA is explicitly selected with
+`--backend cuda`; it does not run alongside OpenCL on the same NVIDIA GPU.
 
 Discrete GPUs default to a larger `2^20` GPU batch to reduce command-queue
 gaps. Integrated GPUs stay at `2^16` to keep desktop responsiveness. Use
@@ -80,7 +82,7 @@ gaps. Integrated GPUs stay at `2^16` to keep desktop responsiveness. Use
 ## GPU-resident mode (experimental)
 
 `--gpu-resident` keeps the dictionary, address checking and a device result ring
-on the GPU. On OpenCL, a lightweight GPU CSPRNG writes one 32-byte scalar per
+on the GPU. On OpenCL/CUDA, a lightweight GPU RNG writes one 32-byte scalar per
 chunk. The host reads that scalar, expands its public point once with
 libsecp256k1, uploads 64 bytes, and the GPU scans the consecutive range. This
 96-byte round trip and one CPU point multiplication are amortized over the
@@ -140,7 +142,7 @@ permutation (about 20% faster); cold short runs reached 34.3 M keys/s. Startup
 compares both permutations over 1,024 deterministic blocks.
 
 Already-saved dictionary words are removed from the live DFA output tables
-between OpenCL and Metal dispatches. This preserves the existing
+between OpenCL, CUDA and Metal dispatches. This preserves the existing
 one-result-per-word behavior without sending millions of duplicate short-word
 records back to the CPU. The Metal grid is scaled inversely with keys per lane,
 keeping command buffers near the same key count as the batch changes; the tuned
@@ -203,8 +205,8 @@ regular OpenCL path remains available:
 
 `--bench` compares every backend available on the current machine. With
 `--backend auto` it runs the CPU worker, the legacy OpenCL tuning matrix,
-resident OpenCL for `chacha12`, `aes-ctr` and `philox`, and resident Metal for
-the same three RNGs on Apple Silicon. Explicit `--backend cpu|opencl|metal`
+resident OpenCL/CUDA for `chacha12`, `aes-ctr` and `philox`, and resident Metal for
+the same three RNGs on Apple Silicon. Explicit `--backend cpu|opencl|cuda|metal`
 restricts the matrix to that backend. The legacy OpenCL section also scans
 EC window, Montgomery batch size, keys-per-item, match length and GPU batch
 size.
@@ -241,9 +243,67 @@ The release archive contains only the executable, a starter dictionary and
 the project documentation. It does not contain wallet exports, private keys,
 local logs or benchmark output.
 
-## CUDA roadmap
+## Native CUDA (experimental)
 
-CUDA is intentionally not required for v1: NVIDIA users get a no-toolkit path
-through OpenCL. Version 2 can add a native CUDA backend behind the same
-`Backend` interface without changing the dictionary, result format or CPU
-fallback.
+The CUDA backend uses NVIDIA's Driver API and precompiled PTX, sharing the
+resident integer secp256k1, Keccak, SHA-256, Base58 and dictionary code with
+OpenCL. CUDA performs the RNG and range scan; libsecp256k1 expands one base
+point per chunk on the CPU and independently verifies every returned match.
+Device buffers, the CUDA context, module and stream are released when the
+backend is destroyed. Contexts are rebound when work moves to a worker thread.
+
+Requirements: NVIDIA compute capability 5.2+ and a driver supporting CUDA 12.6
+PTX (or newer). AMD RX 9070 XT and Apple GPUs do not support native CUDA.
+CUDA failure is reported explicitly, without silently running on the CPU.
+
+Windows CMD commands (each command is one line):
+
+```bat
+tron_vanity_generator.exe --list
+tron_vanity_generator.exe --backend cuda --gputest
+tron_vanity_generator.exe --backend cuda --words words.txt --seconds 60
+tron_vanity_generator.exe --backend cuda --bench-resident --words words.txt --bench-seconds 3
+```
+
+CUDA always uses the bounded resident pipeline; `--gpu-resident` is optional.
+Use `--gpu-group-size 64|128|256`, `--gpu-chunk-ms 8..100`, and
+`--gpu-buffer-mb` to tune it. `--gpu-batch`, `--ec-window`, `--keys-per-item`
+and `--mont-n` are legacy OpenCL settings. `--gpu-poll-ms` is retained for CLI
+compatibility; each resident dispatch already waits for and drains its results,
+so an extra idle delay is no longer inserted. `chacha12` is the default RNG;
+the other two modes are for benchmarking, not recommended for funded wallets.
+
+`--backend cuda --gputest` checks 1,024 GPU-produced key/address pairs against
+libsecp256k1 per RNG, across two chunks, without saving wallets or printing
+private keys. Build-time CTest also executes the shared kernel body on CPU
+and checks scalar boundaries, address encoding, ring overflow and removed
+dictionary outputs. These tests and successful PTX compilation do not establish
+GPU throughput or replace validation on an actual NVIDIA device.
+
+To include CUDA when building on Windows:
+
+```powershell
+python -m pip install nvidia-cuda-nvrtc-cu12==12.6.85
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -EnableCuda
+```
+
+To build on Linux (C++ toolchain, CMake, Python and initialized submodules):
+
+```bash
+python3 -m pip install nvidia-cuda-nvrtc-cu12==12.6.85
+cmake -S . -B build-cuda -DTRON_ENABLE_CUDA=ON
+cmake --build build-cuda -j
+ctest --test-dir build-cuda --output-on-failure
+./build-cuda/tron_vanity_generator --backend cuda --gputest
+```
+
+Only NVIDIA's NVRTC compiler component is needed at build time, even on a
+machine without a GPU. It compiles all three RNG variants into embedded PTX;
+the shipped executable loads only the NVIDIA driver. For cross-compilation,
+generate the header using `scripts/build_cuda_ptx.py` on Windows/Linux and pass
+`-DTRON_CUDA_PTX_HEADER=/absolute/path/cuda_ptx.h` with `TRON_ENABLE_CUDA=ON`.
+Without this option, a standard build keeps CUDA disabled and reports that in
+`--list`.
+
+Implementation references: [NVIDIA NVRTC](https://docs.nvidia.com/cuda/nvrtc/)
+and [CUDA Driver API](https://docs.nvidia.com/cuda/cuda-driver-api/).

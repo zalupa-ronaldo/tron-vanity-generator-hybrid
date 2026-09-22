@@ -20,11 +20,15 @@ struct GpuDevice {
     bool integrated = false;  // 由 HOST_UNIFIED_MEMORY 推断
     void* platformId = nullptr;  // cl_platform_id
     void* deviceId = nullptr;    // cl_device_id
+    int cudaOrdinal = -1;
+    int cudaCapability = 0;
 };
 
 struct HardwareReport {
     CpuInfo cpu;
     std::vector<GpuDevice> gpus;
+    std::vector<GpuDevice> cudaGpus;
+    std::string cudaNote;
     bool openclAvailable = false;
     std::string openclNote;   // 说明为什么没有 GPU（缺 OpenCL.dll 等）
 };

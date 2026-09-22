@@ -77,19 +77,19 @@ struct Options {
 
 void usage() {
     std::cout <<
-        "TRON vanity generator - CPU + OpenCL + Apple Metal\n"
+        "TRON vanity generator - CPU + OpenCL + CUDA + Apple Metal\n"
         "  --seconds N       run duration; 0 = until Ctrl+C\n"
         "  --threads N       CPU threads; default = logical cores\n"
         "  --words FILE      dictionary; default words.txt\n"
         "  --out DIR         output directory; default results\n"
         "  --output FILE     direct JSONL output override\n"
-        "  --backend auto|cpu|opencl|metal\n"
+        "  --backend auto|cpu|opencl|cuda|metal\n"
         "  --gpu-batch N     GPU batch size (power of two, 1024..1048576)\n"
         "  --gpu-resident    GPU CSPRNG + device result ring mode\n"
         "  --gpu-rng NAME    chacha12, aes-ctr, or philox (resident mode)\n"
         "  --gpu-buffer-mb N device result ring size, default 128\n"
         "  --gpu-chunk-ms N  bounded GPU chunk target, default 32\n"
-        "  --gpu-poll-ms N   result polling interval, default 50\n"
+        "  --gpu-poll-ms N   compatibility option; bounded GPU dispatches poll on completion\n"
         "  --gpu-group-size N resident work-group size: 64, 128, or 256 (default 256)\n"
         "  --metal-keys-per-lane N Metal point-walk batch: power of two, 1..1024 (default 32)\n"
         "  --bench-seconds N seconds per benchmark method; --bench runs all available methods\n"
@@ -102,7 +102,7 @@ void usage() {
         "  --metal-hw-case NAME filter hardware cases by name/category\n"
         "  --metal-hw-json FILE write hardware profile results as JSON\n"
         "  --case-sensitive  exact case matching\n"
-        "  --list            list CPU/OpenCL devices and exit\n"
+        "  --list            list CPU/OpenCL/CUDA devices and exit\n"
         "  --verbose         more frequent progress updates\n"
         "  --selftest | --hashtest | --matchtest | --gputest | --bench\n";
 }
@@ -155,8 +155,8 @@ bool parse(int argc, char** argv, Options& o) {
         std::cerr << e.what() << "\n"; return false;
     }
     if (o.backend == "gpu") o.backend = "opencl";
-    if (o.backend != "auto" && o.backend != "cpu" && o.backend != "opencl" && o.backend != "metal") {
-        std::cerr << "backend must be auto, cpu, opencl, or metal\n"; return false;
+    if (o.backend != "auto" && o.backend != "cpu" && o.backend != "opencl" && o.backend != "cuda" && o.backend != "metal") {
+        std::cerr << "backend must be auto, cpu, opencl, cuda, or metal\n"; return false;
     }
     if (o.benchSeconds <= 0) {
         std::cerr << "--bench-seconds must be positive\n"; return false;
@@ -249,6 +249,12 @@ void printDevices(const HardwareReport& hw) {
         std::cout << "OpenCL GPU: " << g.name << " / " << g.vendor << " / "
                   << g.computeUnits << " CU @ " << g.clockMHz << " MHz\n";
     }
+    if (hw.cudaGpus.empty()) std::cout << "CUDA GPU: none (" << hw.cudaNote << ")\n";
+    for (const auto& g : hw.cudaGpus) {
+        std::cout << "CUDA GPU: " << g.name << " / compute " << g.cudaCapability / 10 << "."
+                  << g.cudaCapability % 10 << " / " << g.computeUnits << " SM / "
+                  << g.globalMemBytes / (1024 * 1024) << " MiB\n";
+    }
 #if defined(__APPLE__)
     std::string note;
     std::cout << "Metal GPU: " << (metalAvailable(&note) ? note : "none (" + note + ")") << "\n";
@@ -276,6 +282,11 @@ int main(int argc, char** argv) {
     }
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--gputest") {
+            if (opt.backend == "cuda") {
+                if (hw.cudaGpus.empty()) { std::cerr << "CUDA unavailable: " << hw.cudaNote << "\n"; return 1; }
+                for (const auto& device : hw.cudaGpus) if (cudaSelfTest(device)) return 1;
+                return 0;
+            }
             if (hw.gpus.empty()) { std::cerr << "no OpenCL GPU: " << hw.openclNote << "\n"; return 1; }
             return gpuSelfTest(hw.gpus.front());
         }
@@ -329,12 +340,13 @@ int main(int argc, char** argv) {
             const bool all = opt.backend == "auto";
             const bool wantCpu = !opt.benchResidentOnly && (all || opt.backend == "cpu");
             const bool wantOpencl = all || opt.backend == "opencl";
+            const bool wantCuda = all || opt.backend == "cuda";
             const bool wantMetal = all || opt.backend == "metal";
             const std::vector<std::string> rngs = {"chacha12", "aes-ctr", "philox"};
             std::cout << "\n=== " << (opt.benchResidentOnly ? "Resident GPU benchmark" : "Full benchmark matrix")
                       << " (" << seconds << " s per method) ===\n"
-                      << (opt.benchResidentOnly ? "Resident OpenCL/Metal RNGs; legacy tuning skipped\n"
-                                                 : "CPU + legacy OpenCL tuning + resident OpenCL/Metal RNGs\n")
+                      << (opt.benchResidentOnly ? "Resident OpenCL/CUDA/Metal RNGs; legacy tuning skipped\n"
+                                                 : "CPU + legacy OpenCL tuning + resident OpenCL/CUDA/Metal RNGs\n")
                       << "No wallet output is written by benchmark mode.\n\n"
                       << std::left << std::setw(38) << "method"
                       << std::right << std::setw(16) << "throughput" << "\n"
@@ -374,6 +386,29 @@ int main(int argc, char** argv) {
                 std::cout << "OpenCL: unavailable (" << hw.openclNote << ")\n";
             }
 
+            if (wantCuda) {
+                if (hw.cudaGpus.empty()) {
+                    std::cerr << "CUDA unavailable: " << hw.cudaNote << "\n";
+                    if (!all) return 1;
+                }
+                for (const auto& device : hw.cudaGpus) for (const auto& rng : rngs) {
+                    auto cuda = makeCudaBackend(device, dictionary, rng, opt.gpuBufferMiB,
+                                                opt.gpuChunkMs, opt.gpuGroupSize);
+                    if (!cuda->available()) {
+                        std::cerr << "CUDA " << rng << ": " << cuda->note() << "\n";
+                        if (!all) return 1;
+                        continue;
+                    }
+                    const double speed = cuda->benchmark(seconds);
+                    if (!cuda->note().empty()) {
+                        std::cerr << "CUDA benchmark failed: " << cuda->note() << "\n";
+                        if (!all) return 1;
+                        continue;
+                    }
+                    std::cout << std::left << std::setw(38) << ("CUDA " + rng + " / " + device.name)
+                              << std::right << std::setw(16) << benchRate(speed) << "\n";
+                }
+            }
 #if defined(__APPLE__)
             if (wantMetal) {
                 for (const auto& rng : rngs) {
@@ -410,6 +445,12 @@ int main(int argc, char** argv) {
 
     std::vector<std::unique_ptr<Backend>> backends;
     if (opt.backend == "auto" || opt.backend == "cpu") backends.push_back(makeCpuBackend());
+    if (opt.backend == "cuda") {
+        if (hw.cudaGpus.empty()) { std::cerr << "CUDA unavailable: " << hw.cudaNote << "\n"; return 1; }
+        for (const auto& device : hw.cudaGpus)
+            backends.push_back(makeCudaBackend(device, dictionary, opt.gpuRng,
+                opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuGroupSize));
+    }
     bool autoMetal = false;
 #if defined(__APPLE__)
     autoMetal = opt.backend == "auto";
@@ -441,12 +482,15 @@ int main(int argc, char** argv) {
     }
     if (backends.empty()) { std::cerr << "no backend available\n"; return 1; }
 
+    size_t availableBackends = 0;
     for (auto& b : backends) {
         auto info = b->info();
         std::cout << info.kind << ": " << info.title << "\n";
         for (const auto& line : info.lines) std::cout << "  " << line << "\n";
         if (!b->available()) std::cerr << "  unavailable: " << b->note() << "\n";
+        else ++availableBackends;
     }
+    if (!availableBackends) { std::cerr << "no usable backend\n"; return 1; }
 
     std::filesystem::path output;
     if (!opt.output.empty()) output = opt.output;
@@ -512,5 +556,6 @@ int main(int argc, char** argv) {
     std::cout << "\nDone: " << state.checked.load() << " keys, " << rate(state.checked.load(), elapsed)
               << ", CPU=" << rate(state.cpuChecked.load(), elapsed)
               << ", GPU=" << rate(state.gpuChecked.load(), elapsed) << "\n";
+    for (const auto& b : backends) if (b->available() && !b->note().empty()) return 1;
     return 0;
 }

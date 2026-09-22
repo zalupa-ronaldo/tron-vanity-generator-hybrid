@@ -1,4 +1,6 @@
+#ifndef CUDA_BACKEND
 #pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable
+#endif
 
 #ifndef KPI
 #define KPI 8            /* 每个 work-item 连续处理的私钥数（host 用 -D KPI=n 覆盖） */
@@ -192,9 +194,9 @@ static inline int resident_lt_order(const uchar *sk) {
     /* secp256k1 order, big endian. */
     const uchar n[32] = {
         0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-        0xbc,0xe6,0xfa,0xda,0x71,0x48,0x9d,0x7e,
-        0xa3,0x0b,0x8c,0xd0,0x36,0x41,0x41,0x21
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xfe,
+        0xba,0xae,0xdc,0xe6,0xaf,0x48,0xa0,0x3b,
+        0xbf,0xd2,0x5e,0x8c,0xd0,0x36,0x41,0x41
     };
     int nonzero = 0, cmp = 0;
     for (int i = 0; i < 32; ++i) {
@@ -308,7 +310,10 @@ static inline void resident_emit(const uchar *sk, const uchar *pub,
  * kernel.  Keep that operation off the OpenCL compiler entirely: this kernel
  * generates one private scalar, the host expands it to a public point once,
  * and the second kernel scans a large consecutive range from that point. */
-__kernel __attribute__((reqd_work_group_size(1, 1, 1)))
+__kernel
+#ifndef CUDA_BACKEND
+__attribute__((reqd_work_group_size(1, 1, 1)))
+#endif
 void tron_vanity_resident_seed(
         __global const uchar *seed,
         __global uchar *base_sk_out,

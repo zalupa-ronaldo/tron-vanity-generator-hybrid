@@ -7,6 +7,22 @@ option(STATIC_RUNTIME "静态链接 C/C++ 运行库（便携 exe）" ON)
 
 project(tron_vanity_generator CXX)
 
+option(TRON_ENABLE_CUDA "Embed native NVIDIA CUDA PTX kernels" OFF)
+set(TRON_CUDA_PTX_HEADER "" CACHE FILEPATH "Precompiled cuda_ptx.h for cross-compilation")
+if(TRON_ENABLE_CUDA)
+  set(CUDA_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/cuda_ptx.h)
+  if(TRON_CUDA_PTX_HEADER)
+    configure_file(${TRON_CUDA_PTX_HEADER} ${CUDA_GEN} COPYONLY)
+  else()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_custom_command(OUTPUT ${CUDA_GEN}
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_cuda_ptx.py
+              --source-dir ${CMAKE_CURRENT_SOURCE_DIR}/kernels --output ${CUDA_GEN}
+      DEPENDS scripts/build_cuda_ptx.py kernels/tron_vanity_cuda.cu kernels/secp256k1_tron.cl
+      VERBATIM)
+  endif()
+endif()
+
 if(APPLE)
   enable_language(OBJCXX)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS for Metal backend")
@@ -25,7 +41,11 @@ if(STATIC_RUNTIME)
   elseif(MINGW)
     add_link_options(-static -static-libgcc -static-libstdc++)
   elseif(UNIX AND NOT APPLE)
-    add_link_options(-static -static-libgcc -static-libstdc++)
+    # libcuda is loaded dynamically and depends on the system libc/loader.
+    if(NOT TRON_ENABLE_CUDA)
+      add_link_options(-static)
+    endif()
+    add_link_options(-static-libgcc -static-libstdc++)
   endif()
 endif()
 
@@ -124,10 +144,26 @@ else()
   add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN})
 endif()
 target_include_directories(tron_vanity_generator PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gen)
-target_link_libraries(tron_vanity_generator PRIVATE secp256k1)
+target_link_libraries(tron_vanity_generator PRIVATE secp256k1 ${CMAKE_DL_LIBS})
+if(TRON_ENABLE_CUDA)
+  target_sources(tron_vanity_generator PRIVATE ${CUDA_GEN})
+  target_compile_definitions(tron_vanity_generator PRIVATE TRON_ENABLE_CUDA=1)
+endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(tron_vanity_generator PRIVATE Threads::Threads)
+
+include(CTest)
+if(BUILD_TESTING)
+  foreach(CUDA_TEST_RNG IN ITEMS 1 2 3)
+    add_executable(cuda_kernel_test_${CUDA_TEST_RNG} tests/cuda_kernel_test.cpp
+      src/crypto.cpp src/keccak.cpp)
+    target_include_directories(cuda_kernel_test_${CUDA_TEST_RNG} PRIVATE src)
+    target_compile_definitions(cuda_kernel_test_${CUDA_TEST_RNG} PRIVATE RESIDENT_RNG=${CUDA_TEST_RNG})
+    target_link_libraries(cuda_kernel_test_${CUDA_TEST_RNG} PRIVATE secp256k1)
+    add_test(NAME cuda_kernel_rng_${CUDA_TEST_RNG} COMMAND cuda_kernel_test_${CUDA_TEST_RNG})
+  endforeach()
+endif()
 
 if(APPLE)
   target_link_libraries(tron_vanity_generator PRIVATE

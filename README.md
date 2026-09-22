@@ -286,6 +286,15 @@ batch 4 and 13.304/13.617 M/s for batch 8; the affine stage itself fell from
 about 0.765 to 0.455 ns/key. This is a candidate, not an RX 9070 XT result.
 The batch-8 self-test compares generated addresses and private scalars with
 the CPU, including a base-window transition.
+The curve stage also has experimental `--opencl-curve-batch 4|8` options
+(default `2`). Each work-item computes one offset point, then walks three or
+seven adjacent points by adding the generator, amortizing offset-table work.
+On M4 OpenCL with affine batch 8, two alternating three-second profiles put
+curve batch 2 at 13.281/13.742 M/s and about 0.51 ns/key for the curve stage;
+curve batch 4 at 14.417/14.579 M/s and 0.36–0.37 ns/key; curve batch 8 was
+14.338/15.130 M/s and 0.38 ns/key. These are not RX 9070 XT measurements.
+The curve-batch self-tests verify CPU-equivalent results across base-window
+transitions.
 The implementation changes were benchmarked with the same five-second wall
 profile and six GPU stage timings on the RX 9070 XT:
 The user-reported v1.8.0 run on RX 9070 XT / gfx1201 passed all 13 checks
@@ -317,6 +326,9 @@ Windows, use `test-opencl.cmd -CompareAffineBatches -TimeoutSeconds 120`.
 The launcher runs its normal self-tests first and only compares batches if
 paired inversion passes. Judge both wall M/s and affine ns/key; compilation
 time, register pressure, and the best batch can differ by GPU and driver.
+Use `test-opencl.cmd -CompareCurveBatches -TimeoutSeconds 120` for the same
+bounded comparison of curve batch sizes 2, 4, and 8. The two comparison
+switches can be combined, but test them one at a time when isolating effects.
 
 `--opencl-inverse pair` uses one field inversion for two Jacobian points in the
 monolithic path; staged `--opencl-affine-batch 4` uses one for four. It avoids

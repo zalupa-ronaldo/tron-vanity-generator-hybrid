@@ -49,6 +49,7 @@ std::string openclResidentBuildOptions(const std::string& rng, const OpenclResid
         std::to_string(mode) + " -D RESIDENT_PAIR_INVERSE=" + (options.pairInverse ? "1" : "0") +
         " -D OPENCL_COMPACT=" + (options.compact ? "1" : "0") +
         " -D RESIDENT_AFFINE_BATCH=" + std::to_string(affineBatch) +
+        " -D RESIDENT_CURVE_BATCH=" + std::to_string(options.curveBatch) +
         " -D RESIDENT_OFFSET_WINDOWS=" + ((mask & 1U) ? "3" : "4") +
         " -D RESIDENT_STAGE_OPT_MASK=" + std::to_string(mask) +
         (options.hostSeed ? " -D RESIDENT_SCAN_ONLY=1" : "");
@@ -329,6 +330,11 @@ private:
             error_ = "staged affine batch must be 2, 4, or 8";
             return false;
         }
+        if (openclOptions_.curveBatch != 2 && openclOptions_.curveBatch != 4 &&
+            openclOptions_.curveBatch != 8) {
+            error_ = "staged curve batch must be 2, 4, or 8";
+            return false;
+        }
         if (openclOptions_.stageOptMask > 63) {
             error_ = "staged optimization mask must be in 0..63";
             return false;
@@ -381,8 +387,8 @@ private:
                 std::cerr << "  OpenCL " << (usesStages() ? kStageNames[i] : "scan")
                           << ": max group " << maxGroup << ", preferred multiple " << preferred
                           << ", reported private bytes " << privateBytes << " (not a VGPR count)\n";
-                const size_t requestedGroup = i == 1 ?
-                    groupSize_ * 2 / effectiveAffineBatch() : groupSize_;
+                const size_t requestedGroup = i == 0 ? groupSize_ * 2 / openclOptions_.curveBatch :
+                    i == 1 ? groupSize_ * 2 / effectiveAffineBatch() : groupSize_;
                 if (requestedGroup > maxGroup) {
                     error_ = "scan kernel work-group limit is " + std::to_string(maxGroup) +
                              "; reduce --gpu-group-size";
@@ -648,9 +654,10 @@ private:
                 for (unsigned i = 0; i < stageKernels_.size(); ++i) {
                     // One in-order queue: no host readback or clFinish between stages.
                     const bool affine = i == 1;
-                    const size_t global = affine ? lastChunkKeys_ / effectiveAffineBatch() :
-                                          i == 0 ? workItems_ : lastChunkKeys_;
-                    const size_t local = affine ? groupSize_ * 2 / effectiveAffineBatch() : groupSize_;
+                    const size_t global = i == 0 ? lastChunkKeys_ / openclOptions_.curveBatch :
+                                          affine ? lastChunkKeys_ / effectiveAffineBatch() : lastChunkKeys_;
+                    const size_t local = i == 0 ? groupSize_ * 2 / openclOptions_.curveBatch :
+                                         affine ? groupSize_ * 2 / effectiveAffineBatch() : groupSize_;
                     if (!program_.run1D(stageKernels_[i], global, local, &error_, i != 0)) {
                         enqueued = false; break;
                     }

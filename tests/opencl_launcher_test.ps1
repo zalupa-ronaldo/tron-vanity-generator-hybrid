@@ -23,6 +23,8 @@ public class Fixture {
             name += "-mask-" + Value(args, "--opencl-opt-mask");
         if (stage == "profile" && mode == "compare-affine" && Value(args, "--opencl-affine-batch") != "")
             name += "-affine-" + Value(args, "--opencl-affine-batch");
+        if (stage == "profile" && mode == "compare-curve" && Value(args, "--opencl-curve-batch") != "")
+            name += "-curve-" + Value(args, "--opencl-curve-batch");
         File.AppendAllText("calls.txt", name + Environment.NewLine);
         Console.WriteLine("fixture " + name);
         Console.Error.WriteLine("OpenCL API: fixture BEGIN");
@@ -60,6 +62,7 @@ $builds = ",build-curve,build-affine-single,build-affine-pair,build-keccak,build
 foreach ($case in $cases) { $case.Calls = $case.Calls.Replace(",scan-single", $builds + ",scan-single") }
 $cases += @{ Mode = "compare-stages"; CompareStages = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile,profile-mask-0,profile-mask-1,profile-mask-2,profile-mask-4,profile-mask-8,profile-mask-16,profile-mask-32"; Text = "[07-match] PASS" }
 $cases += @{ Mode = "compare-affine"; CompareAffine = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile,profile-affine-2,profile-affine-4,profile-affine-8"; Text = "[08-affine-8] PASS" }
+$cases += @{ Mode = "compare-curve"; CompareCurve = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile,profile-curve-2,profile-curve-4,profile-curve-8"; Text = "[09-curve-8] PASS" }
 $cases += @{ Mode = "curve-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
 $cases += @{ Mode = "checksum-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
 $cases += @{ Mode = "affine-pair-fail"; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,full,profile"; Text = "Paired scan skipped" }
@@ -78,6 +81,7 @@ try {
         $launcherArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $dir "test-opencl.ps1"), "-TimeoutSeconds", "30", "-Pipeline", $pipeline)
         if ($case.CompareStages) { $launcherArgs += "-CompareStages" }
         if ($case.CompareAffine) { $launcherArgs += "-CompareAffineBatches" }
+        if ($case.CompareCurve) { $launcherArgs += "-CompareCurveBatches" }
         $output = & powershell.exe @launcherArgs 2>&1
         if ($LASTEXITCODE -ne $case.Exit) { throw "$($case.Mode) exit mismatch: $LASTEXITCODE`n$($output -join "`n")" }
         $calls = (Get-Content -LiteralPath (Join-Path $dir "calls.txt")) -join ","

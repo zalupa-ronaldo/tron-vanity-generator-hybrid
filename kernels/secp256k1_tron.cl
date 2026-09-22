@@ -24,6 +24,9 @@
 #ifndef RESIDENT_AFFINE_BATCH
 #define RESIDENT_AFFINE_BATCH 2
 #endif
+#ifndef RESIDENT_CURVE_BATCH
+#define RESIDENT_CURVE_BATCH 2
+#endif
 #ifndef RESIDENT_OFFSET_WINDOWS
 #define RESIDENT_OFFSET_WINDOWS 4
 #endif
@@ -549,19 +552,19 @@ __kernel void tron_vanity_resident_probe(
 __kernel void resident_stage_curve(__global const uchar *base_pub,
                                    __global const uchar *table, __global uint *points,
                                    uint offset_base) {
-    uint first = (uint)get_global_id(0) * 2U;
+    uint first = (uint)get_global_id(0) * RESIDENT_CURVE_BATCH;
     ge generator;
     ge_load_g(&generator, &table[64]);
     gej acc;
     resident_add_offset(&acc, base_pub, table, offset_base + first);
-    for (uint item = 0; item < 2; ++item) {
+    for (uint item = 0; item < RESIDENT_CURVE_BATCH; ++item) {
         /* Fixed 128-byte wire layout; no host/compiler struct ABI assumption. */
         __global uint *dst = points + (first + item) * 32U;
         for (uint i = 0; i < 10; ++i) {
             dst[i] = acc.x.n[i]; dst[10 + i] = acc.y.n[i]; dst[20 + i] = acc.z.n[i];
         }
         dst[30] = (uint)acc.inf; dst[31] = 0;
-        if (item == 0) gej_add_ge(&acc, &acc, &generator);
+        if (item + 1U < RESIDENT_CURVE_BATCH) gej_add_ge(&acc, &acc, &generator);
     }
 }
 #endif

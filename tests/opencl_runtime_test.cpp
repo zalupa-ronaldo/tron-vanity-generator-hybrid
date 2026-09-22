@@ -36,6 +36,11 @@ int main() {
     OpenclResidentOptions pairedEight{false, true, false, true, true};
     pairedEight.affineBatch = 8;
     if (openclResidentSelfTest(device, "chacha12", pairedEight)) return 1;
+    for (uint32_t batch : {4U, 8U}) {
+        OpenclResidentOptions curveBatch{false, true, false, true, true};
+        curveBatch.curveBatch = batch;
+        if (openclResidentSelfTest(device, "chacha12", curveBatch)) return 1;
+    }
     for (uint32_t mask : {0U, 1U, 2U, 4U, 8U, 16U, 32U}) {
         OpenclResidentOptions isolated{false, true, false, true, true};
         isolated.stageOptMask = mask;

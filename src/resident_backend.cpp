@@ -50,6 +50,7 @@ std::string openclResidentBuildOptions(const std::string& rng, const OpenclResid
         " -D OPENCL_COMPACT=" + (options.compact ? "1" : "0") +
         " -D RESIDENT_AFFINE_BATCH=" + std::to_string(affineBatch) +
         " -D RESIDENT_CURVE_BATCH=" + std::to_string(options.curveBatch) +
+        " -D RESIDENT_SHA_RING=" + (options.shaRing && options.staged ? "1" : "0") +
         " -D RESIDENT_OFFSET_WINDOWS=" + ((mask & 1U) ? "3" : "4") +
         " -D RESIDENT_STAGE_OPT_MASK=" + std::to_string(mask) +
         (options.hostSeed ? " -D RESIDENT_SCAN_ONLY=1" : "");

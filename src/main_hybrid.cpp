@@ -103,6 +103,7 @@ void usage() {
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-affine-batch 2|4|8  staged paired inversion points per work-item (default 4)\n"
         "  --opencl-curve-batch 2|4|8  staged consecutive public points per work-item (default 2)\n"
+        "  --opencl-sha-ring  experimental 16-word SHA-256 schedule in staged checksum kernel\n"
         "  --opencl-opt-mask N  staged optimization bits 0..63; 0=baseline, 63=all (default)\n"
         "  --opencl-compiler compact|default  resident compiler mode (default compact)\n"
         "  --opencl-pipeline monolithic|staged  resident layout; selecting it enables GPU-resident mode\n"
@@ -180,6 +181,7 @@ bool parse(int argc, char** argv, Options& o) {
                     o.openclOptions.curveBatch != 8)
                     throw std::runtime_error("--opencl-curve-batch must be 2, 4, or 8");
             }
+            else if (a == "--opencl-sha-ring") o.openclOptions.shaRing = true;
             else if (a == "--opencl-opt-mask") {
                 o.openclOptions.stageOptMask = std::stoul(next(i, "--opencl-opt-mask"));
                 if (o.openclOptions.stageOptMask > 63)
@@ -391,6 +393,7 @@ int main(int argc, char** argv) {
                                            (opt.openclOptions.stageOptMask & 2U)) ?
                                           opt.openclOptions.affineBatch : 2U)
                   << "; curve batch " << opt.openclOptions.curveBatch
+                  << "; SHA ring " << (opt.openclOptions.shaRing ? "on" : "off")
                   << "; opt mask " << opt.openclOptions.stageOptMask
                   << "; pipeline " << (opt.openclOptions.staged ? "staged" : "monolithic")
                   << "; group " << opt.gpuGroupSize << "\n"

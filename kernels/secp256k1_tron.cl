@@ -27,6 +27,9 @@
 #ifndef RESIDENT_CURVE_BATCH
 #define RESIDENT_CURVE_BATCH 2
 #endif
+#ifndef RESIDENT_SHA_RING
+#define RESIDENT_SHA_RING 0
+#endif
 #ifndef RESIDENT_OFFSET_WINDOWS
 #define RESIDENT_OFFSET_WINDOWS 4
 #endif
@@ -1302,20 +1305,37 @@ inline uint shr(uint x, int n) { return x >> n; }
 inline uint rotr(uint x, int n) { return (x >> n) | (x << (32 - n)); }
 
 HASH_HEAVY void sha256_block(uint *st, const uchar *p) {
+#if RESIDENT_SPLIT_STAGE == 6 && RESIDENT_SHA_RING
+    uint w[16];
+#else
     uint w[64];
+#endif
     for (int i = 0; i < 16; i++)
         w[i] = ((uint)p[4*i] << 24) | ((uint)p[4*i+1] << 16) | ((uint)p[4*i+2] << 8) | (uint)p[4*i+3];
+#if !(RESIDENT_SPLIT_STAGE == 6 && RESIDENT_SHA_RING)
     for (int i = 16; i < 64; i++) {
         uint s0 = rotr(w[i-15],7) ^ rotr(w[i-15],18) ^ shr(w[i-15],3);
         uint s1 = rotr(w[i-2],17) ^ rotr(w[i-2],19) ^ shr(w[i-2],10);
         w[i] = w[i-16] + s0 + w[i-7] + s1;
     }
+#endif
     uint a=st[0],b=st[1],c=st[2],d=st[3],e=st[4],f=st[5],g=st[6],h=st[7];
     HASH_LOOP
     for (int i = 0; i < 64; i++) {
+#if RESIDENT_SPLIT_STAGE == 6 && RESIDENT_SHA_RING
+        if (i >= 16) {
+            int j = i & 15;
+            uint s0 = rotr(w[(j+1)&15],7) ^ rotr(w[(j+1)&15],18) ^ shr(w[(j+1)&15],3);
+            uint s1 = rotr(w[(j+14)&15],17) ^ rotr(w[(j+14)&15],19) ^ shr(w[(j+14)&15],10);
+            w[j] = w[j] + s0 + w[(j+9)&15] + s1;
+        }
+        uint word = w[i & 15];
+#else
+        uint word = w[i];
+#endif
         uint S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25);
         uint ch = (e & f) ^ (~e & g);
-        uint t1 = h + S1 + ch + SHA_K[i] + w[i];
+        uint t1 = h + S1 + ch + SHA_K[i] + word;
         uint S0 = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22);
         uint mj = (a & b) ^ (a & c) ^ (b & c);
         uint t2 = S0 + mj;

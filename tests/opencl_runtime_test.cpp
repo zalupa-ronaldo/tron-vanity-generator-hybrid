@@ -41,6 +41,9 @@ int main() {
         curveBatch.curveBatch = batch;
         if (openclResidentSelfTest(device, "chacha12", curveBatch)) return 1;
     }
+    OpenclResidentOptions rollingSha{false, true, false, true, true};
+    rollingSha.shaRing = true;
+    if (openclResidentSelfTest(device, "chacha12", rollingSha)) return 1;
     for (uint32_t mask : {0U, 1U, 2U, 4U, 8U, 16U, 32U}) {
         OpenclResidentOptions isolated{false, true, false, true, true};
         isolated.stageOptMask = mask;

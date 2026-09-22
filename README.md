@@ -334,6 +334,12 @@ much larger than the sum of its own kernel event times.
 Use `test-opencl.cmd -CompareCurveBatches -TimeoutSeconds 120` for the same
 bounded comparison of curve batch sizes 2, 4, and 8. The two comparison
 switches can be combined, but test them one at a time when isolating effects.
+The optional `--opencl-sha-ring` uses a 16-word circular message schedule
+instead of 64 words in the staged checksum kernel. It passed the GPU/CPU
+address and key self-test but was slower on the concurrently loaded M4
+(roughly 2.0 versus 1.5–1.6 ns/key for checksum); it is off by default.
+`test-opencl.cmd -CompareShaRing -TimeoutSeconds 120` runs a bounded,
+no-wallet comparison on the target GPU before considering it for production.
 
 `--opencl-inverse pair` uses one field inversion for two Jacobian points in the
 monolithic path; staged `--opencl-affine-batch 4` uses one for four. It avoids

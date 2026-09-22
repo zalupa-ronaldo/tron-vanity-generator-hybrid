@@ -17,6 +17,11 @@ int main() {
     device.platform = d.platformName;
     device.platformId = d.platform;
     device.deviceId = d.device;
+    if (diagnoseOpencl(device, "smoke", "chacha12")) return 1;
+    for (const auto& rng : {"chacha12", "aes-ctr", "philox"})
+        if (diagnoseOpencl(device, "rng", rng)) return 1;
+    if (diagnoseOpencl(device, "scan", "chacha12", {false, true, false})) return 1;
+    if (diagnoseOpencl(device, "scan", "chacha12", {true, true, false})) return 1;
     if (openclResidentSelfTest(device, "chacha12", {false, true, true})) return 1;
     for (const auto& rng : {"chacha12", "aes-ctr", "philox"})
         if (openclResidentSelfTest(device, rng, {true, true, true})) return 1;
@@ -35,6 +40,13 @@ int main() {
     }
     if (!profile.gpuTimingValid || profile.gpuSeconds <= 0) {
         std::cerr << "OpenCL profiling queue did not return valid timestamps\n";
+        return 1;
+    }
+    auto hostProfile = profileOpenclResident(device, dictionary, "chacha12", 8, 8, 64,
+                                             {true, true, true, true}, 0.05);
+    if (!hostProfile.error.empty() || !hostProfile.keys || !hostProfile.dispatches ||
+        hostProfile.wallSeconds <= 0 || hostProfile.keys % 128 != 0 || !hostProfile.gpuTimingValid) {
+        std::cerr << "OS-seeded OpenCL profile failed: " << hostProfile.error << "\n";
         return 1;
     }
     // Each self-test creates/destroys its context, programs, events and memory.

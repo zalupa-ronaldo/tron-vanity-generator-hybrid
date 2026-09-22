@@ -90,7 +90,7 @@ libsecp256k1, uploads 64 bytes, and the GPU scans the consecutive range. This
 whole chunk; after that, the CPU receives only complete matches for independent
 secp256k1/address verification and local JSONL writing. Keeping the full
 256-bit fixed-base multiplication out of OpenCL reduces compiler load, but
-some Windows RDNA4 drivers still stall while compiling the scan. See the
+some Windows RDNA4 startup tests still time out before initialization completes. See the
 compact compiler mode and bounded diagnostic launcher below. OpenCL dispatch
 size adapts toward the requested chunk time; this is not a hard WDDM timeout guarantee:
 
@@ -209,9 +209,11 @@ regular OpenCL path remains available:
 
 The resident path now defaults to `--opencl-compiler compact`: heavy EC
 functions are outlined and the inversion squaring loops are not unrolled.
-The arithmetic and rejection sampling are unchanged. This reduces compiler
-code expansion; **an AMD RX 9070 XT has not yet verified the change**, so it
-is not a confirmed fix for every driver hang. `--opencl-compiler default`
+The arithmetic and rejection sampling are unchanged. This limits compiler
+code expansion; **the v1.6.0 compact/paired test still timed out after 120 seconds
+on the reported RX 9070 XT**. Its old "compiling" message covered context and
+queue creation as well as the build, so that output did not isolate the blocked
+API. This is not a confirmed AMD fix. `--opencl-compiler default`
 retains the inlining-oriented alternative for comparison.
 
 `--opencl-inverse pair` uses one field inversion plus three multiplies for
@@ -222,23 +224,43 @@ default until target-GPU measurements establish the register/throughput tradeoff
 These options affect resident OpenCL only, not legacy OpenCL, Metal or CUDA.
 
 On Windows, extract the release to a new folder (preserve your own `words.txt`)
-and double-click **`test-opencl.cmd`**, or run it from CMD. It runs the compact
-paired self-test and then a five-second profile. The PowerShell launcher prints
-elapsed time and stops only its own child after 120 seconds if compilation or
-execution stalls. It never writes wallets or prints private keys. The limit is
-per child process and applies only to this diagnostic launcher, not normal search.
-To test the single-inversion reference, run `test-opencl.cmd -Inverse single`.
+and double-click **`test-opencl.cmd`**, or run it from CMD. It now runs separate,
+bounded checks: tiny OpenCL kernel, RNG only (no EC/hash code), scan only with
+single and paired inversions (no GPU RNG code), then the combined program if
+its components passed. If both scan variants fail, it stops without launching
+a profile or suggesting a real search. If a scan variant passes, it runs a five-second profile using the
+validated configuration. A failed GPU RNG/combined check can select the explicit
+OS-seeded scan-only workaround; this is not a silent CPU search fallback.
 
-Manual CMD commands (one command per line):
+The launcher prints elapsed time and stops only its own child after **30 seconds
+per check**. Override with `test-opencl.cmd -TimeoutSeconds 120` if necessary;
+a timeout alone cannot distinguish a slow build from a hang. It never writes
+wallets or prints private keys, and does not clear caches or change drivers.
+Send **`summary.txt`** from the newly created `opencl-diagnostic-*` folder.
+The report includes device/driver versions, flags, separate API begin/return
+markers and stage results. Normal search has no launcher timeout.
+Use `test-opencl.cmd -Inverse single` to prefer single inversion if it passes.
+
+`--opencl-host-seed` uses the OS CSPRNG (BCryptGenRandom on Windows) for each
+base scalar, with secp256k1 rejection validation, and excludes the GPU RNG
+kernel from compilation. Address generation and matching remain on the GPU.
+Use only if the scan-only self-test passes; it cannot bypass a blocked scan
+compiler. This option requires `--backend opencl` and implies `--gpu-resident`.
+
+Manual CMD commands (one command per line; unlike the launcher, not time-bounded):
 
 ```bat
-tron_vanity_generator.exe --backend opencl --gpu-resident --opencl-inverse pair --gputest
+tron_vanity_generator.exe --backend opencl --opencl-diagnose smoke
+tron_vanity_generator.exe --backend opencl --opencl-diagnose rng
+tron_vanity_generator.exe --backend opencl --opencl-diagnose scan --opencl-inverse pair
+tron_vanity_generator.exe --backend opencl --opencl-diagnose full --opencl-inverse pair
 tron_vanity_generator.exe --backend opencl --opencl-profile --opencl-inverse single --words words.txt --bench-seconds 5
 tron_vanity_generator.exe --backend opencl --opencl-profile --opencl-inverse pair --words words.txt --bench-seconds 5
 ```
 
-The GPU self-test independently verifies 1,024 address/key pairs against
-libsecp256k1. Only after it passes, run a short real search:
+Each scan/full self-test independently verifies 1,024 address/key pairs against
+libsecp256k1. The launcher prints an optional search command for the validated
+configuration but never executes it. For a passing combined/paired test:
 
 ```bat
 tron_vanity_generator.exe --backend opencl --gpu-resident --opencl-inverse pair --words words.txt --seconds 60
@@ -268,6 +290,8 @@ without substituting Metal. On Linux, install your vendor's OpenCL ICD/runtime;
 normal device selection never treats a CPU-only OpenCL ICD as a GPU.
 
 References: [Khronos event profiling](https://registry.khronos.org/OpenCL/specs/unified/refpages/man/html/clGetEventProfilingInfo.html),
+[program builds](https://registry.khronos.org/OpenCL/specs/unified/refpages/man/html/clBuildProgram.html),
+[explicit context platform selection](https://registry.khronos.org/OpenCL/specs/unified/refpages/man/html/clCreateContext.html),
 [kernel resource queries](https://registry.khronos.org/OpenCL/specs/unified/refpages/man/html/clGetKernelWorkGroupInfo.html),
 and [AMD occupancy/register tradeoffs](https://gpuopen.com/learn/occupancy-explained/).
 

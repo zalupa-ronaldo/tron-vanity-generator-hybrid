@@ -68,6 +68,7 @@ static inline uint metal_atomic_add(volatile __global uint *p, uint v) {
 #define resident_atomic_add atomic_add
 #endif
 
+#ifndef RESIDENT_SCAN_ONLY
 static inline uint resident_load32(const __global uchar *p) {
     return ((uint)p[0]) | ((uint)p[1] << 8) | ((uint)p[2] << 16) | ((uint)p[3] << 24);
 }
@@ -209,6 +210,8 @@ static inline void resident_rng32(__global const uchar *seed, ulong counter,
 #endif
 }
 
+#endif /* !RESIDENT_SCAN_ONLY: RNG helpers */
+
 static inline int resident_lt_order(const uchar *sk) {
     /* secp256k1 order, big endian. */
     const uchar n[32] = {
@@ -225,6 +228,7 @@ static inline int resident_lt_order(const uchar *sk) {
     return nonzero && cmp < 0;
 }
 
+#ifndef RESIDENT_SEED_ONLY
 static inline void resident_u32(__global uchar *p, uint v) {
     p[0] = (uchar)v; p[1] = (uchar)(v >> 8); p[2] = (uchar)(v >> 16); p[3] = (uchar)(v >> 24);
 }
@@ -324,6 +328,9 @@ static inline void resident_emit(const uchar *sk, const uchar *pub,
     resident_u64(&dst[140], seq);
 }
 
+#endif /* !RESIDENT_SEED_ONLY: address/match helpers */
+
+#ifndef RESIDENT_SCAN_ONLY
 /* AMD's Windows OpenCL compiler can spend indefinitely optimizing a full
  * 256-bit fixed-base multiplication, even when it lives in a separate tiny
  * kernel.  Keep that operation off the OpenCL compiler entirely: this kernel
@@ -356,6 +363,9 @@ void tron_vanity_resident_seed(
     for (int i = 0; i < 32; ++i) base_sk_out[i] = sk[i];
 }
 
+#endif /* !RESIDENT_SCAN_ONLY: RNG kernel */
+
+#ifndef RESIDENT_SEED_ONLY
 static inline void resident_add_offset(gej *acc,
                                        __global const uchar *base_pub,
                                        __global const uchar *table_b32,
@@ -438,8 +448,10 @@ __kernel void tron_vanity_resident_probe(
 #endif
     }
 }
-#endif
+#endif /* !RESIDENT_SEED_ONLY: scan kernel */
+#endif /* RESIDENT */
 
+#ifndef RESIDENT_SEED_ONLY
 /* TRON 靓号 OpenCL 批处理内核
  * secp256k1 域/群运算移植自 bitcoin-core/libsecp256k1 (field_10x26 / group_impl，MIT)。
  * keccak-256 / sha-256 与 CPU 侧 src/ 实现同参数。
@@ -1370,3 +1382,5 @@ void test_mont(__global const uchar *P0_b32,
 #endif
 
 #endif /* !RESIDENT */
+
+#endif /* !RESIDENT_SEED_ONLY: EC/hash implementations */

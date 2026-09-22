@@ -1,30 +1,88 @@
-# Runs only self-tests/profiles. Never generates a wallet file or prints keys.
+# Diagnostics only: no wallet files or private keys, no driver/cache changes.
 param(
     [ValidateSet("single", "pair")][string]$Inverse = "pair",
     [ValidateSet("compact", "default")][string]$Compiler = "compact",
-    [ValidateRange(30, 600)][int]$TimeoutSeconds = 120
+    [ValidateRange(30, 600)][int]$TimeoutSeconds = 30
 )
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
 if (-not (Test-Path $exe)) { throw "Extract the release ZIP before running this script." }
 
-function Invoke-BoundedTest([string[]]$TestArguments) {
-    Write-Host ("Running: " + ($TestArguments -join " "))
-    $process = Start-Process -FilePath $exe -ArgumentList $TestArguments -WorkingDirectory $PSScriptRoot -NoNewWindow -PassThru
-    $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    while (-not $process.WaitForExit(5000)) {
-        Write-Host ("Still running: {0:N0} s (limit {1} s)" -f $timer.Elapsed.TotalSeconds, $TimeoutSeconds)
-        if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
-            # Stop only the child created above, never another worker or driver.
-            $process.Kill()
-            $process.WaitForExit()
-            throw "OpenCL test timed out. The test process was stopped; no wallet files were created."
-        }
-    }
-    if ($process.ExitCode -ne 0) { throw "OpenCL test failed with exit code $($process.ExitCode)." }
+$logDir = Join-Path $PSScriptRoot ("opencl-diagnostic-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + [guid]::NewGuid().ToString("N").Substring(0, 6))
+New-Item -ItemType Directory -Path $logDir | Out-Null
+$summary = Join-Path $logDir "summary.txt"
+$results = [System.Collections.Generic.List[object]]::new()
+Write-Host "Diagnostics: $logDir"
+
+function Write-Report([string]$Text) {
+    Write-Host $Text
+    Add-Content -LiteralPath $summary -Value $Text -Encoding UTF8
 }
 
-$common = @("--backend", "opencl", "--opencl-compiler", $Compiler, "--opencl-inverse", $Inverse)
-Invoke-BoundedTest ($common + @("--gpu-resident", "--gputest"))
-Invoke-BoundedTest ($common + @("--opencl-profile", "--words", "words.txt", "--gpu-buffer-mb", "8", "--bench-seconds", "5"))
-Write-Host "OpenCL self-test and profile completed. Copy the timing output, not any wallet files."
+function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments) {
+    Write-Report ("`n[" + $Name + "] " + ($TestArguments -join " "))
+    $stdoutPath = Join-Path $logDir "$Name.stdout.txt"
+    $stderrPath = Join-Path $logDir "$Name.stderr.txt"
+    $process = Start-Process -FilePath $exe -ArgumentList $TestArguments -WorkingDirectory $PSScriptRoot -NoNewWindow -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $timedOut = $false
+    while (-not $process.WaitForExit(5000)) {
+        Write-Host ("[{0}] {1:N0} s (limit {2} s)" -f $Name, $timer.Elapsed.TotalSeconds, $TimeoutSeconds)
+        if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            $timedOut = $true
+            # Never kill another worker, an ICD service, or the GPU driver.
+            if (-not $process.HasExited) { $process.Kill() }
+            if (-not $process.WaitForExit(5000)) {
+                throw "The diagnostic child could not be stopped; no more GPU tests will be started. Logs: $logDir"
+            }
+            break
+        }
+    }
+    $status = if ($timedOut) { "TIMEOUT" } elseif ($process.ExitCode -eq 0) { "PASS" } else { "FAIL (exit $($process.ExitCode))" }
+    foreach ($file in @($stdoutPath, $stderrPath)) {
+        if (Test-Path -LiteralPath $file) {
+            $text = Get-Content -LiteralPath $file -Raw -Encoding UTF8
+            if ($text) { Write-Report $text }
+        }
+    }
+    $results.Add([pscustomobject]@{ Test = $Name; Result = $status; Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1) })
+    Write-Report ("[" + $Name + "] " + $status)
+    return $status -eq "PASS"
+}
+
+function Write-Summary {
+    Write-Report ($results | Format-Table -AutoSize | Out-String)
+    Write-Report "Send summary.txt from: $logDir"
+}
+
+$common = @("--backend", "opencl", "--gpu-group-size", "64", "--opencl-compiler", $Compiler)
+$smokeOk = Invoke-BoundedTest "01-smoke" ($common + @("--opencl-diagnose", "smoke"))
+if (-not $smokeOk) {
+    Write-Report "Even the tiny OpenCL kernel failed/timed out. EC/RNG optimization is not isolated as the cause. Stopping."
+    Write-Summary
+    exit 1
+}
+$rngOk = Invoke-BoundedTest "02-rng-only" ($common + @("--opencl-diagnose", "rng"))
+$singleOk = Invoke-BoundedTest "03-scan-single" ($common + @("--opencl-diagnose", "scan", "--opencl-inverse", "single"))
+$pairOk = Invoke-BoundedTest "04-scan-pair" ($common + @("--opencl-diagnose", "scan", "--opencl-inverse", "pair"))
+$selected = if ($Inverse -eq "single" -and $singleOk) { "single" } elseif ($pairOk) { "pair" } elseif ($singleOk) { "single" } else { "" }
+if (-not $selected) {
+    Write-Report "Both scan-only variants failed/timed out. No working resident mode confirmed."
+    Write-Summary
+    exit 1
+}
+$fullOk = $false
+if ($rngOk) {
+    $fullOk = Invoke-BoundedTest "05-combined" ($common + @("--opencl-diagnose", "full", "--opencl-inverse", $selected))
+}
+$selectedArgs = $common + @("--opencl-inverse", $selected)
+if (-not $fullOk) {
+    $selectedArgs += "--opencl-host-seed"
+    Write-Report "Using the validated scan-only path with OS CSPRNG. GPU address search is unchanged; GPU RNG compilation is excluded."
+}
+if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
+    $profileOk = Invoke-BoundedTest "06-profile" ($selectedArgs + @("--opencl-profile", "--words", "words.txt", "--gpu-buffer-mb", "8", "--bench-seconds", "5"))
+    if (-not $profileOk) { Write-Summary; exit 1 }
+} else { Write-Report "words.txt not found: profile skipped, self-tests did not need a dictionary." }
+Write-Report ("Self-test passed. Optional search command (NOT executed):`ntron_vanity_generator.exe " + (($selectedArgs + @("--gpu-resident", "--words", "words.txt", "--seconds", "60")) -join " "))
+Write-Summary

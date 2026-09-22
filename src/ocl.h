@@ -29,6 +29,7 @@ struct DeviceInfo {
 std::vector<DeviceInfo> enumerateGpus();
 // Test harness only: permits a CPU OpenCL implementation on GPU-less CI.
 std::vector<DeviceInfo> enumerateTestDevices();
+std::string deviceDescription(id device);
 
 // 一个设备 + context + queue + program 的薄封装。
 class Program {
@@ -37,7 +38,7 @@ public:
     Program(const Program&) = delete;
     Program& operator=(const Program&) = delete;
     bool build(id platform, id device, const std::string& source,
-               const std::string& opts, std::string* err, bool profiling = false);
+               const std::string& opts, std::string* err, bool profiling = false, bool trace = false);
     ~Program();
 
     id kernel(const char* name, std::string* err);
@@ -60,6 +61,7 @@ private:
     id ctx_ = nullptr, queue_ = nullptr, program_ = nullptr, device_ = nullptr;
     id lastEvent_ = nullptr;
     bool profiling_ = false;
+    bool trace_ = false;
     std::vector<id> kernels_, buffers_;
 };
 

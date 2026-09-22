@@ -64,6 +64,10 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile("$pwd/test-opencl.ps1", [ref]$tokens, [ref]$parseErrors) | Out-Null
           if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 
+      - name: Test diagnostic launcher process isolation and recovery
+        shell: powershell
+        run: .\tests\opencl_launcher_test.ps1
+
       - name: Package release
         shell: pwsh
         run: |

@@ -12,6 +12,7 @@ struct OpenclResidentOptions {
     bool pairInverse = false;
     bool compact = true;
     bool profiling = false;
+    bool hostSeed = false;
 };
 
 struct OpenclProfileResult {
@@ -34,6 +35,8 @@ std::unique_ptr<Backend> makeResidentGpuBackend(
 
 int openclResidentSelfTest(const GpuDevice& device, const std::string& rng,
                          OpenclResidentOptions options = {});
+int diagnoseOpencl(const GpuDevice& device, const std::string& stage,
+                   const std::string& rng, OpenclResidentOptions options = {});
 OpenclProfileResult profileOpenclResident(const GpuDevice& device,
     std::shared_ptr<const Dictionary> dictionary, const std::string& rng,
     uint32_t bufferMiB, uint32_t chunkMs, uint32_t groupSize,

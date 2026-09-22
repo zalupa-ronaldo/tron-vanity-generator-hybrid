@@ -57,6 +57,7 @@ struct Options {
     bool help = false;
     bool benchResidentOnly = false;
     bool openclProfile = false;
+    std::string openclDiagnostic;
     OpenclResidentOptions openclOptions;
     bool metalProfileStages = false;
     int metalProfileStage = -1;
@@ -101,6 +102,8 @@ void usage() {
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-compiler compact|default  resident compiler mode (default compact)\n"
+        "  --opencl-diagnose smoke|rng|scan|full  isolated checks; no wallet output\n"
+        "  --opencl-host-seed  use OS CSPRNG, exclude GPU RNG from resident OpenCL\n"
         "  --metal-profile-stages  profile the active Metal resident pipeline by stage; no wallets written\n"
         "  --metal-profile-stage N  profile only stage 0..5 (0 is full resident)\n"
         "  --metal-profile-indexed-keccak profile the slower indexed reference Keccak\n"
@@ -145,6 +148,8 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
             else if (a == "--bench-resident") o.benchResidentOnly = true;
             else if (a == "--opencl-profile") o.openclProfile = true;
+            else if (a == "--opencl-diagnose") o.openclDiagnostic = next(i, "--opencl-diagnose");
+            else if (a == "--opencl-host-seed") { o.openclOptions.hostSeed = true; o.gpuResident = true; }
             else if (a == "--opencl-inverse") {
                 const auto value = next(i, "--opencl-inverse");
                 if (value != "single" && value != "pair") throw std::runtime_error("--opencl-inverse must be single or pair");
@@ -152,7 +157,8 @@ bool parse(int argc, char** argv, Options& o) {
             }
             else if (a == "--opencl-compiler") {
                 const auto value = next(i, "--opencl-compiler");
-                if (value != "compact" && value != "default") throw std::runtime_error("--opencl-compiler must be compact or default");
+                if (value != "compact" && value != "default")
+                    throw std::runtime_error("--opencl-compiler must be compact or default");
                 o.openclOptions.compact = value == "compact";
             }
             else if (a == "--metal-profile-stages") o.metalProfileStages = true;
@@ -178,6 +184,13 @@ bool parse(int argc, char** argv, Options& o) {
     }
     if (!std::isfinite(o.benchSeconds) || o.benchSeconds <= 0) {
         std::cerr << "--bench-seconds must be finite and positive\n"; return false;
+    }
+    if (o.openclOptions.hostSeed && o.backend != "opencl") {
+        std::cerr << "--opencl-host-seed requires --backend opencl\n"; return false;
+    }
+    if (!o.openclDiagnostic.empty() && o.openclDiagnostic != "smoke" && o.openclDiagnostic != "rng" &&
+        o.openclDiagnostic != "scan" && o.openclDiagnostic != "full") {
+        std::cerr << "--opencl-diagnose must be smoke, rng, scan, or full\n"; return false;
     }
     if (o.gpuGroupSize != 64 && o.gpuGroupSize != 128 && o.gpuGroupSize != 256) {
         std::cerr << "--gpu-group-size must be 64, 128, or 256\n"; return false;
@@ -295,6 +308,15 @@ int main(int argc, char** argv) {
     if (!parse(argc, argv, opt)) return opt.help ? 0 : 1;
     HardwareReport hw = detectHardware();
     if (opt.list) { printDevices(hw); return 0; }
+    if (!opt.openclDiagnostic.empty()) {
+        if (opt.backend != "auto" && opt.backend != "opencl") {
+            std::cerr << "--opencl-diagnose requires --backend opencl\n"; return 1;
+        }
+        if (hw.gpus.empty()) { std::cerr << "OpenCL unavailable: " << hw.openclNote << "\n"; return 1; }
+        for (const auto& device : hw.gpus)
+            if (diagnoseOpencl(device, opt.openclDiagnostic, opt.gpuRng, opt.openclOptions)) return 1;
+        return 0;
+    }
     if (opt.metalHardwareProfile) {
         return runMetalHardwareProfile({opt.benchSeconds, opt.metalHardwareCase, opt.metalHardwareJson});
     }
@@ -324,7 +346,8 @@ int main(int argc, char** argv) {
         }
         if (hw.gpus.empty()) { std::cerr << "OpenCL unavailable: " << hw.openclNote << "\n"; return 1; }
         std::cout << "OpenCL resident profile; no wallets or private keys written\n"
-                  << "Dictionary: " << dictionary->words.size() << " words; RNG " << opt.gpuRng
+                  << "Dictionary: " << dictionary->words.size() << " words; RNG "
+                  << (opt.openclOptions.hostSeed ? "OS CSPRNG" : opt.gpuRng)
                   << "; compiler " << (opt.openclOptions.compact ? "compact" : "default")
                   << "; inverse " << (opt.openclOptions.pairInverse ? "pair" : "single")
                   << "; group " << opt.gpuGroupSize << "\n"
@@ -418,12 +441,14 @@ int main(int argc, char** argv) {
                               << std::right << std::setw(16) << benchRate(r) << "\n";
                 }
                 for (const auto& g : hw.gpus) {
-                    for (const auto& rng : rngs) {
+                    const auto openclRngs = opt.openclOptions.hostSeed ? std::vector<std::string>{opt.gpuRng} : rngs;
+                    for (const auto& rng : openclRngs) {
+                        const std::string rngLabel = opt.openclOptions.hostSeed ? "OS CSPRNG" : rng;
                         auto resident = makeResidentGpuBackend(g, dictionary, rng,
                                                                opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
                                                                opt.gpuGroupSize, opt.openclOptions);
                         if (!resident || !resident->available()) {
-                            std::cout << "resident OpenCL " << rng << " / " << g.name
+                            std::cout << "resident OpenCL " << rngLabel << " / " << g.name
                                       << ": unavailable (" << (resident ? resident->note() : "not built") << ")\n";
                             continue;
                         }
@@ -433,7 +458,7 @@ int main(int argc, char** argv) {
                             return 1;
                         }
                         std::cout << std::left << std::setw(38)
-                                  << ("resident OpenCL " + rng + " / " + g.name)
+                                  << ("resident OpenCL " + rngLabel + " / " + g.name)
                                   << std::right << std::setw(16) << benchRate(r) << "\n";
                     }
                 }

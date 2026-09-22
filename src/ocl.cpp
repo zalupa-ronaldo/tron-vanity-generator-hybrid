@@ -2,6 +2,8 @@
 
 #include <cstring>
 #include <algorithm>
+#include <chrono>
+#include <iostream>
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -151,22 +153,47 @@ static std::vector<DeviceInfo> enumerateDevices(unsigned long long type) {
 std::vector<DeviceInfo> enumerateGpus() { return enumerateDevices(DEVICE_TYPE_GPU); }
 std::vector<DeviceInfo> enumerateTestDevices() { return enumerateDevices(0xffffffffULL); }
 
+std::string deviceDescription(id device) {
+    if (!g_loaded) return "OpenCL not loaded";
+    return infoStr(device, DEVICE_NAME, true) + " / " + infoStr(device, DEVICE_VENDOR, true) +
+        "; driver " + infoStr(device, 0x102D, true) + "; " + infoStr(device, 0x102F, true) +
+        "; " + infoStr(device, 0x103D, true);
+}
+
 bool Program::build(id platform, id device, const std::string& source,
-                    const std::string& opts, std::string* err, bool profiling) {
-    (void)platform;
+                    const std::string& opts, std::string* err, bool profiling, bool trace) {
     if (ctx_ || !load(err)) return false;
     profiling_ = profiling;
+    trace_ = trace;
+    const auto started = std::chrono::steady_clock::now();
+    auto mark = [&](const char* message) {
+        if (trace_) std::cerr << "\n  OpenCL API +"
+            << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count()
+            << " ms: " << message << std::endl;
+    };
+    if (trace_) std::cerr << "\n  " << deviceDescription(device) << "\n  Build options: " << opts << std::endl;
     cl_int e = 0;
     device_ = device;
-    ctx_ = pCreateContext(nullptr, 1, &device, nullptr, nullptr, &e);
+    // Bind the exact enumerated ICD platform rather than leaving selection
+    // implementation-defined on systems with several vendor runtimes.
+    const intptr_t properties[] = {0x1084, reinterpret_cast<intptr_t>(platform), 0};
+    mark("clCreateContext BEGIN");
+    ctx_ = pCreateContext(platform ? properties : nullptr, 1, &device, nullptr, nullptr, &e);
+    mark("clCreateContext returned");
     if (!ctx_ || e != 0) { if (err) *err = "clCreateContext 失败 " + std::to_string(e); return false; }
+    mark("clCreateCommandQueue BEGIN");
     queue_ = pCreateCommandQueue(ctx_, device, profiling ? 2ULL : 0ULL, &e);
+    mark("clCreateCommandQueue returned");
     if (!queue_ || e != 0) { if (err) *err = "clCreateCommandQueue 失败 " + std::to_string(e); return false; }
     const char* src = source.c_str();
     size_t len = source.size();
+    mark("clCreateProgramWithSource BEGIN");
     program_ = pCreateProgramWithSource(ctx_, 1, &src, &len, &e);
+    mark("clCreateProgramWithSource returned");
     if (!program_ || e != 0) { if (err) *err = "clCreateProgramWithSource 失败 " + std::to_string(e); return false; }
+    mark("clBuildProgram BEGIN");
     e = pBuildProgram(program_, 1, &device, opts.c_str(), nullptr, nullptr);
+    mark("clBuildProgram returned");
     if (e != 0) {
         std::vector<char> log(65536);
         size_t n = 0;
@@ -190,7 +217,9 @@ Program::~Program() {
 
 id Program::kernel(const char* name, std::string* err) {
     cl_int e = 0;
+    if (trace_) std::cerr << "  OpenCL API: clCreateKernel(" << name << ") BEGIN" << std::endl;
     id k = pCreateKernel(program_, name, &e);
+    if (trace_) std::cerr << "  OpenCL API: clCreateKernel returned " << e << std::endl;
     if (!k || e != 0) { if (err) *err = std::string("clCreateKernel(") + name + ") 失败 " + std::to_string(e); return nullptr; }
     kernels_.push_back(k);
     return k;

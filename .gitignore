@@ -12,6 +12,7 @@ results/
 *.jsonl
 *.log
 *.pid
+opencl-diagnostic-*/
 interesting-addresses-*.tsv
 
 # Generated private keys / match results — NEVER commit these

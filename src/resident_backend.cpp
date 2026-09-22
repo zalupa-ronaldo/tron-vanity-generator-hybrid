@@ -32,6 +32,24 @@ constexpr uint32_t kResidentEcw = 8;
 constexpr uint32_t kResidentKpi = 2;
 constexpr uint32_t kResidentLocalSize = 256;
 
+std::string openclResidentBuildOptions(const std::string& rng, const OpenclResidentOptions& options) {
+    const int mode = rng == "philox" ? 2 : (rng == "aes-ctr" ? 3 : 1);
+    return "-cl-std=CL1.2 -D RESIDENT=1 -D ECW=8 -D ECBITS=32 -D KPI=2 -D MONT_N=1 -D RESIDENT_RNG=" +
+        std::to_string(mode) + " -D RESIDENT_PAIR_INVERSE=" + (options.pairInverse ? "1" : "0") +
+        " -D OPENCL_COMPACT=" + (options.compact ? "1" : "0") +
+        (options.hostSeed ? " -D RESIDENT_SCAN_ONLY=1" : "");
+}
+
+struct PrivateScalar {
+    std::array<unsigned char, 32> bytes{};
+    unsigned char* data() { return bytes.data(); }
+    size_t size() const { return bytes.size(); }
+    ~PrivateScalar() {
+        volatile unsigned char* p = bytes.data();
+        for (size_t i = 0; i < bytes.size(); ++i) p[i] = 0;
+    }
+};
+
 std::vector<unsigned char> genResidentTable(secp256k1_context* c) {
     const uint32_t digits = 1u << kResidentEcw;
     const uint32_t windows = (kResidentEcbits + kResidentEcw - 1) / kResidentEcw;
@@ -102,7 +120,8 @@ public:
         out.kind = isCuda ? "CUDA-resident" : "GPU-resident";
         out.title = device_.name;
         out.lines.push_back((isCuda ? "CUDA " : "OpenCL ") + device_.platform);
-        out.lines.push_back("GPU CSPRNG + CPU base expansion + GPU scan, " + rng_ +
+        out.lines.push_back((openclOptions_.hostSeed ? "OS CSPRNG + CPU base expansion + GPU scan" :
+                            "GPU CSPRNG + CPU base expansion + GPU scan, " + rng_) +
                             ", chunk " +
                             std::to_string(chunkMs_) + " ms");
         out.lines.push_back(std::to_string(bufferMiB_) + " MiB device result ring");
@@ -182,7 +201,9 @@ public:
             if (!runChunk(&produced, &overflow, [&](const FoundKey& key) {
                     addresses.insert(key.address);
                 }) || overflow || produced != workItems_ * kResidentKpi) {
-                if (error_.empty()) error_ = "resident self-test record count/overflow mismatch";
+                if (error_.empty()) error_ = "resident self-test record count/overflow mismatch: expected " +
+                    std::to_string(workItems_ * kResidentKpi) + ", got " + std::to_string(produced) +
+                    ", overflow " + std::to_string(overflow);
                 return false;
             }
         }
@@ -246,27 +267,23 @@ private:
             std::cerr << " failed (" << elapsedText(started) << "): " << error_ << "\n";
         };
         const int rngMode = rng_ == "philox" ? 2 : (rng_ == "aes-ctr" ? 3 : 1);
-        std::string opts = "-cl-std=CL1.2 -D RESIDENT=1 -D RESIDENT_RNG=" + std::to_string(rngMode) +
-                           " -D ECW=" + std::to_string(kResidentEcw) +
-                           " -D ECBITS=" + std::to_string(kResidentEcbits) +
-                           " -D KPI=" + std::to_string(kResidentKpi) + " -D MONT_N=1";
-        opts += std::string(" -D RESIDENT_PAIR_INVERSE=") + (openclOptions_.pairInverse ? "1" : "0") +
-                " -D OPENCL_COMPACT=" + (openclOptions_.compact ? "1" : "0");
+        const std::string opts = openclResidentBuildOptions(rng_, openclOptions_);
         auto stageStarted = beginStage(isCuda ? "loading native CUDA PTX (first run may populate the driver cache)" :
-            "compiling lightweight OpenCL RNG and scan kernels (first run may populate the driver cache)");
+            openclOptions_.hostSeed ? "creating OpenCL context and building scan-only program" :
+            "creating OpenCL context and building RNG + scan program");
         bool built;
         if constexpr (isCuda) built = program_.build(device_.cudaOrdinal, rngMode, &error_);
         else built = program_.build(device_.platformId, device_.deviceId, kGpuKernelSource, opts, &error_,
-                                    openclOptions_.profiling);
+                                    openclOptions_.profiling, true);
         if (!built) {
             failStage(stageStarted);
             return false;
         }
         finishStage(stageStarted);
         stageStarted = beginStage("creating kernels (driver may finalize machine code)");
-        seedKernel_ = program_.kernel("tron_vanity_resident_seed", &error_);
+        if (!openclOptions_.hostSeed) seedKernel_ = program_.kernel("tron_vanity_resident_seed", &error_);
         probeKernel_ = program_.kernel("tron_vanity_resident_probe", &error_);
-        if (!seedKernel_ || !probeKernel_) { failStage(stageStarted); return false; }
+        if ((!openclOptions_.hostSeed && !seedKernel_) || !probeKernel_) { failStage(stageStarted); return false; }
         finishStage(stageStarted);
         if constexpr (!isCuda) {
             size_t maxGroup = 0, preferred = 0;
@@ -281,7 +298,7 @@ private:
                 }
             }
         }
-        if (!randBytes(seedBytes_.data(), seedBytes_.size())) {
+        if (!openclOptions_.hostSeed && !randBytes(seedBytes_.data(), seedBytes_.size())) {
             error_ = "OS CSPRNG seed generation failed";
             return false;
         }
@@ -294,7 +311,8 @@ private:
         activeWords_.assign((dictionary_->words.size() + 31) / 32, 0xffffffffU);
         activeOutLen_ = dictionary_->outLen;
         activeOutIds_ = dictionary_->outIds;
-        seed_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, seedBytes_.size(), seedBytes_.data(), &error_);
+        if (!openclOptions_.hostSeed)
+            seed_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, seedBytes_.size(), seedBytes_.data(), &error_);
         table_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, table.size(), table.data(), &error_);
         baseSk_ = program_.buffer(ocl::MEM_READ_WRITE, 32, nullptr, &error_);
         basePub_ = program_.buffer(ocl::MEM_READ_WRITE, 64, nullptr, &error_);
@@ -310,7 +328,7 @@ private:
         outIds_ = program_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
                                   activeOutIds_.size() * sizeof(uint32_t),
                                   activeOutIds_.data(), &error_);
-        if (!seed_ || !table_ || !baseSk_ || !basePub_ ||
+        if ((!openclOptions_.hostSeed && !seed_) || !table_ || !baseSk_ || !basePub_ ||
             !dfa_ || !outStart_ || !outLen_ || !outIds_) {
             failStage(stageStarted);
             return false;
@@ -334,7 +352,8 @@ private:
         }
         finishStage(stageStarted);
 
-        stageStarted = beginStage("validating GPU CSPRNG and CPU base expansion");
+        stageStarted = beginStage(openclOptions_.hostSeed ? "validating OS CSPRNG and CPU base expansion" :
+                                  "validating GPU CSPRNG and CPU base expansion");
         if (!prepareBasePair()) {
             failStage(stageStarted);
             return false;
@@ -368,19 +387,27 @@ private:
     }
 
     bool prepareBasePair() {
-        if (!bindSeedKernel()) {
-            error_ = "setting resident seed-kernel arguments failed";
-            return false;
-        }
-        if (!program_.run1D(seedKernel_, 1, 1, &error_) || !program_.finish()) {
-            if (error_.empty()) error_ = "resident seed-kernel execution failed";
-            return false;
-        }
-
-        std::array<unsigned char, 32> sk{};
-        if (!program_.read(baseSk_, sk.size(), sk.data())) {
-            error_ = "reading resident GPU-generated scalar failed";
-            return false;
+        PrivateScalar sk;
+        if (openclOptions_.hostSeed) {
+            bool valid = false;
+            for (unsigned attempt = 0; attempt < 4 && !valid; ++attempt) {
+                if (!randBytes(sk.data(), sk.size())) { error_ = "OS CSPRNG failed"; return false; }
+                valid = secp256k1_ec_seckey_verify(context_, sk.data()) != 0;
+            }
+            if (!valid) { error_ = "OS CSPRNG rejection sampling failed"; return false; }
+            if (!program_.write(baseSk_, sk.size(), sk.data())) {
+                error_ = "uploading OS-generated scalar failed"; return false;
+            }
+        } else {
+            if (!bindSeedKernel()) { error_ = "setting resident seed-kernel arguments failed"; return false; }
+            if (!program_.run1D(seedKernel_, 1, 1, &error_) || !program_.finish()) {
+                if (error_.empty()) error_ = "resident seed-kernel execution failed";
+                return false;
+            }
+            if (!program_.read(baseSk_, sk.size(), sk.data())) {
+                error_ = "reading resident GPU-generated scalar failed";
+                return false;
+            }
         }
         secp256k1_pubkey pubkey;
         unsigned char encoded[65] = {0};
@@ -390,10 +417,8 @@ private:
                            secp256k1_ec_pubkey_serialize(context_, encoded, &encodedLen, &pubkey,
                                                         SECP256K1_EC_UNCOMPRESSED) &&
                            encodedLen == sizeof(encoded);
-        volatile unsigned char* secret = sk.data();
-        for (size_t i = 0; i < sk.size(); ++i) secret[i] = 0;
         if (!valid) {
-            error_ = "GPU CSPRNG returned an invalid secp256k1 scalar";
+            error_ = "CSPRNG returned an invalid secp256k1 scalar";
             return false;
         }
         if (!program_.write(basePub_, 64, encoded + 1)) {
@@ -570,7 +595,77 @@ int openclResidentSelfTest(const GpuDevice& device, const std::string& rng, Open
         std::cerr << "OpenCL resident self-test failed: " << backend.note() << "\n";
         return 1;
     }
-    std::cout << "OpenCL " << rng << ": 1024 address/key pairs verified; no wallet output\n";
+    std::cout << "OpenCL " << (options.hostSeed ? "OS CSPRNG" : rng)
+              << ": 1024 address/key pairs verified; no wallet output\n";
+    return 0;
+}
+
+int diagnoseOpencl(const GpuDevice& device, const std::string& stage,
+                   const std::string& rng, OpenclResidentOptions options) {
+    if (rng != "chacha12" && rng != "aes-ctr" && rng != "philox") {
+        std::cerr << "resident RNG must be chacha12, aes-ctr, or philox\n"; return 1;
+    }
+    std::string error;
+    if (!ocl::load(&error)) { std::cerr << error << std::endl; return 1; }
+    std::cout << "OpenCL diagnostic " << stage << ": " << ocl::deviceDescription(device.deviceId)
+              << "\nNo wallets or private keys are printed or saved." << std::endl;
+    if (stage == "scan" || stage == "full") {
+        options.hostSeed = stage == "scan";
+        std::cout << (options.hostSeed ? "SCAN ONLY: OS CSPRNG, no RNG kernel in the program\n" :
+                                       "COMBINED: GPU RNG and scan in one program\n") << std::flush;
+        return openclResidentSelfTest(device, rng, options);
+    }
+    if (stage != "smoke" && stage != "rng") { std::cerr << "unknown OpenCL diagnostic stage\n"; return 1; }
+    ocl::Program program;
+    const std::string smoke = "__kernel void diagnostic_smoke(__global uint* out) { out[get_global_id(0)] = 0x13579bdfU ^ (uint)get_global_id(0); }";
+    options.hostSeed = false;
+    const std::string flags = stage == "smoke" ? "-cl-std=CL1.2" :
+        openclResidentBuildOptions(rng, options) + " -D RESIDENT_SEED_ONLY=1";
+    if (!program.build(device.platformId, device.deviceId,
+                       stage == "smoke" ? smoke : kGpuKernelSource, flags, &error, false, true)) {
+        std::cerr << error << std::endl; return 1;
+    }
+    auto kernel = program.kernel(stage == "smoke" ? "diagnostic_smoke" : "tron_vanity_resident_seed", &error);
+    if (!kernel) { std::cerr << error << std::endl; return 1; }
+    auto output = program.buffer(ocl::MEM_READ_WRITE, 32, nullptr, &error);
+    if (!output) { std::cerr << error << std::endl; return 1; }
+    if (stage == "smoke") {
+        std::array<uint32_t, 8> values{};
+        std::cout << "OpenCL smoke dispatch BEGIN" << std::endl;
+        if (!program.setArg(kernel, 0, sizeof(output), &output) ||
+            !program.run1D(kernel, values.size(), 1, &error) || !program.finish() ||
+            !program.read(output, sizeof(values), values.data())) {
+            std::cerr << "OpenCL smoke execution failed: " << error << std::endl; return 1;
+        }
+        for (uint32_t i = 0; i < values.size(); ++i)
+            if (values[i] != (0x13579bdfU ^ i)) { std::cerr << "OpenCL smoke mismatch\n"; return 1; }
+    } else {
+        // Public deterministic fixture, never used for a real search.
+        std::array<unsigned char, 32> seed{};
+        for (size_t i = 0; i < seed.size(); ++i) seed[i] = static_cast<unsigned char>(i);
+        auto input = program.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, seed.size(), seed.data(), &error);
+        if (!input || !program.setArg(kernel, 0, sizeof(input), &input) ||
+            !program.setArg(kernel, 1, sizeof(output), &output)) {
+            std::cerr << "RNG diagnostic argument failure: " << error << std::endl; return 1;
+        }
+        std::array<std::array<unsigned char, 32>, 3> samples{};
+        for (unsigned i = 0; i < samples.size(); ++i) {
+            const uint64_t counter = i == 2 ? 43 : 42;
+            std::cout << "OpenCL isolated RNG dispatch " << i + 1 << " BEGIN" << std::endl;
+            if (!program.setArg(kernel, 2, sizeof(counter), &counter) ||
+                !program.run1D(kernel, 1, 1, &error) || !program.finish() ||
+                !program.read(output, samples[i].size(), samples[i].data())) {
+                std::cerr << "RNG diagnostic execution failed: " << error << std::endl; return 1;
+            }
+            if (!secp256k1_ec_seckey_verify(secp256k1_context_static, samples[i].data())) {
+                std::cerr << "RNG diagnostic scalar validation failed\n"; return 1;
+            }
+        }
+        if (samples[0] != samples[1] || samples[0] == samples[2]) {
+            std::cerr << "RNG diagnostic counter/reproducibility mismatch\n"; return 1;
+        }
+    }
+    std::cout << "OpenCL diagnostic " << stage << " PASS" << std::endl;
     return 0;
 }
 

@@ -139,6 +139,7 @@ if(TRON_ENABLE_VULKAN)
   set(VULKAN_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_probe.spv)
   set(VULKAN_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_probe_spv.h)
   add_custom_command(OUTPUT ${VULKAN_SPV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
     COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
             ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/probe.comp -o ${VULKAN_SPV}
     DEPENDS vulkan/probe.comp VERBATIM)

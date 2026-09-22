@@ -147,12 +147,17 @@ public:
             std::vector<uint32_t> hits;
             unsigned char k0[32];
             if (!runBatch(&hits, k0)) {
-                std::cerr << "GPU batch execution failed\n";
+                std::cerr << "GPU batch execution failed: " << err_ << "\n";
+                state.stop.store(true);
                 return;
             }
+            bool outputsChanged = false;
             for (size_t hi = 0; hi + 1 < hits.size(); hi += 2) {
                 uint32_t s = hits[hi];
                 uint32_t wordId = hits[hi + 1];
+                if (wordId >= dictionary_->words.size()) continue;
+                const uint32_t hitMask = 1U << (wordId & 31);
+                if (!(activeWords_[wordId >> 5] & hitMask)) continue;
                 unsigned char k[32];
                 std::memcpy(k, k0, 32);
                 unsigned char tw[32];
@@ -161,12 +166,28 @@ public:
                 unsigned char pub[64];
                 if (!pubXY(ctx_, k, pub)) continue;
                 std::string addr = tronAddressFromPubXY(pub);
-                auto words = dictionary_->matchWords(addr);
-                if (wordId >= dictionary_->words.size() || words.empty()) continue;
+                auto ids = dictionary_->matchIds(addr);
+                if (std::find(ids.begin(), ids.end(), wordId) == ids.end()) continue;
+                std::vector<std::string> words;
+                for (uint32_t id : ids) {
+                    if (id >= dictionary_->words.size()) continue;
+                    const uint32_t mask = 1U << (id & 31);
+                    if (activeWords_[id >> 5] & mask) {
+                        activeWords_[id >> 5] &= ~mask;
+                        outputsChanged = true;
+                        words.push_back(dictionary_->words[id]);
+                    }
+                }
+                if (words.empty()) continue;
                 MatchResult m{};
                 FoundKey fk{addr, bytesToHexUpper(k, 32), std::move(m), std::move(words)};
                 state.found.fetch_add(1, std::memory_order_relaxed);
                 report(fk);
+            }
+            if (outputsChanged && !refreshActiveOutputs()) {
+                std::cerr << "GPU dictionary update failed: " << err_ << "\n";
+                state.stop.store(true);
+                return;
             }
             state.checked.fetch_add(g_batch, std::memory_order_relaxed);
             state.gpuChecked.fetch_add(g_batch, std::memory_order_relaxed);
@@ -188,6 +209,9 @@ private:
     ocl::id bufTable_ = nullptr, bufP0_ = nullptr, bufCount_ = nullptr, bufOutHits_ = nullptr;
     ocl::id bufDfa_ = nullptr, bufOutStart_ = nullptr, bufOutLen_ = nullptr, bufOutIds_ = nullptr;
     std::vector<unsigned char> table_;
+    std::vector<uint32_t> activeWords_;
+    std::vector<uint32_t> activeOutLen_;
+    std::vector<uint32_t> activeOutIds_;
     uint32_t builtKpi_ = 1;
     uint32_t builtEcw_ = 1;
     uint32_t builtMont_ = 1;
@@ -211,6 +235,9 @@ private:
         if (!kProbe_) return false;
 
         table_ = genTable(ctx_, builtEcw_);
+        activeWords_.assign((dictionary_->words.size() + 31) / 32, 0xffffffffU);
+        activeOutLen_ = dictionary_->outLen;
+        activeOutIds_ = dictionary_->outIds;
         bufTable_ = prog_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR, table_.size(), table_.data(), &err_);
         bufP0_ = prog_.buffer(ocl::MEM_READ_ONLY, 64, nullptr, &err_);
         bufDfa_ = prog_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
@@ -220,16 +247,38 @@ private:
                                     dictionary_->outStart.size() * sizeof(uint32_t),
                                     const_cast<uint32_t*>(dictionary_->outStart.data()), &err_);
         bufOutLen_ = prog_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
-                                  dictionary_->outLen.size() * sizeof(uint32_t),
-                                  const_cast<uint32_t*>(dictionary_->outLen.data()), &err_);
+                                  activeOutLen_.size() * sizeof(uint32_t),
+                                  activeOutLen_.data(), &err_);
         bufOutIds_ = prog_.buffer(ocl::MEM_READ_ONLY | ocl::MEM_COPY_HOST_PTR,
-                                  dictionary_->outIds.size() * sizeof(uint32_t),
-                                  const_cast<uint32_t*>(dictionary_->outIds.data()), &err_);
+                                  activeOutIds_.size() * sizeof(uint32_t),
+                                  activeOutIds_.data(), &err_);
         bufCount_ = prog_.buffer(ocl::MEM_READ_WRITE, 4, nullptr, &err_);
         bufOutHits_ = prog_.buffer(ocl::MEM_WRITE_ONLY, kOutCap * 2 * 4, nullptr, &err_);
         if (!bufTable_ || !bufP0_ || !bufCount_ || !bufOutHits_ || !bufDfa_ || !bufOutStart_ || !bufOutLen_ || !bufOutIds_) return false;
 
         ready_ = true;
+        return true;
+    }
+
+    bool refreshActiveOutputs() {
+        for (size_t state = 0; state < dictionary_->outLen.size(); ++state) {
+            const uint32_t start = dictionary_->outStart[state];
+            const uint32_t originalLength = dictionary_->outLen[state];
+            uint32_t activeLength = 0;
+            for (uint32_t j = 0; j < originalLength; ++j) {
+                const uint32_t id = dictionary_->outIds[start + j];
+                if (id >= dictionary_->words.size()) continue;
+                const uint32_t mask = 1U << (id & 31);
+                if (activeWords_[id >> 5] & mask)
+                    activeOutIds_[start + activeLength++] = id;
+            }
+            activeOutLen_[state] = activeLength;
+        }
+        if (!prog_.write(bufOutLen_, activeOutLen_.size() * sizeof(uint32_t), activeOutLen_.data()) ||
+            !prog_.write(bufOutIds_, activeOutIds_.size() * sizeof(uint32_t), activeOutIds_.data())) {
+            err_ = "updating active OpenCL dictionary outputs failed";
+            return false;
+        }
         return true;
     }
 

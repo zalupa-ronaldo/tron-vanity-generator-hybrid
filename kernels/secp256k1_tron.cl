@@ -204,52 +204,6 @@ static inline int resident_lt_order(const uchar *sk) {
     return nonzero && cmp < 0;
 }
 
-static inline uint resident_scalar_bit(const uchar *sk, int bit) {
-    return (sk[31 - bit / 8] >> (bit & 7)) & 1U;
-}
-
-static inline void resident_ec_mul(gej *acc, const uchar *sk,
-                                   __global const uchar *table_b32) {
-    acc->x.n[0] = 0; acc->x.n[1] = 0; acc->x.n[2] = 0; acc->x.n[3] = 0;
-    acc->x.n[4] = 0; acc->x.n[5] = 0; acc->x.n[6] = 0; acc->x.n[7] = 0;
-    acc->x.n[8] = 0; acc->x.n[9] = 0;
-    acc->y = acc->x; fe_set_int(&acc->z, 1); acc->inf = 1;
-    #if ECW == 1
-    #pragma unroll 1
-    for (int bit = 0; bit < 256; ++bit) {
-        if (resident_scalar_bit(sk, bit)) {
-            ge g; ge_load_g(&g, &table_b32[bit * 64]);
-            gej_add_ge(acc, acc, &g);
-        }
-    }
-    #elif ECW == 8
-    /* OpenCL resident production specialization. Reading one big-endian byte
-     * per window avoids a nested bit loop and the AMD optimizer's tendency to
-     * explode the 32-window fixed-base function during JIT compilation. */
-    #pragma unroll 1
-    for (int w = 0; w < 32; ++w) {
-        uint d = sk[31 - w];
-        if (d) {
-            ge g;
-            ge_load_g(&g, &table_b32[(w * 256 + d) * 64]);
-            gej_add_ge(acc, acc, &g);
-        }
-    }
-    #else
-    #pragma unroll 1
-    for (int w = 0; w < ECW_WINDOWS; ++w) {
-        uint d = 0;
-        for (int b = 0; b < ECW; ++b)
-            d |= resident_scalar_bit(sk, w * ECW + b) << b;
-        if (d) {
-            ge g;
-            ge_load_g(&g, &table_b32[(w * ECW_DIGITS + d) * 64]);
-            gej_add_ge(acc, acc, &g);
-        }
-    }
-    #endif
-}
-
 static inline void resident_u32(__global uchar *p, uint v) {
     p[0] = (uchar)v; p[1] = (uchar)(v >> 8); p[2] = (uchar)(v >> 16); p[3] = (uchar)(v >> 24);
 }
@@ -349,21 +303,19 @@ static inline void resident_emit(const uchar *sk, const uchar *pub,
     resident_u64(&dst[140], seq);
 }
 
-/* AMD's Windows OpenCL compiler can spend indefinitely optimizing the old
- * monolithic RNG + 256-bit scalar multiply + address-matching kernel.  Keep
- * those two call graphs independent.  The first kernel creates one random
- * base pair per bounded dispatch; the second scans a consecutive range from
- * that pair, just like the well-tested legacy OpenCL path. */
+/* AMD's Windows OpenCL compiler can spend indefinitely optimizing a full
+ * 256-bit fixed-base multiplication, even when it lives in a separate tiny
+ * kernel.  Keep that operation off the OpenCL compiler entirely: this kernel
+ * generates one private scalar, the host expands it to a public point once,
+ * and the second kernel scans a large consecutive range from that point. */
 __kernel __attribute__((reqd_work_group_size(1, 1, 1)))
 void tron_vanity_resident_seed(
         __global const uchar *seed,
-        __global const uchar *table_b32,
         __global uchar *base_sk_out,
-        __global uchar *base_pub_out,
         const ulong rng_counter) {
     if (get_global_id(0) != 0) return;
 
-    uchar sk[32], pub[64];
+    uchar sk[32];
     int valid = 0;
     /* Invalid 256-bit samples are astronomically rare. Four independent
      * attempts preserve rejection sampling without an unbounded GPU loop. */
@@ -372,15 +324,12 @@ void tron_vanity_resident_seed(
         valid = resident_lt_order(sk);
     }
     if (!valid) {
+        /* Zero is an explicit failure sentinel; the host refuses it instead
+         * of ever substituting a predictable private key. */
         for (int i = 0; i < 32; ++i) sk[i] = 0;
-        sk[31] = 1;
     }
 
-    gej base;
-    resident_ec_mul(&base, sk, table_b32);
-    gej_to_pub(pub, &base);
     for (int i = 0; i < 32; ++i) base_sk_out[i] = sk[i];
-    for (int i = 0; i < 64; ++i) base_pub_out[i] = pub[i];
 }
 
 static inline void resident_add_offset(gej *acc,
@@ -847,7 +796,8 @@ inline void ge_load_g(ge *p, __global const uchar *xy) {
     p->inf = 0;
 }
 
-/* The resident kernel has its own 256-bit fixed-base walk above. */
+/* The resident path receives its full base point from the host and only walks
+ * a bounded 32-bit offset range on the GPU. */
 #ifndef RESIDENT
 /* ---------------- 固定基点标量乘 ----------------
  * ECW = 窗口位宽；ECBITS = base 的有效位数（= log2(每次内核扫描的私钥数）

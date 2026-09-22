@@ -79,14 +79,15 @@ gaps. Integrated GPUs stay at `2^16` to keep desktop responsiveness. Use
 
 ## GPU-resident mode (experimental)
 
-`--gpu-resident` keeps the dictionary, 256-bit GPU-generated scalars, address
-checking and a device result ring on the GPU. The CPU receives only complete
-matches for independent secp256k1/address verification and local JSONL writing.
-OpenCL uses two bounded in-order dispatches: a small CSPRNG/fixed-base seed
-kernel followed by a legacy-shaped consecutive range scan. Splitting the call
-graphs avoids the Windows RDNA4 compiler hang caused by the former monolithic
-kernel and amortizes one full 256-bit scalar multiplication over the whole
-chunk. Chunks remain bounded to avoid Windows WDDM timeouts:
+`--gpu-resident` keeps the dictionary, address checking and a device result ring
+on the GPU. On OpenCL, a lightweight GPU CSPRNG writes one 32-byte scalar per
+chunk. The host reads that scalar, expands its public point once with
+libsecp256k1, uploads 64 bytes, and the GPU scans the consecutive range. This
+96-byte round trip and one CPU point multiplication are amortized over the
+whole chunk; after that, the CPU receives only complete matches for independent
+secp256k1/address verification and local JSONL writing. Keeping the full
+256-bit fixed-base multiplication out of OpenCL avoids an observed Windows
+RDNA4 compiler hang. Chunks remain bounded to avoid Windows WDDM timeouts:
 
 ```powershell
 .\build\tron_vanity_generator.exe --backend opencl --gpu-resident `
@@ -139,11 +140,12 @@ permutation (about 20% faster); cold short runs reached 34.3 M keys/s. Startup
 compares both permutations over 1,024 deterministic blocks.
 
 Already-saved dictionary words are removed from the live DFA output tables
-between Metal dispatches. This preserves the existing one-result-per-word
-behavior without sending millions of duplicate short-word records back to the
-CPU. The Metal grid is scaled inversely with keys per lane, keeping command
-buffers near the same key count as the batch changes; the tuned M4 command is
-about 0.76 seconds instead of growing into a multi-second dispatch.
+between OpenCL and Metal dispatches. This preserves the existing
+one-result-per-word behavior without sending millions of duplicate short-word
+records back to the CPU. The Metal grid is scaled inversely with keys per lane,
+keeping command buffers near the same key count as the batch changes; the tuned
+M4 command is about 0.76 seconds instead of growing into a multi-second
+dispatch.
 
 ```bash
 ./build-mac-metal/tron_vanity_generator --bench-resident --backend metal \
@@ -182,15 +184,15 @@ Resident work-group size can be tuned per GPU without rebuilding:
 Supported values are `64`, `128` and `256`; `256` is the default. If a driver
 reports a compile or launch failure, retry with `128`.
 
-Resident startup prints the split-kernel compilation, table upload,
-ring-allocation and GPU base-pair validation stages separately. The first launch
-can spend time in the vendor compiler while it populates the driver cache; this
-is CPU-side initialization and therefore does not show as GPU utilization. The
-resident build also excludes unrelated RNG implementations and the
-legacy/profile/test entry points from each JIT. Every returned private
-key/address/dictionary match is recomputed on the CPU before it can be written.
-If initialization is still blocked by a vendor driver, the regular OpenCL path
-remains available:
+Resident startup prints the lightweight RNG/scan compilation, 32-bit offset
+table upload, ring allocation and GPU-CSPRNG/CPU-expansion validation stages
+separately. The first launch can spend time in the vendor compiler while it
+populates the driver cache; this is CPU-side initialization and therefore does
+not show as GPU utilization. The resident build also excludes unrelated RNG
+implementations and the legacy/profile/test entry points from each JIT. Every
+returned private key/address/dictionary match is recomputed on the CPU before
+it can be written. If initialization is still blocked by a vendor driver, the
+regular OpenCL path remains available:
 
 ```powershell
 .\tron_vanity_generator.exe --backend opencl --ec-window 8 `

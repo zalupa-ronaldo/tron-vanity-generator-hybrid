@@ -340,6 +340,12 @@ address and key self-test but was slower on the concurrently loaded M4
 (roughly 2.0 versus 1.5–1.6 ns/key for checksum); it is off by default.
 `test-opencl.cmd -CompareShaRing -TimeoutSeconds 120` runs a bounded,
 no-wallet comparison on the target GPU before considering it for production.
+`test-opencl.cmd -CompareGroupSizes -TimeoutSeconds 120` compares local group
+sizes 64, 128, and 256 with the same staged pipeline and dictionary. It
+checks GPU/CPU address and private-scalar agreement at each new group size
+before profiling it; an unsupported group stops the comparison without
+starting a real search. Compare wall M/s and per-stage ns/key rather than
+assuming a larger group is faster on every GPU.
 
 `--opencl-inverse pair` uses one field inversion for two Jacobian points in the
 monolithic path; staged `--opencl-affine-batch 4` uses one for four. It avoids

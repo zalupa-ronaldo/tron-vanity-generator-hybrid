@@ -7,13 +7,15 @@ param(
     [switch]$CompareStages,
     [switch]$CompareAffineBatches,
     [switch]$CompareCurveBatches,
-    [switch]$CompareShaRing
+    [switch]$CompareShaRing,
+    [switch]$CompareGroupSizes
 )
 $ErrorActionPreference = "Stop"
 if ($CompareStages -and $Pipeline -ne "staged") { throw "-CompareStages requires -Pipeline staged." }
 if ($CompareAffineBatches -and $Pipeline -ne "staged") { throw "-CompareAffineBatches requires -Pipeline staged." }
 if ($CompareCurveBatches -and $Pipeline -ne "staged") { throw "-CompareCurveBatches requires -Pipeline staged." }
 if ($CompareShaRing -and $Pipeline -ne "staged") { throw "-CompareShaRing requires -Pipeline staged." }
+if ($CompareGroupSizes -and $Pipeline -ne "staged") { throw "-CompareGroupSizes requires -Pipeline staged." }
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
 if (-not (Test-Path $exe)) { throw "Extract the release ZIP before running this script." }
 
@@ -205,6 +207,28 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
                                              "--gpu-buffer-mb", "8", "--bench-seconds", "5")
             if ($case.Ring) { $profileArgs += "--opencl-sha-ring" }
             if (-not (Invoke-BoundedTest ("10-sha-" + $case.Name) $profileArgs $true)) {
+                Write-Summary
+                exit 1
+            }
+        }
+    }
+    if ($CompareGroupSizes) {
+        foreach ($size in @(64, 128, 256)) {
+            $groupArgs = @($selectedArgs)
+            $groupIndex = [array]::IndexOf($groupArgs, "--gpu-group-size")
+            if ($groupIndex -lt 0) { throw "Internal error: missing --gpu-group-size in diagnostic arguments." }
+            $groupArgs[$groupIndex + 1] = "$size"
+            if ($size -ne 64) {
+                # A changed local size must pass the full GPU/CPU address and
+                # private-scalar self-test before its throughput is profiled.
+                if (-not (Invoke-BoundedTest ("11-group-$size-scan") ($groupArgs + @("--opencl-diagnose", "scan")))) {
+                    Write-Summary
+                    exit 1
+                }
+            }
+            $profileArgs = $groupArgs + @("--opencl-profile", "--words", "words.txt",
+                                          "--gpu-buffer-mb", "8", "--bench-seconds", "5")
+            if (-not (Invoke-BoundedTest ("11-group-$size-profile") $profileArgs $true)) {
                 Write-Summary
                 exit 1
             }

@@ -211,7 +211,7 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
         )
         foreach ($case in $stageCases) {
             if ($selected -ne "pair" -and $case.Name -eq "affine") { continue }
-            if (-not (Invoke-Variant ("07-" + $case.Name) @("--opencl-opt-mask", $case.Mask) $selectedArgs)) {
+            if (-not (Invoke-Variant -Name ("07-" + $case.Name) -VariantArguments @("--opencl-opt-mask", $case.Mask) -BaseArguments $selectedArgs)) {
                 if (-not $All) { Write-Summary; exit 1 }
             }
         }
@@ -221,7 +221,7 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
             Write-Report "Affine batch comparison skipped: paired inversion did not pass the scan self-test."
         } else {
             foreach ($batch in @(2, 4, 8)) {
-                if (-not (Invoke-Variant ("08-affine-$batch") @("--opencl-affine-batch", "$batch") $selectedArgs)) {
+                if (-not (Invoke-Variant -Name ("08-affine-$batch") -VariantArguments @("--opencl-affine-batch", "$batch") -BaseArguments $selectedArgs)) {
                     if (-not $All) { Write-Summary; exit 1 }
                 }
             }
@@ -229,7 +229,7 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
     }
     if ($CompareCurveBatches) {
         foreach ($batch in @(2, 4, 8)) {
-            if (-not (Invoke-Variant ("09-curve-$batch") @("--opencl-curve-batch", "$batch") $selectedArgs)) {
+            if (-not (Invoke-Variant -Name ("09-curve-$batch") -VariantArguments @("--opencl-curve-batch", "$batch") -BaseArguments $selectedArgs)) {
                 if (-not $All) { Write-Summary; exit 1 }
             }
         }
@@ -237,7 +237,7 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
     if ($CompareShaRing) {
         foreach ($case in @(@{ Name = "default"; Ring = $false }, @{ Name = "ring"; Ring = $true })) {
             $variant = if ($case.Ring) { @("--opencl-sha-ring") } else { @() }
-            if (-not (Invoke-Variant ("10-sha-" + $case.Name) $variant $selectedArgs)) {
+            if (-not (Invoke-Variant -Name ("10-sha-" + $case.Name) -VariantArguments $variant -BaseArguments $selectedArgs)) {
                 if (-not $All) { Write-Summary; exit 1 }
             }
         }
@@ -256,7 +256,7 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
                     exit 1
                 }
             }
-            if (-not (Invoke-Variant ("11-group-$size-profile") @() $groupArgs)) {
+            if (-not (Invoke-Variant -Name ("11-group-$size-profile") -VariantArguments @() -BaseArguments $groupArgs)) {
                 if (-not $All) { Write-Summary; exit 1 }
             }
         }
@@ -287,19 +287,19 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
             @{ Name = "curve-4"; Args = @("--opencl-curve-batch", "4") },
             @{ Name = "queued"; Args = @("--opencl-async-meta-read") }
         )) {
-            if (-not (Invoke-Variant ("13-group-128-" + $variant.Name) $variant.Args $group128)) {
+            if (-not (Invoke-Variant -Name ("13-group-128-" + $variant.Name) -VariantArguments $variant.Args -BaseArguments $group128)) {
                 Write-Report ("Variant failed; continuing: " + $variant.Name)
             }
         }
         if ($fullOk) {
             foreach ($rng in @("aes-ctr", "philox")) {
-                if (-not (Invoke-Variant ("14-rng-" + $rng) @("--gpu-rng", $rng) $selectedArgs "full")) {
+                if (-not (Invoke-Variant -Name ("14-rng-" + $rng) -VariantArguments @("--gpu-rng", $rng) -BaseArguments $selectedArgs -CheckStage "full")) {
                     Write-Report ("RNG variant failed; continuing: " + $rng)
                 }
             }
         } else { Write-Report "GPU RNG variants skipped: combined GPU RNG self-test did not pass." }
     }
 } else { Write-Report "words.txt not found: profile skipped, self-tests did not need a dictionary." }
-Write-Report ("Self-test passed. Optional search command (NOT executed):`ntron_vanity_generator.exe " + (($selectedArgs + @("--gpu-resident", "--words", "words.txt", "--seconds", "60")) -join " "))
+Write-Report ("Base self-test passed; check the table for any failed optional variant. Optional search command (NOT executed):`ntron_vanity_generator.exe " + (($selectedArgs + @("--gpu-resident", "--words", "words.txt", "--seconds", "60")) -join " "))
 Write-Summary
 if ($All -and @($results | Where-Object { $_.Result -ne "PASS" }).Count) { exit 1 }

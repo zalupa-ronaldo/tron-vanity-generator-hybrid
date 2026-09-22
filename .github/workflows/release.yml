@@ -78,6 +78,20 @@ jobs:
           Copy-Item test-opencl.ps1,test-opencl.cmd,bench.cmd release\
           Compress-Archive -Path release\* -DestinationPath tron-vanity-generator-windows-x64.zip
 
+      - name: Verify packaged no-argument configuration
+        shell: pwsh
+        run: |
+          foreach ($name in @('tron_vanity_generator.exe', 'tron-vanity.conf', 'words.txt', 'bench.cmd')) {
+            if (-not (Test-Path (Join-Path release $name))) { throw "Missing release file: $name" }
+          }
+          Push-Location release
+          try {
+            $output = .\tron_vanity_generator.exe devices
+            if ($LASTEXITCODE -ne 0 -or -not (($output -join "`n") -match 'Config:.*tron-vanity.conf')) {
+              throw "Packaged executable did not load its adjacent config: $($output -join ' ')"
+            }
+          } finally { Pop-Location }
+
       - name: Publish GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2

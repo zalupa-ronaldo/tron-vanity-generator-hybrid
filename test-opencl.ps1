@@ -3,9 +3,11 @@ param(
     [ValidateSet("single", "pair")][string]$Inverse = "pair",
     [ValidateSet("compact", "default")][string]$Compiler = "compact",
     [ValidateSet("staged", "monolithic")][string]$Pipeline = "staged",
-    [ValidateRange(30, 600)][int]$TimeoutSeconds = 30
+    [ValidateRange(30, 600)][int]$TimeoutSeconds = 30,
+    [switch]$CompareStages
 )
 $ErrorActionPreference = "Stop"
+if ($CompareStages -and $Pipeline -ne "staged") { throw "-CompareStages requires -Pipeline staged." }
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
 if (-not (Test-Path $exe)) { throw "Extract the release ZIP before running this script." }
 
@@ -20,7 +22,7 @@ function Write-Report([string]$Text) {
     Add-Content -LiteralPath $summary -Value $Text -Encoding UTF8
 }
 
-function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments) {
+function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments, [bool]$CompactReport = $false) {
     Write-Report ("`n[" + $Name + "] " + ($TestArguments -join " "))
     $stdoutPath = Join-Path $logDir "$Name.stdout.txt"
     $stderrPath = Join-Path $logDir "$Name.stderr.txt"
@@ -69,7 +71,15 @@ function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments) {
     foreach ($file in @($stdoutPath, $stderrPath)) {
         if (Test-Path -LiteralPath $file) {
             $text = Get-Content -LiteralPath $file -Raw -Encoding UTF8
-            if ($text) { Write-Report $text }
+            if ($text) {
+                if ($CompactReport -and $status -eq "PASS") {
+                    foreach ($line in ($text -split '\r?\n')) {
+                        if ($line -match '^(gfx\d+:|wall |base preparation |Driver-reported GPU|GPU stage time|  (curve|affine|keccak|checksum|base58|match) )') {
+                            Write-Report $line
+                        }
+                    }
+                } else { Write-Report $text }
+            }
         }
     }
     $results.Add([pscustomobject]@{ Test = $Name; Result = $status; Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1) })
@@ -137,6 +147,28 @@ if (-not $fullOk) {
 if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
     $profileOk = Invoke-BoundedTest "06-profile" ($selectedArgs + @("--opencl-profile", "--words", "words.txt", "--gpu-buffer-mb", "8", "--bench-seconds", "5"))
     if (-not $profileOk) { Write-Summary; exit 1 }
+    if ($CompareStages) {
+        # One optimization bit at a time against the exact v1.7.2 math path.
+        # Every child is bounded; no search or wallet output is launched.
+        $stageCases = @(
+            @{ Name = "baseline"; Mask = "0" },
+            @{ Name = "curve"; Mask = "1" },
+            @{ Name = "affine"; Mask = "2" },
+            @{ Name = "keccak"; Mask = "4" },
+            @{ Name = "checksum"; Mask = "8" },
+            @{ Name = "base58"; Mask = "16" },
+            @{ Name = "match"; Mask = "32" }
+        )
+        foreach ($case in $stageCases) {
+            if ($selected -ne "pair" -and $case.Name -eq "affine") { continue }
+            $profileArgs = $selectedArgs + @("--opencl-opt-mask", $case.Mask, "--opencl-profile",
+                                             "--words", "words.txt", "--gpu-buffer-mb", "8", "--bench-seconds", "5")
+            if (-not (Invoke-BoundedTest ("07-" + $case.Name) $profileArgs $true)) {
+                Write-Summary
+                exit 1
+            }
+        }
+    }
 } else { Write-Report "words.txt not found: profile skipped, self-tests did not need a dictionary." }
 Write-Report ("Self-test passed. Optional search command (NOT executed):`ntron_vanity_generator.exe " + (($selectedArgs + @("--gpu-resident", "--words", "words.txt", "--seconds", "60")) -join " "))
 Write-Summary

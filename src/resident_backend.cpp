@@ -43,11 +43,14 @@ constexpr unsigned kStageIds[] = {1, 2, 5, 6, 7, 4};
 
 std::string openclResidentBuildOptions(const std::string& rng, const OpenclResidentOptions& options) {
     const int mode = rng == "philox" ? 2 : (rng == "aes-ctr" ? 3 : 1);
+    const uint32_t mask = options.staged ? options.stageOptMask : 0;
+    const uint32_t affineBatch = (mask & 2U) ? options.affineBatch : 2;
     return "-cl-std=CL1.2 -D RESIDENT=1 -D ECW=8 -D ECBITS=32 -D KPI=2 -D MONT_N=1 -D RESIDENT_RNG=" +
         std::to_string(mode) + " -D RESIDENT_PAIR_INVERSE=" + (options.pairInverse ? "1" : "0") +
         " -D OPENCL_COMPACT=" + (options.compact ? "1" : "0") +
-        " -D RESIDENT_AFFINE_BATCH=" + std::to_string(options.affineBatch) +
-        " -D RESIDENT_OFFSET_WINDOWS=" + (options.staged ? "3" : "4") +
+        " -D RESIDENT_AFFINE_BATCH=" + std::to_string(affineBatch) +
+        " -D RESIDENT_OFFSET_WINDOWS=" + ((mask & 1U) ? "3" : "4") +
+        " -D RESIDENT_STAGE_OPT_MASK=" + std::to_string(mask) +
         (options.hostSeed ? " -D RESIDENT_SCAN_ONLY=1" : "");
 }
 
@@ -279,6 +282,10 @@ private:
     uint32_t readPos_ = 0;
 
     bool usesStages() const { return !isCuda && openclOptions_.staged; }
+    bool usesAffineFour() const {
+        return usesStages() && openclOptions_.pairInverse &&
+               (openclOptions_.stageOptMask & 2U) && openclOptions_.affineBatch == 4;
+    }
 
     bool buildStages() {
         if constexpr (isCuda) return false;
@@ -319,6 +326,10 @@ private:
         }
         if (openclOptions_.affineBatch != 2 && openclOptions_.affineBatch != 4) {
             error_ = "staged affine batch must be 2 or 4";
+            return false;
+        }
+        if (openclOptions_.stageOptMask > 63) {
+            error_ = "staged optimization mask must be in 0..63";
             return false;
         }
         if constexpr (!isCuda) { if (!ocl::load(&error_)) return false; }
@@ -369,8 +380,7 @@ private:
                 std::cerr << "  OpenCL " << (usesStages() ? kStageNames[i] : "scan")
                           << ": max group " << maxGroup << ", preferred multiple " << preferred
                           << ", reported private bytes " << privateBytes << " (not a VGPR count)\n";
-                const size_t requestedGroup = usesStages() && i == 1 &&
-                    openclOptions_.pairInverse && openclOptions_.affineBatch == 4 ?
+                const size_t requestedGroup = i == 1 && usesAffineFour() ?
                     groupSize_ / 2 : groupSize_;
                 if (requestedGroup > maxGroup) {
                     error_ = "scan kernel work-group limit is " + std::to_string(maxGroup) +
@@ -385,9 +395,11 @@ private:
             return false;
         }
 
-        stageStarted = beginStage(usesStages() ? "building the 24-bit secp256k1 offset table" :
+        stageStarted = beginStage(usesStages() && (openclOptions_.stageOptMask & 1U) ?
+                                          "building the 24-bit secp256k1 offset table" :
                                           "building the 32-bit secp256k1 offset table");
-        auto table = genResidentTable(context_, usesStages() ? 24 : kResidentEcbits);
+        auto table = genResidentTable(context_, usesStages() && (openclOptions_.stageOptMask & 1U) ?
+                                               24 : kResidentEcbits);
         finishStage(stageStarted);
 
         stageStarted = beginStage("uploading the table and dictionary");
@@ -634,8 +646,7 @@ private:
                 enqueued = true;
                 for (unsigned i = 0; i < stageKernels_.size(); ++i) {
                     // One in-order queue: no host readback or clFinish between stages.
-                    const bool affineFour = i == 1 && openclOptions_.pairInverse &&
-                                            openclOptions_.affineBatch == 4;
+                    const bool affineFour = i == 1 && usesAffineFour();
                     const size_t global = affineFour ? workItems_ / 2 :
                                           i < 2 ? workItems_ : lastChunkKeys_;
                     const size_t local = affineFour ? groupSize_ / 2 : groupSize_;

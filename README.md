@@ -279,13 +279,31 @@ specialized for its 21- and 32-byte inputs; Base58 divides by 58² to emit two
 digits per pass; and the dictionary stage derives a private scalar only after
 finding a match. The old two-point affine path remains selectable for an A/B
 test with `--opencl-affine-batch 2` (default `4` for staged paired inversion).
-These are implementation changes, not a claim of faster RX 9070 XT throughput;
-compare the same five-second wall profile and all six stage times on that GPU.
+The implementation changes were benchmarked with the same five-second wall
+profile and six GPU stage timings on the RX 9070 XT:
+The user-reported v1.8.0 run on RX 9070 XT / gfx1201 passed all 13 checks
+and measured 105.082 M/s wall throughput (525,467,648 keys / 5.001 s),
+39.2% above the comparable v1.7.2 profile. The GPU stage totals were curve
+0.704 s, affine 1.779 s, Keccak 0.441 s, checksum 0.385 s, Base58 0.427 s,
+and match 0.222 s. They processed more keys than v1.7.2, so compare time
+per key rather than the unnormalized totals. These are still profile numbers,
+not wallet-output search speed.
 
 ```bat
 tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --opencl-affine-batch 4 --gpu-group-size 64 --opencl-profile --words words.txt --bench-seconds 5
 tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --opencl-affine-batch 2 --gpu-group-size 64 --opencl-profile --words words.txt --bench-seconds 5
 ```
+
+For per-stage A/B tests, `--opencl-opt-mask N` accepts a sum of bits:
+curve `1`, affine `2`, Keccak `4`, checksum `8`, Base58 `16`, match `32`.
+`0` uses the v1.7.2 staged kernels; `63` enables all v1.8.0 optimizations
+(default). The mask affects only staged resident OpenCL. Use
+`test-opencl.cmd -CompareStages -TimeoutSeconds 120` after the normal
+diagnostic to run a bounded, no-wallet five-second profile of baseline and
+each single optimization. Its `summary.txt` keeps the speed and six stage
+times (also normalized as ns/key) for every variant; full build logs stay in
+separate files. A single-bit result is not necessarily additive with the
+others; judge the production default `63` by its measured wall speed.
 
 `--opencl-inverse pair` uses one field inversion for two Jacobian points in the
 monolithic path; staged `--opencl-affine-batch 4` uses one for four. It avoids

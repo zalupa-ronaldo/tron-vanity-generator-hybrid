@@ -102,6 +102,7 @@ void usage() {
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-affine-batch 2|4  staged paired inversion points per work-item (default 4)\n"
+        "  --opencl-opt-mask N  staged optimization bits 0..63; 0=baseline, 63=all (default)\n"
         "  --opencl-compiler compact|default  resident compiler mode (default compact)\n"
         "  --opencl-pipeline monolithic|staged  resident layout; selecting it enables GPU-resident mode\n"
         "  --opencl-diagnose smoke|rng|scan|full  isolated checks; no wallet output\n"
@@ -170,6 +171,11 @@ bool parse(int argc, char** argv, Options& o) {
                 o.openclOptions.affineBatch = std::stoul(next(i, "--opencl-affine-batch"));
                 if (o.openclOptions.affineBatch != 2 && o.openclOptions.affineBatch != 4)
                     throw std::runtime_error("--opencl-affine-batch must be 2 or 4");
+            }
+            else if (a == "--opencl-opt-mask") {
+                o.openclOptions.stageOptMask = std::stoul(next(i, "--opencl-opt-mask"));
+                if (o.openclOptions.stageOptMask > 63)
+                    throw std::runtime_error("--opencl-opt-mask must be in 0..63");
             }
             else if (a == "--opencl-compiler") {
                 const auto value = next(i, "--opencl-compiler");
@@ -373,7 +379,10 @@ int main(int argc, char** argv) {
                   << (opt.openclOptions.hostSeed ? "OS CSPRNG" : opt.gpuRng)
                   << "; compiler " << (opt.openclOptions.compact ? "compact" : "default")
                   << "; inverse " << (opt.openclOptions.pairInverse ? "pair" : "single")
-                  << "; affine batch " << opt.openclOptions.affineBatch
+                  << "; affine batch " << ((opt.openclOptions.staged && opt.openclOptions.pairInverse &&
+                                           (opt.openclOptions.stageOptMask & 2U)) ?
+                                          opt.openclOptions.affineBatch : 2U)
+                  << "; opt mask " << opt.openclOptions.stageOptMask
                   << "; pipeline " << (opt.openclOptions.staged ? "staged" : "monolithic")
                   << "; group " << opt.gpuGroupSize << "\n"
                   << "Includes full address/dictionary math and metadata drain; excludes CPU match verification/output.\n";
@@ -395,7 +404,9 @@ int main(int argc, char** argv) {
                 constexpr const char* stageNames[] = {"curve", "affine", "keccak", "checksum", "base58", "match"};
                 std::cout << "GPU stage time (six kernels; sum excludes queueing/transfers):\n";
                 for (size_t i = 0; i < p.stageSeconds.size(); ++i)
-                    std::cout << "  " << stageNames[i] << " " << p.stageSeconds[i] << " s\n";
+                    std::cout << "  " << stageNames[i] << " " << p.stageSeconds[i] << " s, "
+                              << (p.keys ? p.stageSeconds[i] * 1e9 / p.keys : 0.0)
+                              << " ns/key\n";
             }
             std::cout << "Use wall speed for comparisons; event time excludes queueing, transfers and host work.\n";
         }

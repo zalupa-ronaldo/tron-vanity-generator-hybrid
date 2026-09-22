@@ -27,6 +27,9 @@
 #ifndef RESIDENT_OFFSET_WINDOWS
 #define RESIDENT_OFFSET_WINDOWS 4
 #endif
+#ifndef RESIDENT_STAGE_OPT_MASK
+#define RESIDENT_STAGE_OPT_MASK 0
+#endif
 #if RESIDENT_SPLIT_STAGE && KPI != 2
 #error Staged resident kernels require KPI=2
 #endif
@@ -54,7 +57,7 @@ typedef struct { fe x, y, z; int inf; } gej;
 #define HASH_HEAVY inline
 #define HASH_LOOP
 #endif
-#if RESIDENT_SPLIT_STAGE == 6
+#if RESIDENT_SPLIT_STAGE == 6 && (RESIDENT_STAGE_OPT_MASK & 8)
 /* Inline only the short-message wrapper so the two fixed lengths (21/32)
  * constant-fold; keep the 64-round compressor outlined for vendor JITs. */
 #define SHA_SHORT_ATTR inline
@@ -300,6 +303,7 @@ HASH_HEAVY void resident_base58_address(uchar *addr, const uchar *full25) {
     for (int i = 0; i < 34; ++i) addr[i] = '1';
     int start = 0;
     HASH_LOOP
+#if RESIDENT_SPLIT_STAGE == 7 && (RESIDENT_STAGE_OPT_MASK & 16)
     for (int it = 0; it < 17; ++it) {
         /* Two Base58 digits per long division. The largest numerator is
          * (3363 << 16) | 65535, safely within 32 bits. */
@@ -313,6 +317,18 @@ HASH_HEAVY void resident_base58_address(uchar *addr, const uchar *full25) {
         addr[32 - 2 * it] = (uchar)b58[rem / 58U];
         while (start < 13 && num[start] == 0) ++start;
     }
+#else
+    for (int it = 0; it < 34; ++it) {
+        uint rem = 0;
+        for (int i = start; i < 13; ++i) {
+            uint acc = (rem << 16) | num[i];
+            num[i] = (ushort)(acc / 58U);
+            rem = acc % 58U;
+        }
+        addr[33 - it] = (uchar)b58[rem];
+        while (start < 13 && num[start] == 0) ++start;
+    }
+#endif
 }
 #endif
 
@@ -666,13 +682,21 @@ __kernel void resident_stage_match(__global const uchar *base_sk,
         __global uchar *records, uint cap, ulong sequence_base, uint offset_base) {
     uint gid = (uint)get_global_id(0), offset = offset_base + gid;
     uchar addr[34];
+#if !(RESIDENT_STAGE_OPT_MASK & 32)
+    uchar sk[32];
+    if (!resident_key_with_offset(base_sk, offset, sk)) return;
+#endif
     for (uint i = 0; i < 34; ++i) addr[i] = addresses[gid * 34U + i];
+#if RESIDENT_STAGE_OPT_MASK & 32
     uint ids[RESIDENT_MAX_MATCHES], count = 0, flags = 0;
     resident_find_matches(addr, dfa, out_start, out_len, out_ids, ids, &count, &flags);
     if (!count) return;
     uchar sk[32];
     if (!resident_key_with_offset(base_sk, offset, sk)) return;
     resident_write_match(sk, addr, ids, count, flags, meta, records, cap, sequence_base + offset);
+#else
+    resident_match(sk, addr, dfa, out_start, out_len, out_ids, meta, records, cap, sequence_base + offset);
+#endif
 }
 #endif
 #endif /* !RESIDENT_SEED_ONLY: scan kernel */
@@ -1180,6 +1204,7 @@ HASH_HEAVY void keccakf(ulong *s) {
 /* keccak256 of exactly 64 bytes */
 HASH_HEAVY void keccak256_64(uchar *out, const uchar *in) {
     ulong s[25];
+#if RESIDENT_SPLIT_STAGE == 5 && (RESIDENT_STAGE_OPT_MASK & 4)
     for (int i = 0; i < 8; ++i) {
         const int j = i * 8;
         s[i] = (ulong)in[j] | ((ulong)in[j+1] << 8) |
@@ -1190,6 +1215,13 @@ HASH_HEAVY void keccak256_64(uchar *out, const uchar *in) {
     for (int i = 8; i < 25; ++i) s[i] = 0;
     s[8] = 0x01UL;                 /* Keccak pad after the 64 input bytes. */
     s[16] = 0x8000000000000000UL; /* Rate 136: final byte of lane 16. */
+#else
+    for (int i = 0; i < 25; i++) s[i] = 0;
+    for (int i = 0; i < 64; i++)
+        s[i >> 3] ^= (ulong)in[i] << ((i & 7) * 8);
+    s[8] ^= 0x01UL;
+    s[16] ^= 0x8000000000000000UL;
+#endif
     keccakf(s);
     for (int i = 0; i < 32; i++)
         out[i] = (uchar)(s[i >> 3] >> ((i & 7) * 8));

@@ -33,6 +33,14 @@ int main() {
     OpenclResidentOptions pairedTwo{false, true, false, true, true};
     pairedTwo.affineBatch = 2;
     if (openclResidentSelfTest(device, "chacha12", pairedTwo)) return 1;
+    for (uint32_t mask : {0U, 1U, 2U, 4U, 8U, 16U, 32U}) {
+        OpenclResidentOptions isolated{false, true, false, true, true};
+        isolated.stageOptMask = mask;
+        if (openclResidentSelfTest(device, "chacha12", isolated)) {
+            std::cerr << "Staged optimization mask " << mask << " failed\n";
+            return 1;
+        }
+    }
     if (openclResidentSelfTest(device, "chacha12", {false, false, true, true, true})) return 1;
     if (openclResidentSelfTest(device, "chacha12", {true, true, true, true, true})) return 1;
     for (const auto& rng : {"chacha12", "aes-ctr", "philox"})

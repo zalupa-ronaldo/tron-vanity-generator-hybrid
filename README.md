@@ -219,20 +219,25 @@ It does not identify a specific faulty compiler pass or prove an infinite hang.
 `--opencl-compiler default`
 retains the inlining-oriented alternative for comparison.
 
-`--opencl-pipeline staged` now provides an experimental alternative: **four
-separate programs**, compiled independently, for curve additions, affine
-conversion/inversion, address encoding (Keccak/SHA256d/Base58), and dictionary
-matching. A shared context and in-order queue carry the GPU buffers between
-stages, without CPU readback between them. Unrelated implementations are removed
-from each program by preprocessing. This is an architectural attempt to reduce
-compiler complexity, **not a confirmed RX 9070 XT fix or speed improvement**.
+**v1.7.0 on gfx1201, driver 3665.0 (PAL,LC):** the curve, both affine variants,
+and dictionary programs built in under three seconds each. The combined address
+program (Keccak/SHA256d/Base58) exceeded the 30-second build limit. No scan ran.
+
+`--opencl-pipeline staged` now builds **six separate programs**: curve, affine,
+Keccak, SHA256d checksum, Base58Check encoding, and dictionary matching.
+The three address operations use independent programs; compact mode outlines
+their heavy functions and limits loop unrolling. A shared context and in-order
+queue carry the GPU buffers between stages without CPU readback. Unrelated
+implementations are removed from each program by preprocessing. This addresses
+the observed compiler bottleneck, but is **not yet confirmed on RX 9070 XT**.
 
 Normal CLI search keeps `monolithic` as the pipeline default. Selecting `staged`
 requires `--backend opencl` and implies `--gpu-resident`. The staged path uses
-28.25 MiB of additional scratch for public points/addresses, capped at 65,536
-work-items / 131,072 keys per chunk. It adds three scan dispatches and GPU-memory
-traffic, so its speed must be measured on the target device. GPU event timings
-sum all four stage events; compare wall throughput, not just the last kernel.
+34 MiB of additional scratch for public points, hash payloads, checksums and
+addresses, capped at 65,536 work-items / 131,072 keys per chunk. It adds five
+scan dispatches and GPU-memory traffic, so its speed must be measured on the
+target device. GPU event timings sum all six stage events; compare wall
+throughput, not just the last kernel.
 
 `--opencl-inverse pair` uses one field inversion plus three multiplies for
 the two Jacobian points in a work-item, instead of two inversions. It avoids
@@ -279,7 +284,9 @@ tron_vanity_generator.exe --backend opencl --opencl-diagnose smoke
 tron_vanity_generator.exe --backend opencl --opencl-diagnose rng
 tron_vanity_generator.exe --backend opencl --opencl-diagnose build-curve
 tron_vanity_generator.exe --backend opencl --opencl-diagnose build-affine --opencl-inverse pair
-tron_vanity_generator.exe --backend opencl --opencl-diagnose build-address
+tron_vanity_generator.exe --backend opencl --opencl-diagnose build-keccak
+tron_vanity_generator.exe --backend opencl --opencl-diagnose build-checksum
+tron_vanity_generator.exe --backend opencl --opencl-diagnose build-base58
 tron_vanity_generator.exe --backend opencl --opencl-diagnose build-match
 tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-diagnose scan --opencl-inverse pair
 tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-diagnose full --opencl-inverse pair

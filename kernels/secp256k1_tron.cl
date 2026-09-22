@@ -16,7 +16,8 @@
 
 /* Separate compilation units for the optional OpenCL staged pipeline.
  * 0 = original monolithic path (also CUDA), 1 = curve, 2 = affine,
- * 3 = address encoding, 4 = dictionary and result ring. */
+ * 3 = legacy combined address diagnostic, 4 = dictionary/result ring,
+ * 5 = Keccak, 6 = SHA-256 checksum, 7 = Base58Check encoding. */
 #ifndef RESIDENT_SPLIT_STAGE
 #define RESIDENT_SPLIT_STAGE 0
 #endif
@@ -38,6 +39,16 @@ typedef struct { fe x, y, z; int inf; } gej;
 #define EC_LOOP
 #endif
 
+#if defined(OPENCL_COMPACT) && OPENCL_COMPACT && !defined(CUDA_BACKEND) && RESIDENT_SPLIT_STAGE >= 5
+/* The address stages need small shader bodies on drivers which take too long
+ * to compile a fully inlined/unrolled hash and Base58 pipeline. */
+#define HASH_HEAVY __attribute__((noinline))
+#define HASH_LOOP _Pragma("unroll 1")
+#else
+#define HASH_HEAVY inline
+#define HASH_LOOP
+#endif
+
 inline void fe_set_int(fe *r, uint v);
 inline void ge_load_g(ge *p, __global const uchar *xy);
 EC_HEAVY void gej_add_ge(gej *r, const gej *a, const ge *b);
@@ -46,8 +57,8 @@ inline void gej_to_pub(uchar *out, gej *a);
 inline void gej_to_pub_zi(uchar *out, const gej *a, const fe *zi);
 inline void fe_mul(fe *r, const fe *a, const fe *b);
 EC_HEAVY void fe_inv(fe *r, const fe *a);
-inline void keccak256_64(uchar *out, const uchar *in);
-inline void sha256_short(uchar *out, const uchar *msg, int len);
+HASH_HEAVY void keccak256_64(uchar *out, const uchar *in);
+HASH_HEAVY void sha256_short(uchar *out, const uchar *msg, int len);
 
 #ifdef RESIDENT
 /* ---------------- GPU-resident generator ----------------
@@ -264,8 +275,8 @@ static inline uint resident_b58_index(uchar c) {
 }
 #endif
 
-#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 3
-static inline void resident_base58_address(uchar *addr, const uchar *full25) {
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 3 || RESIDENT_SPLIT_STAGE == 7
+HASH_HEAVY void resident_base58_address(uchar *addr, const uchar *full25) {
     const char b58[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     // Big-endian base-65536 limbs: 13 limbs instead of 25 byte divisions.
     // The first limb is one byte because the payload is 25 bytes long.
@@ -275,6 +286,7 @@ static inline void resident_base58_address(uchar *addr, const uchar *full25) {
         num[i] = ((ushort)full25[1 + (i - 1) * 2] << 8) | full25[2 + (i - 1) * 2];
     for (int i = 0; i < 34; ++i) addr[i] = '1';
     int start = 0;
+    HASH_LOOP
     for (int it = 0; it < 34; ++it) {
         uint rem = 0;
         for (int i = start; i < 13; ++i) {
@@ -286,7 +298,9 @@ static inline void resident_base58_address(uchar *addr, const uchar *full25) {
         while (start < 13 && num[start] == 0) ++start;
     }
 }
+#endif
 
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 3
 static inline void resident_address(const uchar *pub, uchar *addr) {
     uchar h[32], payload[21], d1[32], d2[32], full[25];
     keccak256_64(h, pub);
@@ -539,6 +553,39 @@ __kernel void resident_stage_address(__global const uchar *pubs, __global uchar 
     uchar pub[64], addr[34];
     for (uint i = 0; i < 64; ++i) pub[i] = pubs[gid * 64U + i];
     resident_address(pub, addr);
+    for (uint i = 0; i < 34; ++i) addresses[gid * 34U + i] = addr[i];
+}
+#endif
+
+#if RESIDENT_SPLIT_STAGE == 5 || defined(RESIDENT_SPLIT_TEST)
+__kernel void resident_stage_keccak(__global const uchar *pubs, __global uchar *payloads) {
+    uint gid = (uint)get_global_id(0);
+    uchar pub[64], hash[32];
+    for (uint i = 0; i < 64; ++i) pub[i] = pubs[gid * 64U + i];
+    keccak256_64(hash, pub);
+    payloads[gid * 21U] = 0x41;
+    for (uint i = 0; i < 20; ++i) payloads[gid * 21U + 1U + i] = hash[12 + i];
+}
+#endif
+
+#if RESIDENT_SPLIT_STAGE == 6 || defined(RESIDENT_SPLIT_TEST)
+__kernel void resident_stage_checksum(__global const uchar *payloads, __global uchar *fulls) {
+    uint gid = (uint)get_global_id(0);
+    uchar payload[21], first[32], second[32];
+    for (uint i = 0; i < 21; ++i) payload[i] = payloads[gid * 21U + i];
+    sha256_short(first, payload, 21);
+    sha256_short(second, first, 32);
+    for (uint i = 0; i < 21; ++i) fulls[gid * 25U + i] = payload[i];
+    for (uint i = 0; i < 4; ++i) fulls[gid * 25U + 21U + i] = second[i];
+}
+#endif
+
+#if RESIDENT_SPLIT_STAGE == 7 || defined(RESIDENT_SPLIT_TEST)
+__kernel void resident_stage_base58(__global const uchar *fulls, __global uchar *addresses) {
+    uint gid = (uint)get_global_id(0);
+    uchar full[25], addr[34];
+    for (uint i = 0; i < 25; ++i) full[i] = fulls[gid * 25U + i];
+    resident_base58_address(addr, full);
     for (uint i = 0; i < 34; ++i) addresses[gid * 34U + i] = addr[i];
 }
 #endif
@@ -1021,7 +1068,7 @@ inline void ec_load_G(ge *G, __global const uchar *table_b32) {
 #endif /* !RESIDENT */
 
 #endif /* EC implementations */
-#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 3
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 3 || RESIDENT_SPLIT_STAGE == 5
 /* ---------------- keccak-256 ---------------- */
 
 __constant ulong KECCAK_RC[24] = {
@@ -1036,7 +1083,8 @@ __constant int KECCAK_RHO[25] = {
 
 inline ulong rotl64(ulong x, int n) { return n == 0 ? x : ((x << n) | (x >> (64 - n))); }
 
-inline void keccakf(ulong *s) {
+HASH_HEAVY void keccakf(ulong *s) {
+    HASH_LOOP
     for (int rnd = 0; rnd < 24; rnd++) {
         ulong c[5], d[5];
         for (int x = 0; x < 5; x++)
@@ -1058,7 +1106,7 @@ inline void keccakf(ulong *s) {
 }
 
 /* keccak256 of exactly 64 bytes */
-inline void keccak256_64(uchar *out, const uchar *in) {
+HASH_HEAVY void keccak256_64(uchar *out, const uchar *in) {
     ulong s[25];
     for (int i = 0; i < 25; i++) s[i] = 0;
     for (int i = 0; i < 64; i++)
@@ -1069,7 +1117,9 @@ inline void keccak256_64(uchar *out, const uchar *in) {
     for (int i = 0; i < 32; i++)
         out[i] = (uchar)(s[i >> 3] >> ((i & 7) * 8));
 }
+#endif
 
+#if RESIDENT_SPLIT_STAGE == 0 || RESIDENT_SPLIT_STAGE == 3 || RESIDENT_SPLIT_STAGE == 6
 /* ---------------- sha-256 ---------------- */
 
 __constant uint SHA_K[64] = {
@@ -1085,7 +1135,7 @@ __constant uint SHA_K[64] = {
 inline uint shr(uint x, int n) { return x >> n; }
 inline uint rotr(uint x, int n) { return (x >> n) | (x << (32 - n)); }
 
-inline void sha256_block(uint *st, const uchar *p) {
+HASH_HEAVY void sha256_block(uint *st, const uchar *p) {
     uint w[64];
     for (int i = 0; i < 16; i++)
         w[i] = ((uint)p[4*i] << 24) | ((uint)p[4*i+1] << 16) | ((uint)p[4*i+2] << 8) | (uint)p[4*i+3];
@@ -1095,6 +1145,7 @@ inline void sha256_block(uint *st, const uchar *p) {
         w[i] = w[i-16] + s0 + w[i-7] + s1;
     }
     uint a=st[0],b=st[1],c=st[2],d=st[3],e=st[4],f=st[5],g=st[6],h=st[7];
+    HASH_LOOP
     for (int i = 0; i < 64; i++) {
         uint S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25);
         uint ch = (e & f) ^ (~e & g);
@@ -1108,7 +1159,7 @@ inline void sha256_block(uint *st, const uchar *p) {
 }
 
 /* sha256 of a short message (< 56 bytes), single block */
-inline void sha256_short(uchar *out, const uchar *msg, int len) {
+HASH_HEAVY void sha256_short(uchar *out, const uchar *msg, int len) {
     uint st[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
     uchar blk[64];
     for (int i = 0; i < 64; i++) blk[i] = 0;

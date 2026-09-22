@@ -31,6 +31,7 @@ public class Fixture {
         if (mode == "rng-timeout" && stage == "rng") Thread.Sleep(60000);
         if (mode == "smoke-fail" && stage == "smoke") return 2;
         if (mode == "curve-build-fail" && stage == "build-curve") return 2;
+        if (mode == "checksum-build-fail" && stage == "build-checksum") return 2;
         if (mode == "affine-pair-fail" && name == "build-affine-pair") return 2;
         if (mode == "rng-fail" && stage == "rng") return 2;
         if (mode == "pair-fail" && name == "scan-pair") return 2;
@@ -51,9 +52,10 @@ $cases = @(
     @{ Mode = "profile-fail"; Exit = 1; Calls = "smoke,rng,scan-single,scan-pair,full,profile"; Text = "FAIL (exit 2)" },
     @{ Mode = "rng-timeout"; Exit = 0; Calls = "smoke,rng,scan-single,scan-pair,profile"; Text = "TIMEOUT" }
 )
-$builds = ",build-curve,build-affine-single,build-affine-pair,build-address,build-match"
+$builds = ",build-curve,build-affine-single,build-affine-pair,build-keccak,build-checksum,build-base58,build-match"
 foreach ($case in $cases) { $case.Calls = $case.Calls.Replace(",scan-single", $builds + ",scan-single") }
 $cases += @{ Mode = "curve-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
+$cases += @{ Mode = "checksum-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
 $cases += @{ Mode = "affine-pair-fail"; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,full,profile"; Text = "Paired scan skipped" }
 $cases += @{ Mode = "monolithic"; Pipeline = "monolithic"; Exit = 0; Calls = "smoke,rng,scan-single,scan-pair,full,profile"; Text = "--opencl-pipeline monolithic" }
 $previousMode = $env:TRON_LAUNCHER_FIXTURE

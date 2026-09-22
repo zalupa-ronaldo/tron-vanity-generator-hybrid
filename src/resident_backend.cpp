@@ -32,9 +32,11 @@ constexpr uint32_t kResidentEcw = 8;
 constexpr uint32_t kResidentKpi = 2;
 constexpr uint32_t kResidentLocalSize = 256;
 constexpr uint32_t kStagedMaxWorkItems = 1u << 16;
-constexpr const char* kStageNames[] = {"curve", "affine", "address", "match"};
+constexpr const char* kStageNames[] = {"curve", "affine", "keccak", "checksum", "base58", "match"};
 constexpr const char* kStageKernels[] = {"resident_stage_curve", "resident_stage_affine",
-                                       "resident_stage_address", "resident_stage_match"};
+                                       "resident_stage_keccak", "resident_stage_checksum",
+                                       "resident_stage_base58", "resident_stage_match"};
+constexpr unsigned kStageIds[] = {1, 2, 5, 6, 7, 4};
 
 std::string openclResidentBuildOptions(const std::string& rng, const OpenclResidentOptions& options) {
     const int mode = rng == "philox" ? 2 : (rng == "aes-ctr" ? 3 : 1);
@@ -132,7 +134,7 @@ public:
         if constexpr (!isCuda) out.lines.push_back(std::string("compiler ") +
             (openclOptions_.compact ? "compact" : "default") + ", inversion " +
             (openclOptions_.pairInverse ? "paired" : "single") +
-            (openclOptions_.staged ? ", staged pipeline (four separate programs)" : ", monolithic pipeline") +
+            (openclOptions_.staged ? ", staged pipeline (six separate programs)" : ", monolithic pipeline") +
             ", adaptive dispatch");
         return out;
     }
@@ -243,8 +245,9 @@ private:
     ocl::id baseSk_ = nullptr, basePub_ = nullptr;
     ocl::id outStart_ = nullptr, outLen_ = nullptr, outIds_ = nullptr;
     ocl::id meta_ = nullptr, records_ = nullptr;
-    std::array<ocl::id, 4> stageKernels_{};
-    ocl::id points_ = nullptr, pubs_ = nullptr, addresses_ = nullptr;
+    std::array<ocl::id, 6> stageKernels_{};
+    ocl::id points_ = nullptr, pubs_ = nullptr, payloads_ = nullptr;
+    ocl::id fulls_ = nullptr, addresses_ = nullptr;
     std::array<unsigned char, 32> seedBytes_{};
     std::vector<uint32_t> activeWords_;
     std::vector<uint32_t> activeOutLen_;
@@ -260,8 +263,9 @@ private:
             scanOptions.hostSeed = true; // physically exclude RNG from each scan program
             const auto scanFlags = openclResidentBuildOptions(rng_, scanOptions);
             for (unsigned i = 0; i < stageKernels_.size(); ++i) {
-                std::cerr << "\n  OpenCL staged build " << i + 1 << "/4: " << kStageNames[i] << std::endl;
-                const auto flags = scanFlags + " -D RESIDENT_SPLIT_STAGE=" + std::to_string(i + 1);
+                std::cerr << "\n  OpenCL staged build " << i + 1 << "/" << stageKernels_.size()
+                          << ": " << kStageNames[i] << std::endl;
+                const auto flags = scanFlags + " -D RESIDENT_SPLIT_STAGE=" + std::to_string(kStageIds[i]);
                 const bool ok = i == 0 ? program_.build(device_.platformId, device_.deviceId,
                     kGpuKernelSource, flags, &error_, openclOptions_.profiling, true) :
                     program_.buildAdditional(kGpuKernelSource, flags, &error_);
@@ -400,12 +404,16 @@ private:
         finishStage(stageStarted);
 
         if (usesStages()) {
-            stageStarted = beginStage("allocating 28.25 MiB staged scratch (public points/addresses only)");
+            stageStarted = beginStage("allocating 34 MiB staged scratch (public points/address data only)");
             const size_t keys = static_cast<size_t>(kStagedMaxWorkItems) * kResidentKpi;
             points_ = program_.buffer(ocl::MEM_READ_WRITE, keys * 128, nullptr, &error_);
             pubs_ = program_.buffer(ocl::MEM_READ_WRITE, keys * 64, nullptr, &error_);
+            payloads_ = program_.buffer(ocl::MEM_READ_WRITE, keys * 21, nullptr, &error_);
+            fulls_ = program_.buffer(ocl::MEM_READ_WRITE, keys * 25, nullptr, &error_);
             addresses_ = program_.buffer(ocl::MEM_READ_WRITE, keys * 34, nullptr, &error_);
-            if (!points_ || !pubs_ || !addresses_) { failStage(stageStarted); return false; }
+            if (!points_ || !pubs_ || !payloads_ || !fulls_ || !addresses_) {
+                failStage(stageStarted); return false;
+            }
             finishStage(stageStarted);
         }
 
@@ -439,11 +447,14 @@ private:
             };
             return args(stageKernels_[0], {basePub_, table_, points_}) &&
                 program_.setArg(stageKernels_[0], 3, sizeof(offsetBase), &offsetBase) &&
-                args(stageKernels_[1], {points_, pubs_}) && args(stageKernels_[2], {pubs_, addresses_}) &&
-                args(stageKernels_[3], {baseSk_, addresses_, dfa_, outStart_, outLen_, outIds_, meta_, records_}) &&
-                program_.setArg(stageKernels_[3], 8, sizeof(ringSlots_), &ringSlots_) &&
-                program_.setArg(stageKernels_[3], 9, sizeof(sequence), &sequence) &&
-                program_.setArg(stageKernels_[3], 10, sizeof(offsetBase), &offsetBase);
+                args(stageKernels_[1], {points_, pubs_}) &&
+                args(stageKernels_[2], {pubs_, payloads_}) &&
+                args(stageKernels_[3], {payloads_, fulls_}) &&
+                args(stageKernels_[4], {fulls_, addresses_}) &&
+                args(stageKernels_[5], {baseSk_, addresses_, dfa_, outStart_, outLen_, outIds_, meta_, records_}) &&
+                program_.setArg(stageKernels_[5], 8, sizeof(ringSlots_), &ringSlots_) &&
+                program_.setArg(stageKernels_[5], 9, sizeof(sequence), &sequence) &&
+                program_.setArg(stageKernels_[5], 10, sizeof(offsetBase), &offsetBase);
         }
         return program_.setArg(probeKernel_, 0, sizeof(ocl::id), &baseSk_) &&
                program_.setArg(probeKernel_, 1, sizeof(ocl::id), &basePub_) &&
@@ -692,17 +703,29 @@ int diagnoseOpencl(const GpuDevice& device, const std::string& stage,
     if (!ocl::load(&error)) { std::cerr << error << std::endl; return 1; }
     std::cout << "OpenCL diagnostic " << stage << ": " << ocl::deviceDescription(device.deviceId)
               << "\nNo wallets or private keys are printed or saved." << std::endl;
-    for (unsigned i = 0; i < 4; ++i) {
+    for (unsigned i = 0; i < 6; ++i) {
         if (stage != std::string("build-") + kStageNames[i]) continue;
         options.hostSeed = true;
         ocl::Program program;
         std::cout << "BUILD ONLY: " << kStageNames[i] << "; execution/correctness not tested here" << std::endl;
-        const auto flags = openclResidentBuildOptions(rng, options) + " -D RESIDENT_SPLIT_STAGE=" + std::to_string(i + 1);
+        const auto flags = openclResidentBuildOptions(rng, options) + " -D RESIDENT_SPLIT_STAGE=" + std::to_string(kStageIds[i]);
         if (!program.build(device.platformId, device.deviceId, kGpuKernelSource, flags, &error, false, true) ||
             !program.kernel(kStageKernels[i], &error)) {
             std::cerr << error << std::endl; return 1;
         }
         std::cout << "OpenCL isolated build " << kStageNames[i] << " PASS (build only)" << std::endl;
+        return 0;
+    }
+    if (stage == "build-address") {
+        options.hostSeed = true;
+        ocl::Program program;
+        std::cout << "BUILD ONLY: legacy combined address stage; execution/correctness not tested here" << std::endl;
+        const auto flags = openclResidentBuildOptions(rng, options) + " -D RESIDENT_SPLIT_STAGE=3";
+        if (!program.build(device.platformId, device.deviceId, kGpuKernelSource, flags, &error, false, true) ||
+            !program.kernel("resident_stage_address", &error)) {
+            std::cerr << error << std::endl; return 1;
+        }
+        std::cout << "OpenCL isolated build legacy address PASS (build only)" << std::endl;
         return 0;
     }
     if (stage == "scan" || stage == "full") {

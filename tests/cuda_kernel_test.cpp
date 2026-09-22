@@ -37,7 +37,7 @@ void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
 
-// CPU-execute all four exact staged kernels with tiny buffers. offset_base
+// CPU-execute all six exact staged kernels with tiny buffers. offset_base
 // exercises the full 32-bit offset space without allocating huge test arrays.
 void checkedProbe(const unsigned char* base, const unsigned char* pub, const unsigned char* table,
                   const uint32_t* dfa, const uint32_t* start, const uint32_t* length, const uint32_t* id,
@@ -49,13 +49,15 @@ void checkedProbe(const unsigned char* base, const unsigned char* pub, const uns
     std::memcpy(stagedRecords, records, sizeof(stagedRecords));
     kernel::tron_vanity_resident_probe(base, pub, table, dfa, start, length, id, meta, records, capacity, sequence);
     uint32_t points[64]{};
-    unsigned char pubs[128]{}, addresses[68]{};
+    unsigned char pubs[128]{}, payloads[42]{}, fulls[50]{}, addresses[68]{};
     kernel::threadIdx.x = 0;
     kernel::resident_stage_curve(pub, table, points, gid * 2U);
     kernel::resident_stage_affine(points, pubs);
     for (unsigned item = 0; item < 2; ++item) {
         kernel::threadIdx.x = item;
-        kernel::resident_stage_address(pubs, addresses);
+        kernel::resident_stage_keccak(pubs, payloads);
+        kernel::resident_stage_checksum(payloads, fulls);
+        kernel::resident_stage_base58(fulls, addresses);
         kernel::resident_stage_match(base, addresses, dfa, start, length, id,
                                      stagedMeta, stagedRecords, capacity, sequence, gid * 2U);
     }

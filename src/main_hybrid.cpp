@@ -104,7 +104,8 @@ void usage() {
         "  --opencl-compiler compact|default  resident compiler mode (default compact)\n"
         "  --opencl-pipeline monolithic|staged  resident program layout (default monolithic)\n"
         "  --opencl-diagnose smoke|rng|scan|full  isolated checks; no wallet output\n"
-        "                    build-curve|build-affine|build-address|build-match (compile only)\n"
+        "                    build-curve|build-affine|build-keccak|build-checksum|build-base58|build-match\n"
+        "                    build-address (legacy combined stage; compile only)\n"
         "  --opencl-host-seed  use OS CSPRNG, exclude GPU RNG from resident OpenCL\n"
         "  --metal-profile-stages  profile the active Metal resident pipeline by stage; no wallets written\n"
         "  --metal-profile-stage N  profile only stage 0..5 (0 is full resident)\n"
@@ -203,7 +204,9 @@ bool parse(int argc, char** argv, Options& o) {
     if (!o.openclDiagnostic.empty() && o.openclDiagnostic != "smoke" && o.openclDiagnostic != "rng" &&
         o.openclDiagnostic != "scan" && o.openclDiagnostic != "full" &&
         o.openclDiagnostic != "build-curve" && o.openclDiagnostic != "build-affine" &&
-        o.openclDiagnostic != "build-address" && o.openclDiagnostic != "build-match") {
+        o.openclDiagnostic != "build-keccak" && o.openclDiagnostic != "build-checksum" &&
+        o.openclDiagnostic != "build-base58" && o.openclDiagnostic != "build-match" &&
+        o.openclDiagnostic != "build-address") {
         std::cerr << "unknown --opencl-diagnose stage; see --help\n"; return false;
     }
     if (o.gpuGroupSize != 64 && o.gpuGroupSize != 128 && o.gpuGroupSize != 256) {

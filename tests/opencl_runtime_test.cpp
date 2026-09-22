@@ -20,7 +20,8 @@ int main() {
     if (diagnoseOpencl(device, "smoke", "chacha12")) return 1;
     for (const auto& rng : {"chacha12", "aes-ctr", "philox"})
         if (diagnoseOpencl(device, "rng", rng)) return 1;
-    for (const auto& stage : {"build-curve", "build-affine", "build-address", "build-match"})
+    for (const auto& stage : {"build-curve", "build-affine", "build-keccak", "build-checksum",
+                              "build-base58", "build-match"})
         if (diagnoseOpencl(device, stage, "chacha12", {true, true, false})) return 1;
     if (diagnoseOpencl(device, "scan", "chacha12", {false, true, false})) return 1;
     if (diagnoseOpencl(device, "scan", "chacha12", {true, true, false})) return 1;

@@ -95,7 +95,7 @@ $singleBuildOk = $true
 $pairBuildOk = $true
 if ($Pipeline -eq "staged") {
     $buildsOk = $true
-    foreach ($stage in @("curve", "affine-single", "affine-pair", "address", "match")) {
+    foreach ($stage in @("curve", "affine-single", "affine-pair", "keccak", "checksum", "base58", "match")) {
         # Each program gets a fresh bounded child, including after another
         # stage times out. These are BUILD checks, not execution self-tests.
         if ($stage.StartsWith("affine-")) {

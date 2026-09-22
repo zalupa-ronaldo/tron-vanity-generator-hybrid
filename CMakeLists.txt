@@ -59,12 +59,21 @@ add_custom_command(
 if(APPLE)
   set(METAL_SRC ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tron_vanity_resident.metal)
   set(METAL_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/metal_kernel_src.h)
+  set(METAL_HW_SRC ${CMAKE_CURRENT_SOURCE_DIR}/kernels/metal_hardware_profile.metal)
+  set(METAL_HW_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/metal_hardware_profile_src.h)
   add_custom_command(
     OUTPUT ${METAL_GEN}
     COMMAND ${CMAKE_COMMAND} -DIN=${METAL_SRC} -DOUT=${METAL_GEN}
             -DVAR=kMetalKernelSource
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_kernel.cmake
     DEPENDS ${METAL_SRC} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_kernel.cmake
+    VERBATIM)
+  add_custom_command(
+    OUTPUT ${METAL_HW_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${METAL_HW_SRC} -DOUT=${METAL_HW_GEN}
+            -DVAR=kMetalHardwareProfileSource
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_kernel.cmake
+    DEPENDS ${METAL_HW_SRC} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_kernel.cmake
     VERBATIM)
   set(METAL_LIBS)
   foreach(METAL_RNG_MODE IN ITEMS 1 2 3)
@@ -79,16 +88,38 @@ if(APPLE)
       VERBATIM)
     list(APPEND METAL_LIBS ${METAL_LIB})
   endforeach()
-  add_custom_target(metal_shader_check ALL DEPENDS ${METAL_GEN} ${METAL_LIBS})
+  # Also compile the largest production-tested point-walk batch so CI/builds
+  # catch compiler regressions that the KPI=32 smoke variants cannot expose.
+  set(METAL_TUNED_AIR ${CMAKE_CURRENT_BINARY_DIR}/tron_vanity_resident_kpi512.air)
+  set(METAL_TUNED_LIB ${CMAKE_CURRENT_BINARY_DIR}/tron_vanity_resident_kpi512.metallib)
+  add_custom_command(
+    OUTPUT ${METAL_TUNED_LIB}
+    COMMAND xcrun metal -DRESIDENT=1 -DRESIDENT_RNG=1 -DECW=8 -DECBITS=256
+            -DKPI=512 -DRESIDENT_SCALAR_KECCAK=1 -DMONT_N=1 -c ${METAL_SRC}
+            -o ${METAL_TUNED_AIR}
+    COMMAND xcrun metallib ${METAL_TUNED_AIR} -o ${METAL_TUNED_LIB}
+    DEPENDS ${METAL_SRC}
+    VERBATIM)
+  list(APPEND METAL_LIBS ${METAL_TUNED_LIB})
+  set(METAL_HW_AIR ${CMAKE_CURRENT_BINARY_DIR}/metal_hardware_profile.air)
+  set(METAL_HW_LIB ${CMAKE_CURRENT_BINARY_DIR}/metal_hardware_profile.metallib)
+  add_custom_command(
+    OUTPUT ${METAL_HW_LIB}
+    COMMAND xcrun metal -c ${METAL_HW_SRC} -o ${METAL_HW_AIR}
+    COMMAND xcrun metallib ${METAL_HW_AIR} -o ${METAL_HW_LIB}
+    DEPENDS ${METAL_HW_SRC}
+    VERBATIM)
+  add_custom_target(metal_shader_check ALL DEPENDS ${METAL_GEN} ${METAL_HW_GEN}
+                    ${METAL_LIBS} ${METAL_HW_LIB})
 endif()
 
 # ---- 主程序 ----
 file(GLOB SRC CONFIGURE_DEPENDS src/*.cpp)
 if(APPLE)
-  list(APPEND SRC src/metal_backend.mm)
+  list(APPEND SRC src/metal_backend.mm src/metal_hardware_profile.mm)
 endif()
 if(APPLE)
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN})
 else()
   add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN})
 endif()

@@ -75,7 +75,8 @@ public:
                          std::string rng, uint32_t bufferMiB,
                          uint32_t chunkMs, uint32_t groupSize,
                          uint32_t keysPerLane, uint32_t profileStage = 0,
-                         bool scalarKeccak = false)
+                         bool scalarKeccak = false,
+                         uint32_t pipelineMaxThreads = 0)
         : dictionary_(std::move(dictionary)), rng_(std::move(rng)),
           bufferMiB_(std::max(8u, bufferMiB)),
           // Keep Metal chunks bounded too: oversized dispatches make the
@@ -83,9 +84,15 @@ public:
           // steady-state throughput on Apple Silicon.
           chunkMs_(std::clamp(chunkMs, 8u, 100u)),
           groupSize_(groupSize == 64 || groupSize == 128 || groupSize == 256 ? groupSize : 256),
-          keysPerLane_(keysPerLane), profileStage_(profileStage), scalarKeccak_(scalarKeccak) {
+          keysPerLane_(keysPerLane), profileStage_(profileStage), scalarKeccak_(scalarKeccak),
+          pipelineMaxThreads_(pipelineMaxThreads) {
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
-        workItems_ = std::clamp((1u << 18) * chunkMs_ / 32u, 1u << 14, 1u << 20);
+        // Keep roughly the same number of keys per dispatch when the point-walk
+        // batch changes. Without this scaling, KPI=1024 turns a bounded chunk
+        // into a multi-second command buffer even though throughput improves.
+        const uint64_t desired = (uint64_t{1} << 18) * chunkMs_ / keysPerLane_;
+        workItems_ = static_cast<uint32_t>(std::clamp<uint64_t>(desired, 1u << 14, 1u << 20));
+        workItems_ = (workItems_ + groupSize_ - 1) / groupSize_ * groupSize_;
     }
 
     ~MetalResidentBackend() override {
@@ -179,6 +186,7 @@ private:
     uint32_t keysPerLane_ = 32;
     uint32_t profileStage_ = 0;
     bool scalarKeccak_ = false;
+    uint32_t pipelineMaxThreads_ = 0;
     uint64_t streamBase_ = 0;
     uint32_t readPos_ = 0;
     secp256k1_context* context_ = nullptr;
@@ -260,7 +268,17 @@ private:
         }
         id<MTLFunction> function = [library newFunctionWithName:@"tron_vanity_resident"];
         if (!function) { error_ = "tron_vanity_resident not found in Metal library"; return false; }
-        pipeline_ = [device_ newComputePipelineStateWithFunction:function error:&nsError];
+        if (pipelineMaxThreads_) {
+            MTLComputePipelineDescriptor* descriptor = [MTLComputePipelineDescriptor new];
+            descriptor.computeFunction = function;
+            descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth = YES;
+            descriptor.maxTotalThreadsPerThreadgroup = pipelineMaxThreads_;
+            pipeline_ = [device_ newComputePipelineStateWithDescriptor:descriptor
+                                                                 options:MTLPipelineOptionNone
+                                                              reflection:nil error:&nsError];
+        } else {
+            pipeline_ = [device_ newComputePipelineStateWithFunction:function error:&nsError];
+        }
         if (!pipeline_) {
             error_ = nsError ? std::string([[nsError localizedDescription] UTF8String]) : "Metal pipeline creation failed";
             return false;
@@ -392,11 +410,12 @@ std::string metalDeviceSummary() {
 MetalProfileResult profileMetalResidentStage(
     std::shared_ptr<const Dictionary> dictionary, const std::string& rng,
     uint32_t bufferMiB, uint32_t chunkMs, uint32_t groupSize,
-    uint32_t keysPerLane, uint32_t stage, double seconds, bool scalarKeccak) {
+    uint32_t keysPerLane, uint32_t stage, double seconds, bool scalarKeccak,
+    uint32_t pipelineMaxThreads) {
     if (stage > 5 || seconds <= 0.0)
         return MetalProfileResult{0, 0.0, 0.0, 0, "invalid Metal profile stage or duration"};
     MetalResidentBackend backend(std::move(dictionary), rng, bufferMiB, chunkMs,
-                                 groupSize, keysPerLane, stage, scalarKeccak);
+                                 groupSize, keysPerLane, stage, scalarKeccak, pipelineMaxThreads);
     return backend.profile(seconds);
 }
 

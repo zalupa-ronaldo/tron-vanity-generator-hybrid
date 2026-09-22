@@ -26,7 +26,8 @@ MetalProfileResult profileMetalResidentStage(
     uint32_t keysPerLane,
     uint32_t stage,
     double seconds,
-    bool scalarKeccak = true);
+    bool scalarKeccak = true,
+    uint32_t pipelineMaxThreads = 0);
 
 std::unique_ptr<Backend> makeMetalResidentBackend(
     std::shared_ptr<const Dictionary> dictionary,

@@ -2,6 +2,7 @@
 #include "crypto.h"
 #include "hwdetect.h"
 #include "metal_backend.h"
+#include "metal_hardware_profile.h"
 #include "resident_backend.h"
 
 #if defined(_WIN32)
@@ -56,6 +57,10 @@ struct Options {
     bool metalProfileStages = false;
     int metalProfileStage = -1;
     bool metalProfileScalarKeccak = true;
+    uint32_t metalProfileMaxThreads = 0;
+    bool metalHardwareProfile = false;
+    std::string metalHardwareCase = "all";
+    std::string metalHardwareJson;
     uint32_t keysPerItem = 1;
     uint32_t gpuBatch = 0;
     uint32_t ecWindow = 0;
@@ -86,12 +91,16 @@ void usage() {
         "  --gpu-chunk-ms N  bounded GPU chunk target, default 32\n"
         "  --gpu-poll-ms N   result polling interval, default 50\n"
         "  --gpu-group-size N resident work-group size: 64, 128, or 256 (default 256)\n"
-        "  --metal-keys-per-lane N Metal point-walk batch: 1, 2, 4, 8, 16, or 32 (default 32)\n"
+        "  --metal-keys-per-lane N Metal point-walk batch: power of two, 1..1024 (default 32)\n"
         "  --bench-seconds N seconds per benchmark method; --bench runs all available methods\n"
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
         "  --metal-profile-stages  profile the active Metal resident pipeline by stage; no wallets written\n"
         "  --metal-profile-stage N  profile only stage 0..5 (0 is full resident)\n"
         "  --metal-profile-indexed-keccak profile the slower indexed reference Keccak\n"
+        "  --metal-profile-max-threads N set compiler occupancy hint for profile only\n"
+        "  --metal-hw-profile run deterministic Metal hardware microbenchmarks\n"
+        "  --metal-hw-case NAME filter hardware cases by name/category\n"
+        "  --metal-hw-json FILE write hardware profile results as JSON\n"
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL devices and exit\n"
         "  --verbose         more frequent progress updates\n"
@@ -131,6 +140,10 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--metal-profile-stages") o.metalProfileStages = true;
             else if (a == "--metal-profile-stage") o.metalProfileStage = std::stoi(next(i, "--metal-profile-stage"));
             else if (a == "--metal-profile-indexed-keccak") o.metalProfileScalarKeccak = false;
+            else if (a == "--metal-profile-max-threads") o.metalProfileMaxThreads = std::stoul(next(i, "--metal-profile-max-threads"));
+            else if (a == "--metal-hw-profile") o.metalHardwareProfile = true;
+            else if (a == "--metal-hw-case") { o.metalHardwareCase = next(i, "--metal-hw-case"); o.metalHardwareProfile = true; }
+            else if (a == "--metal-hw-json") { o.metalHardwareJson = next(i, "--metal-hw-json"); o.metalHardwareProfile = true; }
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
             else if (a == "--mont-n") o.montN = std::stoul(next(i, "--mont-n"));
             else if (a == "--backend") o.backend = next(i, "--backend");
@@ -151,12 +164,22 @@ bool parse(int argc, char** argv, Options& o) {
     if (o.gpuGroupSize != 64 && o.gpuGroupSize != 128 && o.gpuGroupSize != 256) {
         std::cerr << "--gpu-group-size must be 64, 128, or 256\n"; return false;
     }
-    if (o.metalKeysPerLane == 0 || o.metalKeysPerLane > 32 ||
+    if (o.metalKeysPerLane == 0 || o.metalKeysPerLane > 1024 ||
         (o.metalKeysPerLane & (o.metalKeysPerLane - 1)) != 0) {
-        std::cerr << "--metal-keys-per-lane must be 1, 2, 4, 8, 16, or 32\n"; return false;
+        std::cerr << "--metal-keys-per-lane must be a power of two from 1 to 1024\n"; return false;
+    }
+    if (static_cast<uint64_t>(o.gpuGroupSize) * o.metalKeysPerLane > 65536) {
+        std::cerr << "Metal group size times keys per lane must not exceed 65536\n";
+        return false;
     }
     if (o.metalProfileStage < -1 || o.metalProfileStage > 5) {
         std::cerr << "--metal-profile-stage must be 0..5\n"; return false;
+    }
+    if (o.metalProfileMaxThreads &&
+        (o.metalProfileMaxThreads < 32 || o.metalProfileMaxThreads > 1024 ||
+         o.metalProfileMaxThreads % 32 != 0)) {
+        std::cerr << "--metal-profile-max-threads must be 0 or a multiple of 32 up to 1024\n";
+        return false;
     }
     return true;
 }
@@ -248,6 +271,9 @@ int main(int argc, char** argv) {
     if (!parse(argc, argv, opt)) return 0;
     HardwareReport hw = detectHardware();
     if (opt.list) { printDevices(hw); return 0; }
+    if (opt.metalHardwareProfile) {
+        return runMetalHardwareProfile({opt.benchSeconds, opt.metalHardwareCase, opt.metalHardwareJson});
+    }
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--gputest") {
             if (hw.gpus.empty()) { std::cerr << "no OpenCL GPU: " << hw.openclNote << "\n"; return 1; }
@@ -268,13 +294,14 @@ int main(int argc, char** argv) {
                                 "+ Base58", "+ dictionary"};
         std::cout << "Metal resident stage profile (throwaway benchmark run; no wallet output)\n"
                   << "Stage variants are separate compiled kernels; deltas are diagnostic, not exact function timings.\n"
-                  << "stage             wall M/s   GPU M/s   GPU ns/key   GPU busy\n";
+                  << "stage             wall M/s   GPU M/s   GPU ns/key  GPU ms/cmd   GPU busy\n";
         const uint32_t firstStage = opt.metalProfileStage >= 0 ? static_cast<uint32_t>(opt.metalProfileStage) : 0;
         const uint32_t lastStage = opt.metalProfileStage >= 0 ? firstStage : 5;
         for (uint32_t stage = firstStage; stage <= lastStage; ++stage) {
             MetalProfileResult p = profileMetalResidentStage(dictionary, opt.gpuRng,
                 opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuGroupSize,
-                opt.metalKeysPerLane, stage, opt.benchSeconds, opt.metalProfileScalarKeccak);
+                opt.metalKeysPerLane, stage, opt.benchSeconds, opt.metalProfileScalarKeccak,
+                opt.metalProfileMaxThreads);
             if (!p.error.empty()) {
                 std::cerr << "Metal profile stage " << stage << " failed: " << p.error << "\n";
                 return 1;
@@ -282,11 +309,13 @@ int main(int argc, char** argv) {
             const double wallRate = p.wallSeconds > 0 ? p.keys / p.wallSeconds / 1e6 : 0.0;
             const double gpuRate = p.gpuSeconds > 0 ? p.keys / p.gpuSeconds / 1e6 : 0.0;
             const double nsPerKey = p.keys ? p.gpuSeconds / p.keys * 1e9 : 0.0;
+            const double msPerCommand = p.dispatches ? p.gpuSeconds * 1e3 / p.dispatches : 0.0;
             const double busy = p.wallSeconds > 0 ? p.gpuSeconds / p.wallSeconds * 100.0 : 0.0;
             std::cout << std::left << std::setw(18) << labels[stage]
                       << std::right << std::fixed << std::setprecision(2)
                       << std::setw(9) << wallRate << std::setw(10) << gpuRate
-                      << std::setw(13) << nsPerKey << std::setw(10) << busy << "%\n";
+                      << std::setw(13) << nsPerKey << std::setw(12) << msPerCommand
+                      << std::setw(10) << busy << "%\n";
         }
         return 0;
 #else

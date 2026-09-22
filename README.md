@@ -1,13 +1,13 @@
-# TRON Vanity Generator — CPU + OpenCL
+# TRON Vanity Generator — CPU + OpenCL + Metal
 
 [![Windows release](https://img.shields.io/github/v/release/zalupa-ronaldo/tron-vanity-generator-hybrid?display_name=tag)](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/releases)
 [![Build](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml/badge.svg)](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Hybrid TRON vanity-address generator for Windows. It runs the CPU worker and
-all detected OpenCL GPUs concurrently. OpenCL is used for both AMD and NVIDIA
-cards, so version 1 does not require the CUDA Toolkit. A native CUDA backend is
-reserved for version 2.
+Hybrid TRON vanity-address generator for Windows and Apple Silicon. It can run
+the CPU worker with detected OpenCL GPUs on Windows, or use the native Metal
+resident backend on macOS. OpenCL covers both AMD and NVIDIA cards, so version
+1 does not require the CUDA Toolkit.
 
 The GPU architecture is based on and attributes
 [hlzzhqb/tron-vanity-generator](https://github.com/hlzzhqb/tron-vanity-generator)
@@ -110,14 +110,22 @@ The MSL kernel is compiled and linked as a Metal library during the macOS
 build. The current release keeps Metal opt-in; `--backend auto` will select it
 after the cross-validation acceptance run.
 
-Metal processes 32 consecutive curve points per lane and uses one modular
-inverse for the batch. Tune with `--metal-keys-per-lane 4|8|16|32` if a
-different Apple GPU prefers a smaller batch. On a base M4 with the same
-dictionary and 256-lane groups, `chacha12` measured 14.3 M keys/s at 4,
-18.7 M at 8, 22.0 M at 16, and 23.5 M at 32 (2026-09-21, 2-second
-benchmark passes). The 32-key mode also passed independent verification of
-121 generated address/key pairs. Rates from upstream prefix-only search are
-not directly comparable to full Base58 dictionary matching.
+Metal walks a compile-time batch of consecutive curve points per lane and uses
+one modular inverse for the whole batch. The conservative default remains 32,
+but the batch can be any power of two through 1,024 as long as
+`group-size * keys-per-lane <= 65536`. A balanced, same-temperature profile on
+a base 10-GPU-core M4 selected `--gpu-group-size 128
+--metal-keys-per-lane 512`: 34.51 M keys/s versus 31.87 M keys/s for the old
+256-by-32 configuration (about 8.3% faster). The production worker subsequently
+held 33.3-34.1 M keys/s while matching a 1,665-word dictionary.
+
+The large M4 batch is intentional. Xcode Metal System Trace reports 85,168 B
+of compiler spill per thread at 512 keys/lane, but that state is amortized over
+512 keys and unified-memory bandwidth remains sufficient. Smaller batches lose
+more to secp256k1 inversion than they save in spill traffic. A separate run
+independently verified 121 generated address/key pairs at 128-by-512, with no
+duplicate keys. Rates from upstream prefix-only search are not directly
+comparable to full Base58 dictionary matching.
 
 The Metal path also uses a named-lane Keccak-f[1600] permutation. It keeps the
 25 lanes in scalar variables and performs Rho/Pi as one in-place cycle instead
@@ -129,21 +137,36 @@ compares both permutations over 1,024 deterministic blocks.
 Already-saved dictionary words are removed from the live DFA output tables
 between Metal dispatches. This preserves the existing one-result-per-word
 behavior without sending millions of duplicate short-word records back to the
-CPU. In a sustained test the production path reached 27.1 M keys/s against a
-27.9 M keys/s GPU-only ceiling. An independent run recomputed 142 generated
-addresses from their keys and verified every dictionary match with no duplicate
-words.
+CPU. The Metal grid is scaled inversely with keys per lane, keeping command
+buffers near the same key count as the batch changes; the tuned M4 command is
+about 0.76 seconds instead of growing into a multi-second dispatch.
 
 ```bash
 ./build-mac-metal/tron_vanity_generator --bench-resident --backend metal \
   --words words.example.txt --bench-seconds 2 --gpu-chunk-ms 100 \
-  --gpu-group-size 256 --metal-keys-per-lane 32
+  --gpu-group-size 128 --metal-keys-per-lane 512
 ```
 
 For stage-by-stage diagnosis, use `--metal-profile-stages`; it compiles
 separate EC, Keccak, SHA-256, Base58 and dictionary variants and writes no
 wallet file. `--metal-profile-indexed-keccak` selects the old Keccak only for
-an A/B profile.
+an A/B profile. `--metal-profile-max-threads N` exposes the Metal compiler's
+occupancy hint for controlled experiments; it is not enabled in production
+because the M4 A/B stayed within run-to-run noise.
+
+The deterministic hardware profiler measures arithmetic, both field
+representations, SIMD shuffles, thread-private spill cliffs, threadgroup
+capacity and unified-memory access without using wallet data:
+
+```bash
+./build-mac-metal/tron_vanity_generator --metal-hw-profile \
+  --bench-seconds 0.25 \
+  --metal-hw-json benchmarks/apple-m4-metal-hardware-2026-09-21.json
+```
+
+Use `--metal-hw-case field|private|memory|threadgroup|group` to select one
+category. The full M4 methodology, Xcode spill measurements and conclusions
+are in [docs/apple-m4-metal-hardware-profile.md](docs/apple-m4-metal-hardware-profile.md).
 
 Resident work-group size can be tuned per GPU without rebuilding:
 

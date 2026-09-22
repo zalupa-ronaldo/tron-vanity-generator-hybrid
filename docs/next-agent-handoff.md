@@ -64,12 +64,14 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    stopping only a *test* worker under explicit user control. Never trace or
    publish working secret buffers.
 4. Vulkan: `vulkan/probe.comp`, `vulkan/vulkan_probe.cpp` and
-   `src/vulkan_probe.h` implement a deterministic native compute dispatch,
-   built only with `-DTRON_ENABLE_VULKAN=ON`. Linux CI uses Mesa's software
-   Vulkan driver to test shader compilation, descriptors, dispatch, barriers
-   and CPU readback. That is not GPU search or RX 9070 XT evidence. The
-   Windows release uses the stub and cannot run this probe. A real integration
-   still needs SPIR-V for all math stages, descriptor and
+   `src/vulkan_probe.h` implement a deterministic native compute dispatch.
+   `vulkan/keccak.comp` and `vulkan/vulkan_keccak.cpp` add the first real
+   address stage with CPU-checked public-key-to-TRON-payload vectors. Both
+   are built only with `-DTRON_ENABLE_VULKAN=ON`. Linux CI uses Mesa's
+   software Vulkan driver; it does not prove RX 9070 XT performance. The
+   Windows release uses the stub and cannot run these tests. A production
+   integration still needs the curve, checksum, Base58, dictionary and result
+   ring stages, descriptor and
    scratch layout, barriers, bounded dispatch, result-ring semantics and
    GPU/CPU correctness. OpenCL running on `clvk` would be a compatibility
    experiment, not evidence of a native Vulkan backend. Khronos's
@@ -78,6 +80,8 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    identify API and compiler constraints. Start with deterministic seed/curve
    and address stages, then integrate one stage at a time; do not report a
    Vulkan speed until full-address/dictionary processing is verified.
+   The byte/word contract and remaining stage gates are in
+   [`vulkan-stage-contract.md`](vulkan-stage-contract.md).
 
 ## Reproducibility and rollout
 

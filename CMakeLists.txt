@@ -138,25 +138,36 @@ if(TRON_ENABLE_VULKAN)
   find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
   set(VULKAN_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_probe.spv)
   set(VULKAN_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_probe_spv.h)
+  set(VULKAN_KECCAK_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_keccak.spv)
+  set(VULKAN_KECCAK_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_keccak_spv.h)
   add_custom_command(OUTPUT ${VULKAN_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
     COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
             ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/probe.comp -o ${VULKAN_SPV}
     DEPENDS vulkan/probe.comp VERBATIM)
   add_custom_command(OUTPUT ${VULKAN_GEN}
-    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_SPV} -DOUT=${VULKAN_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_SPV} -DOUT=${VULKAN_GEN} -DNAME=kVulkanProbeSpv
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
     DEPENDS ${VULKAN_SPV} cmake/embed_spirv.cmake VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_KECCAK_SPV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
+    COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
+            ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/keccak.comp -o ${VULKAN_KECCAK_SPV}
+    DEPENDS vulkan/keccak.comp VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_KECCAK_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_KECCAK_SPV} -DOUT=${VULKAN_KECCAK_GEN}
+            -DNAME=kVulkanKeccakSpv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    DEPENDS ${VULKAN_KECCAK_SPV} cmake/embed_spirv.cmake VERBATIM)
   list(REMOVE_ITEM SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_probe_stub.cpp)
-  list(APPEND SRC vulkan/vulkan_probe.cpp)
+  list(APPEND SRC vulkan/vulkan_probe.cpp vulkan/vulkan_keccak.cpp)
 endif()
 if(APPLE)
   list(APPEND SRC src/metal_backend.mm src/metal_hardware_profile.mm)
 endif()
 if(APPLE)
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN} ${VULKAN_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN})
 else()
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN})
 endif()
 target_include_directories(tron_vanity_generator PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/gen)
 target_link_libraries(tron_vanity_generator PRIVATE secp256k1 ${CMAKE_DL_LIBS})
@@ -177,6 +188,8 @@ if(BUILD_TESTING)
   if(TRON_ENABLE_VULKAN)
     add_test(NAME vulkan_compute COMMAND tron_vanity_generator --vulkan-test)
     set_tests_properties(vulkan_compute PROPERTIES TIMEOUT 20)
+    add_test(NAME vulkan_keccak COMMAND tron_vanity_generator --vulkan-keccak-test)
+    set_tests_properties(vulkan_keccak PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
   endif()
   add_executable(run_config_test tests/run_config_test.cpp src/run_config.cpp)
   target_include_directories(run_config_test PRIVATE src)

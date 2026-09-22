@@ -36,7 +36,10 @@ public class Fixture {
             name += "-queued";
         File.AppendAllText("calls.txt", name + Environment.NewLine);
         Console.WriteLine("fixture " + name);
-        if (stage == "profile") Console.WriteLine("host timing: enqueue 0.001 s, finish wait 0.002 s, event query 0.003 s, metadata read 0.004 s, records 0.000 s, metadata update 0.000 s");
+        if (stage == "profile") {
+            Console.WriteLine("wall 5.000 s, wall speed 100.000 M/s");
+            Console.WriteLine("host timing: enqueue 0.001 s, finish wait 0.002 s, event query 0.003 s, metadata read 0.004 s, records 0.000 s, metadata update 0.000 s");
+        }
         Console.Error.WriteLine("OpenCL API: fixture BEGIN");
         Console.Error.Flush();
         if (stage == "profile") {
@@ -76,6 +79,7 @@ $cases += @{ Mode = "compare-curve"; CompareCurve = $true; Exit = 0; Calls = "sm
 $cases += @{ Mode = "compare-sha"; CompareSha = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile,profile,profile-sha-ring"; Text = "[10-sha-ring] PASS" }
 $cases += @{ Mode = "compare-groups"; CompareGroups = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile-group-64,profile-group-64,scan-pair-group-128,profile-group-128,scan-pair-group-256,profile-group-256"; Text = "[11-group-256-profile] PASS" }
 $cases += @{ Mode = "compare-meta"; CompareMeta = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile,profile,scan-pair-queued,profile-queued"; Text = "[12-meta-queued] PASS" }
+$cases += @{ Mode = "all"; All = $true; Exit = 0; CallsCount = 64; TimingCount = 27; Text = "[14-rng-philox] PASS" }
 $cases += @{ Mode = "curve-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
 $cases += @{ Mode = "checksum-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
 $cases += @{ Mode = "affine-pair-fail"; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,full,profile"; Text = "Paired scan skipped" }
@@ -98,20 +102,29 @@ try {
         if ($case.CompareSha) { $launcherArgs += "-CompareShaRing" }
         if ($case.CompareGroups) { $launcherArgs += "-CompareGroupSizes" }
         if ($case.CompareMeta) { $launcherArgs += "-CompareMetaRead" }
+        if ($case.All) { $launcherArgs += "-All" }
         $output = & powershell.exe @launcherArgs 2>&1
         if ($LASTEXITCODE -ne $case.Exit) { throw "$($case.Mode) exit mismatch: $LASTEXITCODE`n$($output -join "`n")" }
         $calls = (Get-Content -LiteralPath (Join-Path $dir "calls.txt")) -join ","
-        if ($calls -ne $case.Calls) { throw "$($case.Mode) stage mismatch: $calls" }
+        if ($case.CallsCount) {
+            if (@(Get-Content -LiteralPath (Join-Path $dir "calls.txt")).Count -ne $case.CallsCount) {
+                throw "$($case.Mode) stage count mismatch: $calls"
+            }
+        } elseif ($calls -ne $case.Calls) { throw "$($case.Mode) stage mismatch: $calls" }
         $reports = @(Get-ChildItem -LiteralPath $dir -Recurse -Filter summary.txt)
         if ($reports.Count -ne 1) { throw "$($case.Mode) missing summary" }
         $report = Get-Content -LiteralPath $reports[0].FullName -Raw
         foreach ($expected in @($case.Text, "OpenCL API: fixture BEGIN", "Send summary.txt")) {
             if (-not $report.Contains($expected)) { throw "$($case.Mode) missing '$expected'`n$report" }
         }
-        $expectedTimingLines = if ($case.CompareStages) { 8 } elseif ($case.CompareAffine -or $case.CompareCurve -or $case.CompareGroups) { 4 } elseif ($case.CompareSha -or $case.CompareMeta) { 3 } elseif ($case.Calls.Contains("profile")) { 1 } else { 0 }
+        $expectedTimingLines = if ($case.All) { $case.TimingCount } elseif ($case.CompareStages) { 8 } elseif ($case.CompareAffine -or $case.CompareCurve -or $case.CompareGroups) { 4 } elseif ($case.CompareSha -or $case.CompareMeta) { 3 } elseif ($case.Calls.Contains("profile")) { 1 } else { 0 }
         $timingLines = ([regex]::Matches($report, "host timing:")).Count
         if ($timingLines -ne $expectedTimingLines) { throw "$($case.Mode) host timing summary mismatch: $timingLines instead of $expectedTimingLines" }
         if ($case.Exit -ne 0 -and $report.Contains("Optional search command")) { throw "Failed test suggested a search" }
+        if ($case.All -and (-not $report.Contains("Fastest measured:") -or
+                            -not (Test-Path -LiteralPath (Join-Path $reports[0].DirectoryName "benchmark.csv")))) {
+            throw "Full benchmark did not rank or export profiles"
+        }
         if (Get-ChildItem -LiteralPath $dir -Recurse -Filter *.jsonl) { throw "Diagnostic wrote wallet output" }
         Write-Host "Launcher fixture PASS: $($case.Mode)"
     }

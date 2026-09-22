@@ -33,6 +33,40 @@ Copy it to `words.txt` and add your own Base58-compatible tokens. The matcher
 accepts words anywhere in the address, including the final characters; longer
 matches are especially rare and useful.
 
+## Windows: run in one click
+
+Download and extract the [latest Windows ZIP](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/releases).
+The ZIP contains `tron_vanity_generator.exe`, `tron-vanity.conf`,
+`words.txt` and `bench.cmd`. Replace `words.txt` with your own dictionary if
+needed. Double-click **`tron_vanity_generator.exe`**: it reads the adjacent
+config and searches on the RX 9070 XT until Ctrl+C. The bundled config uses
+the validated staged OpenCL settings (GPU only, paired inversion, affine
+batch 4, group 64); it does not enable unmeasured experiments. If the selected
+GPU is unavailable, it fails instead of silently running on CPU.
+
+From a terminal in the extracted folder, the short commands are:
+
+```text
+tron_vanity_generator.exe           search using tron-vanity.conf
+tron_vanity_generator.exe devices   list available hardware
+tron_vanity_generator.exe test      verify GPU addresses and private scalars
+bench.cmd                           bounded full configuration benchmark
+```
+
+`bench.cmd` writes `summary.txt` and `benchmark.csv` in a new
+`opencl-diagnostic-*` folder. It never creates wallet files. Search results,
+by contrast, contain **unencrypted private keys** in `results`; protect that
+folder, never upload it, and move funds only after independently verifying an
+address. `tron_vanity_generator.exe bench` also runs an in-process OpenCL
+tuning matrix and writes a no-wallet JSON report, but `bench.cmd` is preferred
+on Windows because every compiler attempt is separately time-bounded.
+
+See the measured [M4 Metal profile](docs/apple-m4-metal-hardware-profile.md),
+[RX 9070 XT OpenCL profile](docs/rx9070xt-opencl-research.md), and
+[engineering handoff](docs/next-agent-handoff.md). Vulkan is under
+investigation; this release does **not** claim a working Vulkan wallet
+backend.
+
 ## Build on Windows
 
 Install Visual Studio Build Tools with the C++ workload, CMake, Ninja and Git.
@@ -45,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 .\build\tron_vanity_generator.exe --list
 ```
 
-## Run hybrid mode
+## Advanced: run hybrid mode
 
 ```powershell
 .\build\tron_vanity_generator.exe `
@@ -58,17 +92,12 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 The console progress line shows elapsed percentage, CPU threads and keys/s,
 GPU keys/s, total throughput and match count. `--seconds 0` runs until Ctrl+C.
 
-Useful checks:
+The old fine-grained flags remain available for controlled experiments, but
+normal operation only needs the config and the short commands above. For a
+manual CPU+GPU session, use:
 
 ```powershell
-.\build\tron_vanity_generator.exe --gputest
-.\build\tron_vanity_generator.exe --hashtest
-.\build\tron_vanity_generator.exe --matchtest
-.\build\tron_vanity_generator.exe --backend cpu --threads 16 --seconds 60
-.\build\tron_vanity_generator.exe --backend opencl --seconds 60
-.\build\tron_vanity_generator.exe --backend opencl --gpu-batch 1048576 --seconds 60
-.\build\tron_vanity_generator.exe --backend opencl --gpu-resident --gpu-rng chacha12 --seconds 60
-.\build\tron_vanity_generator.exe --backend cuda --seconds 60
+.\build\tron_vanity_generator.exe --no-config --backend auto --words words.txt --seconds 60
 ```
 
 If OpenCL is unavailable, `--backend opencl` falls back to CPU. `auto` uses
@@ -90,8 +119,9 @@ libsecp256k1, uploads 64 bytes, and the GPU scans the consecutive range. This
 whole chunk; after that, the CPU receives only complete matches for independent
 secp256k1/address verification and local JSONL writing. Keeping the full
 256-bit fixed-base multiplication out of OpenCL reduces compiler load, but
-some Windows RDNA4 startup tests still time out before initialization completes. See the
-compact compiler mode and bounded diagnostic launcher below. OpenCL dispatch
+older Windows RDNA4 builds timed out during monolithic compilation. Current
+staged builds passed all isolated and combined self-tests on the user's
+gfx1201/driver 3665.0; see the RX research note. OpenCL dispatch
 size adapts toward the requested chunk time; this is not a hard WDDM timeout guarantee:
 
 ```powershell

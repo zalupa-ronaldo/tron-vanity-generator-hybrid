@@ -9,9 +9,18 @@ param(
     [switch]$CompareCurveBatches,
     [switch]$CompareShaRing,
     [switch]$CompareGroupSizes,
-    [switch]$CompareMetaRead
+    [switch]$CompareMetaRead,
+    [switch]$All
 )
 $ErrorActionPreference = "Stop"
+if ($All) {
+    $CompareStages = $true
+    $CompareAffineBatches = $true
+    $CompareCurveBatches = $true
+    $CompareShaRing = $true
+    $CompareGroupSizes = $true
+    $CompareMetaRead = $true
+}
 if ($CompareStages -and $Pipeline -ne "staged") { throw "-CompareStages requires -Pipeline staged." }
 if ($CompareAffineBatches -and $Pipeline -ne "staged") { throw "-CompareAffineBatches requires -Pipeline staged." }
 if ($CompareCurveBatches -and $Pipeline -ne "staged") { throw "-CompareCurveBatches requires -Pipeline staged." }
@@ -69,6 +78,7 @@ function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments, [bool]$Comp
         }
     }
     $status = if ($timedOut) { "TIMEOUT" } elseif ($process.ExitCode -eq 0) { "PASS" } else { "FAIL (exit $($process.ExitCode))" }
+    $speed = $null
     foreach ($capture in @(@{ Task = $stdoutTask; Path = $stdoutPath }, @{ Task = $stderrTask; Path = $stderrPath })) {
         if ($capture.Task.Wait(5000)) {
             Set-Content -LiteralPath $capture.Path -Value $capture.Task.Result -Encoding UTF8
@@ -82,6 +92,9 @@ function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments, [bool]$Comp
         if (Test-Path -LiteralPath $file) {
             $text = Get-Content -LiteralPath $file -Raw -Encoding UTF8
             if ($text) {
+                if ($text -match 'wall [0-9.]+ s, wall speed ([0-9.]+) M/s') {
+                    $speed = [double]::Parse($matches[1], [Globalization.CultureInfo]::InvariantCulture)
+                }
                 if ($CompactReport -and $status -eq "PASS") {
                     foreach ($line in ($text -split '\r?\n')) {
                         if ($line -match '^(gfx\d+:|wall |base preparation |host timing:|Driver-reported GPU|GPU stage time|  (curve|affine|keccak|checksum|base58|match) )') {
@@ -92,15 +105,42 @@ function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments, [bool]$Comp
             }
         }
     }
-    $results.Add([pscustomobject]@{ Test = $Name; Result = $status; Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1) })
+    $results.Add([pscustomobject]@{ Test = $Name; Result = $status; Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1);
+                                     MKeysPerSecond = $speed; Arguments = $TestArguments -join " " })
     Write-Report ("[" + $Name + "] " + $status)
     $process.Dispose()
     return $status -eq "PASS"
 }
 
 function Write-Summary {
-    Write-Report ($results | Format-Table -AutoSize | Out-String)
+    Write-Report ($results | Select-Object Test, Result, Seconds, MKeysPerSecond | Format-Table -AutoSize | Out-String)
+    $csv = Join-Path $logDir "benchmark.csv"
+    $results | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding UTF8
+    $ranked = @($results | Where-Object { $_.Result -eq "PASS" -and $null -ne $_.MKeysPerSecond } |
+                          Sort-Object -Property MKeysPerSecond -Descending)
+    if ($ranked.Count) {
+        Write-Report "Ranked wall throughput (same dictionary and five-second workload):"
+        Write-Report ($ranked | Select-Object Test, MKeysPerSecond | Format-Table -AutoSize | Out-String)
+        Write-Report ("Fastest measured: " + $ranked[0].Test + " (" + $ranked[0].MKeysPerSecond + " M/s)")
+    }
+    Write-Report "Machine-readable benchmark: $csv"
     Write-Report "Send summary.txt from: $logDir"
+}
+
+function Invoke-Variant([string]$Name, [string[]]$VariantArguments, [string[]]$BaseArguments,
+                        [string]$CheckStage = "scan") {
+    if (-not $BaseArguments) { $BaseArguments = $selectedArgs }
+    $variant = $BaseArguments + $VariantArguments
+    if ($All) {
+        # Do not profile a configuration that cannot reproduce CPU-verified
+        # GPU addresses/scalars. Each check is a separate bounded process.
+        if (-not (Invoke-BoundedTest ($Name + "-check") ($variant + @("--opencl-diagnose", $CheckStage)))) {
+            return $false
+        }
+    }
+    $profileArgs = $variant + @("--opencl-profile", "--words", "words.txt",
+                               "--gpu-buffer-mb", "8", "--bench-seconds", "5")
+    return Invoke-BoundedTest $Name $profileArgs $true
 }
 
 $common = @("--backend", "opencl", "--gpu-group-size", "64", "--opencl-compiler", $Compiler, "--opencl-pipeline", $Pipeline)
@@ -171,11 +211,8 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
         )
         foreach ($case in $stageCases) {
             if ($selected -ne "pair" -and $case.Name -eq "affine") { continue }
-            $profileArgs = $selectedArgs + @("--opencl-opt-mask", $case.Mask, "--opencl-profile",
-                                             "--words", "words.txt", "--gpu-buffer-mb", "8", "--bench-seconds", "5")
-            if (-not (Invoke-BoundedTest ("07-" + $case.Name) $profileArgs $true)) {
-                Write-Summary
-                exit 1
+            if (-not (Invoke-Variant ("07-" + $case.Name) @("--opencl-opt-mask", $case.Mask) $selectedArgs)) {
+                if (-not $All) { Write-Summary; exit 1 }
             }
         }
     }
@@ -184,33 +221,24 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
             Write-Report "Affine batch comparison skipped: paired inversion did not pass the scan self-test."
         } else {
             foreach ($batch in @(2, 4, 8)) {
-                $profileArgs = $selectedArgs + @("--opencl-affine-batch", "$batch", "--opencl-profile",
-                                                 "--words", "words.txt", "--gpu-buffer-mb", "8", "--bench-seconds", "5")
-                if (-not (Invoke-BoundedTest ("08-affine-$batch") $profileArgs $true)) {
-                    Write-Summary
-                    exit 1
+                if (-not (Invoke-Variant ("08-affine-$batch") @("--opencl-affine-batch", "$batch") $selectedArgs)) {
+                    if (-not $All) { Write-Summary; exit 1 }
                 }
             }
         }
     }
     if ($CompareCurveBatches) {
         foreach ($batch in @(2, 4, 8)) {
-            $profileArgs = $selectedArgs + @("--opencl-curve-batch", "$batch", "--opencl-profile",
-                                             "--words", "words.txt", "--gpu-buffer-mb", "8", "--bench-seconds", "5")
-            if (-not (Invoke-BoundedTest ("09-curve-$batch") $profileArgs $true)) {
-                Write-Summary
-                exit 1
+            if (-not (Invoke-Variant ("09-curve-$batch") @("--opencl-curve-batch", "$batch") $selectedArgs)) {
+                if (-not $All) { Write-Summary; exit 1 }
             }
         }
     }
     if ($CompareShaRing) {
         foreach ($case in @(@{ Name = "default"; Ring = $false }, @{ Name = "ring"; Ring = $true })) {
-            $profileArgs = $selectedArgs + @("--opencl-profile", "--words", "words.txt",
-                                             "--gpu-buffer-mb", "8", "--bench-seconds", "5")
-            if ($case.Ring) { $profileArgs += "--opencl-sha-ring" }
-            if (-not (Invoke-BoundedTest ("10-sha-" + $case.Name) $profileArgs $true)) {
-                Write-Summary
-                exit 1
+            $variant = if ($case.Ring) { @("--opencl-sha-ring") } else { @() }
+            if (-not (Invoke-Variant ("10-sha-" + $case.Name) $variant $selectedArgs)) {
+                if (-not $All) { Write-Summary; exit 1 }
             }
         }
     }
@@ -220,7 +248,7 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
             $groupIndex = [array]::IndexOf($groupArgs, "--gpu-group-size")
             if ($groupIndex -lt 0) { throw "Internal error: missing --gpu-group-size in diagnostic arguments." }
             $groupArgs[$groupIndex + 1] = "$size"
-            if ($size -ne 64) {
+            if ($size -ne 64 -and -not $All) {
                 # A changed local size must pass the full GPU/CPU address and
                 # private-scalar self-test before its throughput is profiled.
                 if (-not (Invoke-BoundedTest ("11-group-$size-scan") ($groupArgs + @("--opencl-diagnose", "scan")))) {
@@ -228,11 +256,8 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
                     exit 1
                 }
             }
-            $profileArgs = $groupArgs + @("--opencl-profile", "--words", "words.txt",
-                                          "--gpu-buffer-mb", "8", "--bench-seconds", "5")
-            if (-not (Invoke-BoundedTest ("11-group-$size-profile") $profileArgs $true)) {
-                Write-Summary
-                exit 1
+            if (-not (Invoke-Variant ("11-group-$size-profile") @() $groupArgs)) {
+                if (-not $All) { Write-Summary; exit 1 }
             }
         }
     }
@@ -240,20 +265,41 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
         $profileArgs = $selectedArgs + @("--opencl-profile", "--words", "words.txt",
                                          "--gpu-buffer-mb", "8", "--bench-seconds", "5")
         if (-not (Invoke-BoundedTest "12-meta-blocking" $profileArgs $true)) {
-            Write-Summary
-            exit 1
+            if (-not $All) { Write-Summary; exit 1 }
         }
         # The queued read must preserve GPU/CPU address and scalar agreement
         # before its throughput is compared. This never writes wallets.
         if (-not (Invoke-BoundedTest "12-meta-queued-scan" ($selectedArgs + @("--opencl-async-meta-read", "--opencl-diagnose", "scan")))) {
-            Write-Summary
-            exit 1
+            if (-not $All) { Write-Summary; exit 1 }
+        } elseif (-not (Invoke-BoundedTest "12-meta-queued" ($profileArgs + "--opencl-async-meta-read") $true)) {
+            if (-not $All) { Write-Summary; exit 1 }
         }
-        if (-not (Invoke-BoundedTest "12-meta-queued" ($profileArgs + "--opencl-async-meta-read") $true)) {
-            Write-Summary
-            exit 1
+    }
+    if ($All) {
+        # Combined candidates catch interactions that one-knob-at-a-time
+        # comparisons miss. The changed group and math are verified together.
+        $group128 = @($selectedArgs)
+        $groupIndex = [array]::IndexOf($group128, "--gpu-group-size")
+        $group128[$groupIndex + 1] = "128"
+        foreach ($variant in @(
+            @{ Name = "affine-2"; Args = @("--opencl-affine-batch", "2") },
+            @{ Name = "affine-8"; Args = @("--opencl-affine-batch", "8") },
+            @{ Name = "curve-4"; Args = @("--opencl-curve-batch", "4") },
+            @{ Name = "queued"; Args = @("--opencl-async-meta-read") }
+        )) {
+            if (-not (Invoke-Variant ("13-group-128-" + $variant.Name) $variant.Args $group128)) {
+                Write-Report ("Variant failed; continuing: " + $variant.Name)
+            }
         }
+        if ($fullOk) {
+            foreach ($rng in @("aes-ctr", "philox")) {
+                if (-not (Invoke-Variant ("14-rng-" + $rng) @("--gpu-rng", $rng) $selectedArgs "full")) {
+                    Write-Report ("RNG variant failed; continuing: " + $rng)
+                }
+            }
+        } else { Write-Report "GPU RNG variants skipped: combined GPU RNG self-test did not pass." }
     }
 } else { Write-Report "words.txt not found: profile skipped, self-tests did not need a dictionary." }
 Write-Report ("Self-test passed. Optional search command (NOT executed):`ntron_vanity_generator.exe " + (($selectedArgs + @("--gpu-resident", "--words", "words.txt", "--seconds", "60")) -join " "))
 Write-Summary
+if ($All -and @($results | Where-Object { $_.Result -ne "PASS" }).Count) { exit 1 }

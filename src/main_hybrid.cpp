@@ -4,6 +4,7 @@
 #include "metal_backend.h"
 #include "metal_hardware_profile.h"
 #include "resident_backend.h"
+#include "run_config.h"
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -12,6 +13,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -22,6 +24,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -53,6 +56,7 @@ struct Options {
     std::string backend = "auto";
     bool caseSensitive = false;
     bool verbose = false;
+    bool strictBackend = false;
     bool list = false;
     bool help = false;
     bool benchResidentOnly = false;
@@ -78,17 +82,22 @@ struct Options {
     uint32_t gpuGroupSize = 256;
     uint32_t metalKeysPerLane = 32;
     double benchSeconds = 1.0;
+    double tuneSeconds = 5.0;
 };
 
 void usage() {
     std::cout <<
         "TRON vanity generator - CPU + OpenCL + CUDA + Apple Metal\n"
+        "  (no arguments)   run with tron-vanity.conf next to the executable\n"
+        "  run|test|devices|bench  short commands; --config FILE overrides config\n"
+        "  --no-config      ignore the adjacent config file\n"
         "  --seconds N       run duration; 0 = until Ctrl+C\n"
         "  --threads N       CPU threads; default = logical cores\n"
         "  --words FILE      dictionary; default words.txt\n"
         "  --out DIR         output directory; default results\n"
         "  --output FILE     direct JSONL output override\n"
         "  --backend auto|cpu|opencl|cuda|metal\n"
+        "  --strict-backend fail if the selected GPU backend is unavailable\n"
         "  --gpu-batch N     GPU batch size (power of two, 1024..1048576)\n"
         "  --gpu-resident    GPU CSPRNG + device result ring mode\n"
         "  --gpu-rng NAME    chacha12, aes-ctr, or philox (resident mode)\n"
@@ -98,6 +107,7 @@ void usage() {
         "  --gpu-group-size N resident work-group size: 64, 128, or 256 (default 256)\n"
         "  --metal-keys-per-lane N Metal point-walk batch: power of two, 1..1024 (default 32)\n"
         "  --bench-seconds N seconds per benchmark method; --bench runs all available methods\n"
+        "  --tune-seconds N seconds per configuration in the full no-wallet benchmark\n"
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
@@ -141,6 +151,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--output") o.output = next(i, "--output");
             else if (a == "--max") o.maxAttempts = std::stoull(next(i, "--max"));
             else if (a == "--backend") o.backend = next(i, "--backend");
+            else if (a == "--strict-backend") o.strictBackend = true;
             else if (a == "--case-sensitive") o.caseSensitive = true;
             else if (a == "--verbose") o.verbose = true;
             else if (a == "--list") o.list = true;
@@ -154,6 +165,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--gpu-group-size") o.gpuGroupSize = std::stoul(next(i, "--gpu-group-size"));
             else if (a == "--metal-keys-per-lane") o.metalKeysPerLane = std::stoul(next(i, "--metal-keys-per-lane"));
             else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
+            else if (a == "--tune-seconds") o.tuneSeconds = std::stod(next(i, "--tune-seconds"));
             else if (a == "--bench-resident") o.benchResidentOnly = true;
             else if (a == "--opencl-profile") o.openclProfile = true;
             else if (a == "--opencl-diagnose") o.openclDiagnostic = next(i, "--opencl-diagnose");
@@ -204,8 +216,8 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--metal-hw-json") { o.metalHardwareJson = next(i, "--metal-hw-json"); o.metalHardwareProfile = true; }
             else if (a == "--ec-window") o.ecWindow = std::stoul(next(i, "--ec-window"));
             else if (a == "--mont-n") o.montN = std::stoul(next(i, "--mont-n"));
-            else if (a == "--backend") o.backend = next(i, "--backend");
-            else if (a == "--selftest" || a == "--hashtest" || a == "--matchtest" || a == "--gputest" || a == "--bench") {
+            else if (a == "--selftest" || a == "--hashtest" || a == "--matchtest" ||
+                     a == "--gputest" || a == "--bench" || a == "--tune") {
                 // handled by main's early command dispatch
             } else { std::cerr << "unknown option: " << a << "\n"; usage(); return false; }
         }
@@ -218,6 +230,9 @@ bool parse(int argc, char** argv, Options& o) {
     }
     if (!std::isfinite(o.benchSeconds) || o.benchSeconds <= 0) {
         std::cerr << "--bench-seconds must be finite and positive\n"; return false;
+    }
+    if (!std::isfinite(o.tuneSeconds) || o.tuneSeconds <= 0 || o.tuneSeconds > 60) {
+        std::cerr << "--tune-seconds must be within (0,60]\n"; return false;
     }
     if (o.openclOptions.hostSeed && o.backend != "opencl") {
         std::cerr << "--opencl-host-seed requires --backend opencl\n"; return false;
@@ -313,6 +328,152 @@ std::string benchRate(double keysPerSecond) {
     return s.str();
 }
 
+struct TuneRow {
+    std::string device, name, rng, error;
+    OpenclResidentOptions options;
+    uint32_t group = 0;
+    std::vector<double> samples;
+    std::array<double, 6> stageNs{};
+    double score = 0;
+};
+
+class ScopedTuneOutput {
+public:
+    ScopedTuneOutput() : stdout_(std::cout.rdbuf(captured_.rdbuf())),
+                         stderr_(std::cerr.rdbuf(captured_.rdbuf())) {}
+    ~ScopedTuneOutput() {
+        std::cout.rdbuf(stdout_);
+        std::cerr.rdbuf(stderr_);
+    }
+    ScopedTuneOutput(const ScopedTuneOutput&) = delete;
+    ScopedTuneOutput& operator=(const ScopedTuneOutput&) = delete;
+private:
+    std::ostringstream captured_;
+    std::streambuf* stdout_;
+    std::streambuf* stderr_;
+};
+
+int tuneOpencl(const HardwareReport& hw, std::shared_ptr<const Dictionary> dictionary,
+               const Options& opt, const std::filesystem::path& reportPath) {
+    if (hw.gpus.empty()) { std::cerr << "No OpenCL GPU: " << hw.openclNote << "\n"; return 1; }
+    std::vector<TuneRow> plan;
+    OpenclResidentOptions base = opt.openclOptions;
+    base.staged = true;
+    base.pairInverse = true;
+    base.profiling = true;
+    auto add = [&](const std::string& name, OpenclResidentOptions options, uint32_t group,
+                   const std::string& rng) {
+        TuneRow row;
+        row.name = name; row.options = options; row.group = group; row.rng = rng;
+        plan.push_back(std::move(row));
+    };
+    add("configured", base, opt.gpuGroupSize, opt.gpuRng);
+    auto v = base; v.stageOptMask = 0; add("pre-optimization math", v, opt.gpuGroupSize, opt.gpuRng);
+    v = base; v.pairInverse = false; add("single inversion", v, opt.gpuGroupSize, opt.gpuRng);
+    for (uint32_t n : {2u, 8u}) { v = base; v.affineBatch = n; add("affine batch " + std::to_string(n), v, opt.gpuGroupSize, opt.gpuRng); }
+    for (uint32_t n : {4u, 8u}) { v = base; v.curveBatch = n; add("curve batch " + std::to_string(n), v, opt.gpuGroupSize, opt.gpuRng); }
+    for (uint32_t n : {64u, 128u, 256u}) if (n != opt.gpuGroupSize)
+        add("group " + std::to_string(n), base, n, opt.gpuRng);
+    v = base; v.shaRing = !base.shaRing; add("SHA ring toggled", v, opt.gpuGroupSize, opt.gpuRng);
+    v = base; v.asyncMetaRead = !base.asyncMetaRead; add("metadata read toggled", v, opt.gpuGroupSize, opt.gpuRng);
+    for (uint32_t n : {2u, 8u}) {
+        v = base; v.affineBatch = n; add("group 128 + affine " + std::to_string(n), v, 128, opt.gpuRng);
+    }
+    v = base; v.curveBatch = 4; add("group 128 + curve 4", v, 128, opt.gpuRng);
+    v = base; v.asyncMetaRead = true; add("group 128 + queued read", v, 128, opt.gpuRng);
+    for (const auto& rng : {"aes-ctr", "philox"}) if (rng != opt.gpuRng)
+        add(std::string("RNG ") + rng, base, opt.gpuGroupSize, rng);
+
+    const unsigned repeats = opt.tuneSeconds < 0.5 ? 1 : 2;
+    std::cout << "OpenCL tuning: " << plan.size() << " configurations x " << repeats
+              << " timed samples; " << opt.tuneSeconds << " s/sample; no wallets or private keys\n"
+              << "Every configuration must pass GPU/CPU address and scalar verification first.\n";
+    std::vector<TuneRow> rows;
+    int succeeded = 0;
+    for (const auto& device : hw.gpus) {
+        for (auto row : plan) {
+            row.device = device.name;
+            std::cout << "\n[" << row.name << "] group " << row.group << ": self-test..." << std::flush;
+            auto checkOptions = row.options;
+            checkOptions.profiling = false;
+            int check = 1;
+            {
+                ScopedTuneOutput quiet;
+                check = openclResidentSelfTest(device, row.rng, checkOptions);
+            }
+            if (check) {
+                row.error = "GPU/CPU self-test failed";
+                std::cout << " FAIL\n";
+                rows.push_back(std::move(row));
+                continue;
+            }
+            bool valid = true;
+            for (unsigned rep = 0; rep < repeats; ++rep) {
+                OpenclProfileResult p;
+                {
+                    ScopedTuneOutput quiet;
+                    p = profileOpenclResident(device, dictionary, row.rng,
+                        opt.gpuBufferMiB, opt.gpuChunkMs, row.group, row.options, opt.tuneSeconds);
+                }
+                if (!p.error.empty() || !p.keys || p.wallSeconds <= 0) {
+                    row.error = p.error.empty() ? "empty profile" : p.error;
+                    valid = false;
+                    break;
+                }
+                row.samples.push_back(p.keys / p.wallSeconds / 1e6);
+                if (p.gpuTimingValid && p.keys)
+                    for (size_t i = 0; i < row.stageNs.size(); ++i)
+                        row.stageNs[i] += p.stageSeconds[i] * 1e9 / p.keys / repeats;
+            }
+            if (!valid) {
+                std::cout << " FAIL: " << row.error << "\n";
+                rows.push_back(std::move(row));
+                continue;
+            }
+            std::sort(row.samples.begin(), row.samples.end());
+            row.score = std::accumulate(row.samples.begin(), row.samples.end(), 0.0) / row.samples.size();
+            ++succeeded;
+            std::cout << " PASS, " << std::fixed << std::setprecision(3) << row.score << " M/s";
+            if (row.samples.size() > 1)
+                std::cout << " (range " << row.samples.front() << "-" << row.samples.back() << ")";
+            std::cout << "\n";
+            rows.push_back(std::move(row));
+        }
+    }
+    std::filesystem::create_directories(reportPath.parent_path());
+    std::ofstream out(reportPath, std::ios::binary);
+    if (!out) { std::cerr << "Cannot write benchmark report: " << reportPath << "\n"; return 1; }
+    out << "{\"schema\":1,\"workload\":\"full TRON Base58Check and dictionary\","
+           "\"dictionary_words\":" << dictionary->words.size()
+        << ",\"seconds_per_sample\":" << opt.tuneSeconds << ",\"repeats\":" << repeats
+        << ",\"rows\":[\n";
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const auto& row = rows[i];
+        if (i) out << ",\n";
+        out << "{\"device\":\"" << jsonEscape(row.device) << "\",\"name\":\""
+            << jsonEscape(row.name) << "\",\"rng\":\"" << jsonEscape(row.rng)
+            << "\",\"group\":" << row.group << ",\"pair_inverse\":"
+            << (row.options.pairInverse ? "true" : "false") << ",\"affine_batch\":"
+            << row.options.affineBatch << ",\"curve_batch\":" << row.options.curveBatch
+            << ",\"opt_mask\":" << row.options.stageOptMask << ",\"sha_ring\":"
+            << (row.options.shaRing ? "true" : "false") << ",\"async_meta_read\":"
+            << (row.options.asyncMetaRead ? "true" : "false") << ",\"passed\":"
+            << (row.error.empty() ? "true" : "false") << ",\"error\":\""
+            << jsonEscape(row.error) << "\",\"wall_mkeys_per_s\":" << row.score << ",\"samples\":[";
+        for (size_t j = 0; j < row.samples.size(); ++j) { if (j) out << ','; out << row.samples[j]; }
+        out << "],\"stage_ns_per_key\":[";
+        for (size_t j = 0; j < row.stageNs.size(); ++j) { if (j) out << ','; out << row.stageNs[j]; }
+        out << "]}";
+    }
+    out << "\n]}\n";
+    const TuneRow* best = nullptr;
+    for (const auto& row : rows) if (row.error.empty() && (!best || row.score > best->score)) best = &row;
+    std::cout << "\nReport: " << reportPath << "\n";
+    if (best) std::cout << "Best measured variant: " << best->name << ", " << best->score
+                        << " M/s. Keep the existing config until this is repeated on an idle GPU.\n";
+    return succeeded ? 0 : 1;
+}
+
 void printDevices(const HardwareReport& hw) {
     auto ci = detectCpu();
     std::cout << "CPU: " << ci.brand << " (" << std::thread::hardware_concurrency() << " threads)\n";
@@ -345,8 +506,45 @@ int main(int argc, char** argv) {
         if (a == "--hashtest") return hashtest();
         if (a == "--matchtest") return matchtest();
     }
+    std::vector<std::string> effective = {argv[0]};
+    std::filesystem::path configPath = executableDirectory(argv[0]) / "tron-vanity.conf";
+    bool explicitConfig = false, noConfig = false, showHelp = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--config") {
+            if (i + 1 >= argc) { std::cerr << "--config needs a file\n"; return 1; }
+            configPath = argv[++i];
+            explicitConfig = true;
+        } else if (a == "--no-config") noConfig = true;
+        else if (a == "--help" || a == "-h") showHelp = true;
+    }
+    if (explicitConfig && noConfig) { std::cerr << "--config and --no-config cannot be combined\n"; return 1; }
+    if (!noConfig && !showHelp && (explicitConfig || std::filesystem::exists(configPath))) {
+        std::string configError;
+        if (!loadRunConfig(configPath, effective, configError)) {
+            std::cerr << configError << "\n"; return 1;
+        }
+        std::cout << "Config: " << configPath.string() << "\n";
+    }
+    bool commandSeen = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--config") { ++i; continue; }
+        if (a == "--no-config") continue;
+        if (!commandSeen && (a == "run" || a == "test" || a == "devices" || a == "bench")) {
+            commandSeen = true;
+            if (a == "test") effective.push_back("--gputest");
+            else if (a == "devices") effective.push_back("--list");
+            else if (a == "bench") effective.push_back("--tune");
+            continue;
+        }
+        effective.push_back(a);
+    }
+    std::vector<char*> effectiveArgv;
+    effectiveArgv.reserve(effective.size());
+    for (auto& a : effective) effectiveArgv.push_back(a.data());
     Options opt;
-    if (!parse(argc, argv, opt)) return opt.help ? 0 : 1;
+    if (!parse(static_cast<int>(effectiveArgv.size()), effectiveArgv.data(), opt)) return opt.help ? 0 : 1;
     HardwareReport hw = detectHardware();
     if (opt.list) { printDevices(hw); return 0; }
     if (!opt.openclDiagnostic.empty()) {
@@ -361,8 +559,8 @@ int main(int argc, char** argv) {
     if (opt.metalHardwareProfile) {
         return runMetalHardwareProfile({opt.benchSeconds, opt.metalHardwareCase, opt.metalHardwareJson});
     }
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--gputest") {
+    for (size_t i = 1; i < effective.size(); ++i) {
+        if (effective[i] == "--gputest") {
             if (opt.backend == "cuda") {
                 if (hw.cudaGpus.empty()) { std::cerr << "CUDA unavailable: " << hw.cudaNote << "\n"; return 1; }
                 for (const auto& device : hw.cudaGpus) if (cudaSelfTest(device)) return 1;
@@ -381,6 +579,17 @@ int main(int argc, char** argv) {
     std::string error;
     auto dictionary = Dictionary::load(opt.words, opt.caseSensitive, &error);
     if (!dictionary) { std::cerr << error << "\n"; return 1; }
+    if (std::find(effective.begin(), effective.end(), "--tune") != effective.end()) {
+        if (opt.backend != "opencl" && opt.backend != "auto") {
+            std::cerr << "Full tuning matrix currently requires an OpenCL GPU; use --backend opencl\n";
+            return 1;
+        }
+        const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto report = executableDirectory(argv[0]) / "benchmarks" /
+            ("benchmark-" + std::to_string(stamp) + ".json");
+        return tuneOpencl(hw, dictionary, opt, report);
+    }
     if (opt.openclProfile) {
         if (opt.backend != "auto" && opt.backend != "opencl") {
             std::cerr << "--opencl-profile requires --backend opencl\n"; return 1;
@@ -469,8 +678,8 @@ int main(int argc, char** argv) {
         return 1;
 #endif
     }
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--bench" || std::string(argv[i]) == "--bench-resident") {
+    for (size_t i = 1; i < effective.size(); ++i) {
+        if (effective[i] == "--bench" || effective[i] == "--bench-resident") {
             const double seconds = opt.benchSeconds;
             const bool all = opt.backend == "auto";
             const bool wantCpu = !opt.benchResidentOnly && (all || opt.backend == "cpu");
@@ -607,13 +816,13 @@ int main(int argc, char** argv) {
                                                       opt.gpuBufferMiB, opt.gpuChunkMs, opt.gpuPollMs,
                                                       opt.gpuGroupSize, opt.openclOptions));
         }
-        if (hw.gpus.empty() && opt.backend == "opencl") {
+        if (hw.gpus.empty() && opt.backend == "opencl" && !opt.strictBackend) {
             std::cerr << "OpenCL unavailable; falling back to CPU\n";
             backends.push_back(makeCpuBackend());
         }
     } else if (!opt.gpuResident && ((opt.backend == "auto" && !autoMetal) || opt.backend == "opencl")) {
         for (const auto& g : hw.gpus) backends.push_back(makeGpuBackend(g, dictionary));
-        if (hw.gpus.empty() && opt.backend == "opencl") {
+        if (hw.gpus.empty() && opt.backend == "opencl" && !opt.strictBackend) {
             std::cerr << "OpenCL unavailable; falling back to CPU\n";
             backends.push_back(makeCpuBackend());
         }

@@ -74,8 +74,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path release | Out-Null
           Copy-Item build\tron_vanity_generator.exe release\
           Copy-Item words.example.txt release\words.txt
-          Copy-Item README.md,NOTICE,LICENSE release\
-          Copy-Item test-opencl.ps1,test-opencl.cmd release\
+          Copy-Item README.md,NOTICE,LICENSE,tron-vanity.conf release\
+          Copy-Item test-opencl.ps1,test-opencl.cmd,bench.cmd release\
           Compress-Archive -Path release\* -DestinationPath tron-vanity-generator-windows-x64.zip
 
       - name: Publish GitHub release

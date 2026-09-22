@@ -152,6 +152,9 @@ target_link_libraries(tron_vanity_generator PRIVATE Threads::Threads)
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(run_config_test tests/run_config_test.cpp src/run_config.cpp)
+  target_include_directories(run_config_test PRIVATE src)
+  add_test(NAME run_config COMMAND run_config_test)
   foreach(CUDA_TEST_RNG IN ITEMS 1 2 3)
     add_executable(cuda_kernel_test_${CUDA_TEST_RNG} tests/cuda_kernel_test.cpp
       src/crypto.cpp src/keccak.cpp)

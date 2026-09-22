@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "provenance": "User-provided bounded summary.txt excerpts, transcribed without wallet data",
+  "device": "AMD Radeon RX 9070 XT",
+  "architecture": "gfx1201",
+  "driver": "3665.0 (PAL,LC)",
+  "api": "OpenCL 2.0 AMD-APP; OpenCL C 2.0; kernel build CL1.2",
+  "dictionary_words": 358,
+  "seconds_per_profile": 5,
+  "pipeline": "staged",
+  "compiler": "compact",
+  "inverse": "pair",
+  "group_size": 64,
+  "curve_batch": 2,
+  "notes": "No power/clock trace or randomized order; these are wall rates, not isolated GPU-only rates. No private keys are included.",
+  "profiles": [
+    {
+      "name": "configured repeated profile",
+      "affine_batch": 4,
+      "wall_mkeys_per_s": 105.580,
+      "host_meta_read_seconds": 0.456,
+      "stage_ns_per_key": {"curve": 1.330, "affine": 3.383, "keccak": 0.819, "checksum": 0.718, "base58": 0.808, "match": 0.416}
+    },
+    {
+      "name": "affine batch 2",
+      "affine_batch": 2,
+      "wall_mkeys_per_s": 83.848,
+      "stage_ns_per_key": {"curve": 1.351, "affine": 5.729, "keccak": 0.843, "checksum": 0.716, "base58": 0.816, "match": 0.426}
+    },
+    {
+      "name": "affine batch 4",
+      "affine_batch": 4,
+      "wall_mkeys_per_s": 104.684,
+      "stage_ns_per_key": {"curve": 1.344, "affine": 3.405, "keccak": 0.823, "checksum": 0.722, "base58": 0.816, "match": 0.421}
+    },
+    {
+      "name": "affine batch 8",
+      "affine_batch": 8,
+      "wall_mkeys_per_s": 101.804,
+      "stage_ns_per_key": {"curve": 1.334, "affine": 3.696, "keccak": 0.814, "checksum": 0.722, "base58": 0.808, "match": 0.423}
+    }
+  ],
+  "correctness": "Smoke, isolated RNG, seven stage builds, both scan inverse variants and combined self-test passed before profiling."
+}

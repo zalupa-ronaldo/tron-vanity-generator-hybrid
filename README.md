@@ -326,6 +326,11 @@ Windows, use `test-opencl.cmd -CompareAffineBatches -TimeoutSeconds 120`.
 The launcher runs its normal self-tests first and only compares batches if
 paired inversion passes. Judge both wall M/s and affine ns/key; compilation
 time, register pressure, and the best batch can differ by GPU and driver.
+Newer profiles also print `host timing`: enqueue, finish wait, event query,
+metadata read, record handling, and metadata update. These are wall-time
+subdivisions, not GPU execution time, and help distinguish driver/transfer
+overhead from the six kernel timings. A loaded GPU can make the finish wait
+much larger than the sum of its own kernel event times.
 Use `test-opencl.cmd -CompareCurveBatches -TimeoutSeconds 120` for the same
 bounded comparison of curve batch sizes 2, 4, and 8. The two comparison
 switches can be combined, but test them one at a time when isolating effects.

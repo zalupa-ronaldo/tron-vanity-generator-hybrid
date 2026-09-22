@@ -665,14 +665,19 @@ private:
             }
         }
         if (!usesStages()) enqueued = program_.run1D(probeKernel_, workItems_, groupSize_, &error_);
-        if (!enqueued || !program_.finish()) {
+        const auto enqueueEnd = openclOptions_.profiling ? std::chrono::steady_clock::now() : scanStart;
+        const bool finished = enqueued && program_.finish();
+        const auto scanEnd = std::chrono::steady_clock::now();
+        if (!finished) {
             if (error_.empty()) error_ = "resident scan-kernel execution failed";
             return false;
         }
-        const auto scanEnd = std::chrono::steady_clock::now();
         const double scanMs = std::chrono::duration<double, std::milli>(scanEnd - scanStart).count();
         if constexpr (!isCuda) {
             if (openclOptions_.profiling) {
+                profile_.enqueueSeconds += std::chrono::duration<double>(enqueueEnd - scanStart).count();
+                profile_.waitSeconds += std::chrono::duration<double>(scanEnd - enqueueEnd).count();
+                const auto queryStart = std::chrono::steady_clock::now();
                 double gpuMs = 0;
                 std::vector<double> stageMs;
                 if (program_.lastKernelMilliseconds(gpuMs, usesStages() ? &stageMs : nullptr)) {
@@ -684,12 +689,16 @@ private:
                             profile_.stageSeconds[i] += stageMs[i] / 1000.0;
                     }
                 } else profile_.gpuTimingValid = false;
+                profile_.eventQuerySeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - queryStart).count();
                 profile_.baseSeconds += std::chrono::duration<double>(scanStart - baseStart).count();
                 profile_.scanSeconds += scanMs / 1000.0;
             }
         }
         std::array<uint32_t, kMetaWords> meta{};
+        const auto metaReadStart = openclOptions_.profiling ? std::chrono::steady_clock::now() : scanEnd;
         if (!program_.read(meta_, sizeof(meta), meta.data())) { error_ = "reading resident metadata failed"; return false; }
+        if constexpr (!isCuda) if (openclOptions_.profiling)
+            profile_.metaReadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - metaReadStart).count();
         const uint32_t writePos = meta[0];
         const uint32_t available = writePos - readPos_;
         const uint32_t count = std::min(available, ringSlots_);
@@ -699,6 +708,7 @@ private:
         }
         if (produced) *produced = count;
         if (overflow) *overflow = meta[2];
+        const auto recordsStart = openclOptions_.profiling ? std::chrono::steady_clock::now() : scanEnd;
         if (report && count) {
             std::vector<unsigned char> bytes(static_cast<size_t>(count) * kRecordBytes);
             uint32_t first = std::min(count, ringSlots_ - (readPos_ % ringSlots_));
@@ -716,10 +726,15 @@ private:
             }
             if (outputsChanged && !refreshActiveOutputs()) return false;
         }
+        if constexpr (!isCuda) if (openclOptions_.profiling)
+            profile_.recordsSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - recordsStart).count();
+        const auto metaWriteStart = openclOptions_.profiling ? std::chrono::steady_clock::now() : scanEnd;
         if (writePos != readPos_) {
             readPos_ = writePos;
             if (!program_.writeAt(meta_, sizeof(uint32_t), sizeof(uint32_t), &readPos_)) return false;
         }
+        if constexpr (!isCuda) if (openclOptions_.profiling)
+            profile_.metaWriteSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - metaWriteStart).count();
         sequenceBase_ += lastChunkKeys_;
         if (usesStages()) stagedOffsetBase_ += static_cast<uint32_t>(lastChunkKeys_);
         profile_.keys += lastChunkKeys_;

@@ -78,7 +78,7 @@ function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments, [bool]$Comp
             if ($text) {
                 if ($CompactReport -and $status -eq "PASS") {
                     foreach ($line in ($text -split '\r?\n')) {
-                        if ($line -match '^(gfx\d+:|wall |base preparation |Driver-reported GPU|GPU stage time|  (curve|affine|keccak|checksum|base58|match) )') {
+                        if ($line -match '^(gfx\d+:|wall |base preparation |host timing:|Driver-reported GPU|GPU stage time|  (curve|affine|keccak|checksum|base58|match) )') {
                             Write-Report $line
                         }
                     }

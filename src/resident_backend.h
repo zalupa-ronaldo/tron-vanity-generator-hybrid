@@ -23,6 +23,8 @@ struct OpenclResidentOptions {
 struct OpenclProfileResult {
     uint64_t keys = 0, dispatches = 0, basePairs = 0;
     double wallSeconds = 0, baseSeconds = 0, scanSeconds = 0, gpuSeconds = 0;
+    double enqueueSeconds = 0, waitSeconds = 0, eventQuerySeconds = 0;
+    double metaReadSeconds = 0, recordsSeconds = 0, metaWriteSeconds = 0;
     double maxGpuMs = 0;
     std::array<double, 6> stageSeconds{};
     bool gpuTimingValid = true;

@@ -27,6 +27,7 @@ public class Fixture {
             name += "-curve-" + Value(args, "--opencl-curve-batch");
         File.AppendAllText("calls.txt", name + Environment.NewLine);
         Console.WriteLine("fixture " + name);
+        if (stage == "profile") Console.WriteLine("host timing: enqueue 0.001 s, finish wait 0.002 s, event query 0.003 s, metadata read 0.004 s, records 0.000 s, metadata update 0.000 s");
         Console.Error.WriteLine("OpenCL API: fixture BEGIN");
         Console.Error.Flush();
         if (stage == "profile") {
@@ -92,6 +93,9 @@ try {
         foreach ($expected in @($case.Text, "OpenCL API: fixture BEGIN", "Send summary.txt")) {
             if (-not $report.Contains($expected)) { throw "$($case.Mode) missing '$expected'`n$report" }
         }
+        $expectedTimingLines = if ($case.CompareStages) { 8 } elseif ($case.CompareAffine -or $case.CompareCurve) { 4 } elseif ($case.Calls.Contains("profile")) { 1 } else { 0 }
+        $timingLines = ([regex]::Matches($report, "host timing:")).Count
+        if ($timingLines -ne $expectedTimingLines) { throw "$($case.Mode) host timing summary mismatch: $timingLines instead of $expectedTimingLines" }
         if ($case.Exit -ne 0 -and $report.Contains("Optional search command")) { throw "Failed test suggested a search" }
         if (Get-ChildItem -LiteralPath $dir -Recurse -Filter *.jsonl) { throw "Diagnostic wrote wallet output" }
         Write-Host "Launcher fixture PASS: $($case.Mode)"

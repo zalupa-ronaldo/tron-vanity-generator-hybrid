@@ -70,6 +70,11 @@ int main() {
         std::cerr << "OpenCL profiling queue did not return valid timestamps\n";
         return 1;
     }
+    if (profile.enqueueSeconds <= 0 || profile.waitSeconds <= 0 || profile.metaReadSeconds <= 0 ||
+        std::abs(profile.enqueueSeconds + profile.waitSeconds - profile.scanSeconds) > 1e-6) {
+        std::cerr << "OpenCL host profile timing breakdown is inconsistent\n";
+        return 1;
+    }
     auto hostProfile = profileOpenclResident(device, dictionary, "chacha12", 8, 8, 64,
                                              {true, true, true, true}, 0.05);
     if (!hostProfile.error.empty() || !hostProfile.keys || !hostProfile.dispatches ||

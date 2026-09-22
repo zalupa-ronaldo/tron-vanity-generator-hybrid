@@ -404,7 +404,10 @@ int main(int argc, char** argv) {
                       << p.basePairs << " new bases\n"
                       << "wall " << p.wallSeconds << " s, wall speed " << p.keys / p.wallSeconds / 1e6 << " M/s\n"
                       << "base preparation " << p.baseSeconds << " s, scan+wait " << p.scanSeconds
-                      << " s, remaining host/drain " << std::max(0.0, p.wallSeconds - p.baseSeconds - p.scanSeconds) << " s\n";
+                      << " s, remaining host/drain " << std::max(0.0, p.wallSeconds - p.baseSeconds - p.scanSeconds) << " s\n"
+                      << "host timing: enqueue " << p.enqueueSeconds << " s, finish wait " << p.waitSeconds
+                      << " s, event query " << p.eventQuerySeconds << " s, metadata read " << p.metaReadSeconds
+                      << " s, records " << p.recordsSeconds << " s, metadata update " << p.metaWriteSeconds << " s\n";
             if (p.gpuTimingValid && p.gpuSeconds > 0)
                 std::cout << "Driver-reported GPU scan " << p.gpuSeconds << " s, kernel-only speed " << p.keys / p.gpuSeconds / 1e6
                           << " M/s, max chunk GPU time " << p.maxGpuMs << " ms\n";

@@ -716,8 +716,10 @@ private:
             }
             if (outputsChanged && !refreshActiveOutputs()) return false;
         }
-        readPos_ = writePos;
-        if (!program_.writeAt(meta_, sizeof(uint32_t), sizeof(uint32_t), &readPos_)) return false;
+        if (writePos != readPos_) {
+            readPos_ = writePos;
+            if (!program_.writeAt(meta_, sizeof(uint32_t), sizeof(uint32_t), &readPos_)) return false;
+        }
         sequenceBase_ += lastChunkKeys_;
         if (usesStages()) stagedOffsetBase_ += static_cast<uint32_t>(lastChunkKeys_);
         profile_.keys += lastChunkKeys_;

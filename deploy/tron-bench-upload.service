@@ -8,6 +8,8 @@ User=tronbench
 Group=tronbench
 Environment=TRON_BENCH_ROOT=/srv/tron-benchmark-reports
 Environment=TRON_BENCH_TOKEN_FILE=/etc/tron-bench-upload/token
+Environment=TRON_BENCH_ADMIN_TOKEN_FILE=/etc/tron-bench-upload/admin-token
+Environment=TRON_BENCH_TOKEN_STATE_FILE=/srv/tron-benchmark-reports/.token-state.json
 Environment=TRON_BENCH_BIND=127.0.0.1
 Environment=TRON_BENCH_PORT=8768
 ExecStart=/opt/energy-service/venv/bin/uvicorn tron_bench_upload:app --app-dir /opt/tron-bench-upload --host 127.0.0.1 --port 8768 --workers 1
@@ -18,7 +20,7 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/srv/tron-benchmark-reports
-ReadOnlyPaths=/etc/tron-bench-upload/token /opt/tron-bench-upload/tron_bench_upload.py
+ReadOnlyPaths=/etc/tron-bench-upload/token /etc/tron-bench-upload/admin-token /opt/tron-bench-upload/tron_bench_upload.py
 
 [Install]
 WantedBy=multi-user.target

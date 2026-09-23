@@ -4,6 +4,12 @@ set -eu
 install -m 0644 /root/tron-nginx-fragment.conf /etc/nginx/snippets/tron-bench-upload.location.conf
 cp -a /etc/nginx/sites-available/loveyour.mom /etc/nginx/sites-available/loveyour.mom.bak-tron-bench
 
+install -d -m 0700 -o tronbench -g tronbench /etc/tron-bench-upload
+if [ ! -s /etc/tron-bench-upload/admin-token ]; then
+    umask 077
+    python3 -c 'import os, pathlib, pwd, secrets; p=pathlib.Path("/etc/tron-bench-upload/admin-token"); p.write_text(secrets.token_urlsafe(48)+"\n", encoding="utf-8"); os.chmod(p, 0o600); u=pwd.getpwnam("tronbench"); os.chown(p, u.pw_uid, u.pw_gid)'
+fi
+
 python3 - <<'PY'
 from pathlib import Path
 
@@ -24,7 +30,9 @@ PY
 
 nginx -t
 systemctl daemon-reload
-systemctl enable --now tron-bench-upload.service
+chmod 0644 /opt/tron-bench-upload/tron_bench_upload.py
+systemctl enable tron-bench-upload.service
+systemctl restart tron-bench-upload.service
 systemctl is-active tron-bench-upload.service
 curl --fail --silent http://127.0.0.1:8768/tron-bench-upload/health
 nginx -s reload

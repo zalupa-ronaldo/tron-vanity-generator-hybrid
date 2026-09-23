@@ -93,6 +93,10 @@ $env:TRON_BENCH_UPLOAD_URL = "https://turbobuff.beer/tron-bench-upload"
 ```
 
 The upload service rejects wallets, private keys, and all other filenames.
+If the upload token needs to be rotated, use the Mac helper
+`./tools/manage-benchmark-token.sh issue`; the admin secret is obtained from
+the saved `codex-server` SSH profile and the new upload token is returned only
+once. Revoke a token with `./tools/manage-benchmark-token.sh revoke <token_id>`.
 
 See the measured [M4 Metal profile](docs/apple-m4-metal-hardware-profile.md),
 [RX 9070 XT OpenCL profile](docs/rx9070xt-opencl-research.md), and

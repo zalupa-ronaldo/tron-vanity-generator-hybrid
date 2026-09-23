@@ -29,6 +29,8 @@ tron_vanity_matches*.txt
 .vs/
 .vscode/
 .idea/
+__pycache__/
+*.py[cod]
 
 # OS
 .DS_Store

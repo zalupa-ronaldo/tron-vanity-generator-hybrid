@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -83,8 +84,8 @@ static_assert(sizeof(PushConstants) == 36, "Vulkan push-constant ABI changed");
 
 class VulkanEngine {
 public:
-    explicit VulkanEngine(std::shared_ptr<const Dictionary> dictionary)
-        : dictionary_(std::move(dictionary)) {}
+    explicit VulkanEngine(std::shared_ptr<const Dictionary> dictionary, bool allowSoftware)
+        : dictionary_(std::move(dictionary)), allowSoftware_(allowSoftware) {}
     VulkanEngine(const VulkanEngine&) = delete;
     VulkanEngine& operator=(const VulkanEngine&) = delete;
     ~VulkanEngine() {
@@ -123,6 +124,7 @@ private:
     std::string readAddress(uint32_t gid) const;
 
     std::shared_ptr<const Dictionary> dictionary_;
+    bool allowSoftware_ = false;
     std::string deviceName_;
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
@@ -212,7 +214,8 @@ bool VulkanEngine::init(std::string& error) {
         vkGetPhysicalDeviceFeatures(candidate, &features);
         vkGetPhysicalDeviceProperties(candidate, &properties);
         const auto& limits = properties.limits;
-        if (!features.shaderInt64 || limits.maxComputeWorkGroupInvocations < kGroupSize ||
+        if ((!allowSoftware_ && properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) ||
+            !features.shaderInt64 || limits.maxComputeWorkGroupInvocations < kGroupSize ||
             limits.maxComputeWorkGroupSize[0] < kGroupSize ||
             limits.maxPerStageDescriptorStorageBuffers < kBindings ||
             limits.maxDescriptorSetStorageBuffers < kBindings ||
@@ -234,7 +237,10 @@ bool VulkanEngine::init(std::string& error) {
             break;
         }
     }
-    if (!physical_) { error = "no Vulkan compute device with shaderInt64 and 10 storage buffers"; return false; }
+    if (!physical_) {
+        error = "no hardware Vulkan compute device with shaderInt64 and 10 storage buffers";
+        return false;
+    }
     deviceName_ = selected.deviceName;
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -543,8 +549,8 @@ bool verifyScan(VulkanEngine& engine, secp256k1_context* context,
 
 class VulkanResidentBackend final : public Backend {
 public:
-    explicit VulkanResidentBackend(std::shared_ptr<const Dictionary> dictionary)
-        : dictionary_(std::move(dictionary)), engine_(dictionary_) {
+    explicit VulkanResidentBackend(std::shared_ptr<const Dictionary> dictionary, bool allowSoftware)
+        : dictionary_(std::move(dictionary)), engine_(dictionary_, allowSoftware) {
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     }
     ~VulkanResidentBackend() override {
@@ -681,7 +687,11 @@ private:
 
 std::unique_ptr<Backend> makeVulkanResidentBackend(
     std::shared_ptr<const Dictionary> dictionary) {
-    return std::make_unique<VulkanResidentBackend>(std::move(dictionary));
+    // Software Vulkan is for reproducible tests only; production selection
+    // must not silently replace the requested GPU with CPU llvmpipe.
+    const char* allow = std::getenv("TRON_VULKAN_ALLOW_SOFTWARE");
+    return std::make_unique<VulkanResidentBackend>(std::move(dictionary),
+                                                   allow && std::strcmp(allow, "1") == 0);
 }
 
 int vulkanResidentSelfTest() {
@@ -690,7 +700,7 @@ int vulkanResidentSelfTest() {
     if (!dictionary) { std::cerr << "Vulkan test dictionary: " << error << "\n"; return 1; }
     auto* context = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     if (!context) return 1;
-    VulkanEngine engine(dictionary);
+    VulkanEngine engine(dictionary, true);
     if (!engine.init(error)) {
         secp256k1_context_destroy(context);
         std::cerr << "Vulkan resident setup: " << error << "\n";
@@ -708,7 +718,7 @@ int vulkanResidentSelfTest() {
     }
     secp256k1_context_destroy(context);
     if (!passed) { std::cerr << "Vulkan resident test: " << error << "\n"; return 1; }
-    auto backend = makeVulkanResidentBackend(dictionary);
+    auto backend = std::make_unique<VulkanResidentBackend>(dictionary, true);
     if (!backend || !backend->available()) {
         std::cerr << "Vulkan production backend test: "
                   << (backend ? backend->note() : "not built") << "\n";

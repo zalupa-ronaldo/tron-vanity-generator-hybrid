@@ -100,7 +100,10 @@ tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --bench
 
 Use `--no-config` because the bundled default config intentionally selects
 OpenCL and includes OpenCL-only options. `--backend vulkan` never silently
-falls back to CPU. Do not compare the software-Vulkan CI rate with RX hardware.
+falls back to CPU: software Vulkan devices are rejected for normal runs.
+For a deliberate no-wallet software-driver benchmark in a development
+environment, set `TRON_VULKAN_ALLOW_SOFTWARE=1`. Do not compare that CI rate
+with RX hardware.
 
 ## Build on Windows
 

@@ -69,7 +69,9 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    window; every candidate scalar, address and full dictionary match is
    rechecked on CPU before output. Metadata overflow and driver timeouts stop
    the search. The `Backend` interface and explicit `--backend vulkan` CLI
-   are wired; no CPU fallback occurs. Mesa tests cover repeated dispatches,
+   are wired; no CPU fallback occurs. Software Vulkan is rejected in normal
+   runs and allowed only for tests or with an explicit developer environment
+   override. Mesa tests cover repeated dispatches,
    offset boundaries and a no-wallet call through the production backend.
    Driver-error injection, varied production batch sizes and long-running
    rollover tests remain to be added.

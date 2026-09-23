@@ -1,0 +1,63 @@
+#version 450
+
+// Mirrors Dictionary's flattened Aho-Corasick DFA. Match output is a
+// deterministic per-key scratch record, not yet the production result ring.
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 3) readonly buffer TextAddresses {
+    uint words[];
+} addresses;
+layout(std430, set = 0, binding = 4) readonly buffer Automaton {
+    uint words[];
+} automaton;
+layout(std430, set = 0, binding = 5) writeonly buffer MatchScratch {
+    uint words[];
+} results;
+layout(push_constant) uniform Params {
+    uint count;
+    uint dfaOffset;
+    uint outStartOffset;
+    uint outLenOffset;
+    uint outIdsOffset;
+} params;
+
+const uint ALPHABET[58] = uint[58](
+    49u,50u,51u,52u,53u,54u,55u,56u,57u,
+    65u,66u,67u,68u,69u,70u,71u,72u,74u,75u,76u,77u,78u,
+    80u,81u,82u,83u,84u,85u,86u,87u,88u,89u,90u,
+    97u,98u,99u,100u,101u,102u,103u,104u,105u,106u,107u,
+    109u,110u,111u,112u,113u,114u,115u,116u,117u,118u,119u,120u,121u,122u
+);
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.count) return;
+    uint state = 0u, count = 0u, flags = 0u;
+    uint ids[16];
+    for (int i = 0; i < 16; ++i) ids[i] = 0u;
+    // Ignore the initial address T, as Dictionary::matchIds does.
+    for (int pos = 1; pos < 34; ++pos) {
+        uint word = addresses.words[gid * 9u + uint(pos / 4)];
+        uint ch = (word >> (8 * (pos % 4))) & 255u;
+        uint index = 58u;
+        for (uint i = 0u; i < 58u; ++i)
+            if (ch == ALPHABET[i]) { index = i; break; }
+        if (index == 58u) { state = 0u; continue; }
+        state = automaton.words[params.dfaOffset + state * 58u + index];
+        uint start = automaton.words[params.outStartOffset + state];
+        uint length = automaton.words[params.outLenOffset + state];
+        for (uint j = 0u; j < length; ++j) {
+            uint id = automaton.words[params.outIdsOffset + start + j];
+            bool seen = false;
+            for (uint k = 0u; k < count; ++k)
+                if (ids[k] == id) { seen = true; break; }
+            if (!seen) {
+                if (count < 16u) ids[count++] = id;
+                else flags |= 1u;
+            }
+        }
+    }
+    uint base = gid * 18u;
+    results.words[base] = count;
+    results.words[base + 1u] = flags;
+    for (int i = 0; i < 16; ++i) results.words[base + 2u + uint(i)] = ids[i];
+}

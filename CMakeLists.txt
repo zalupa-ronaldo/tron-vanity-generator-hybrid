@@ -144,6 +144,8 @@ if(TRON_ENABLE_VULKAN)
   set(VULKAN_CHECKSUM_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_checksum_spv.h)
   set(VULKAN_BASE58_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_base58.spv)
   set(VULKAN_BASE58_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_base58_spv.h)
+  set(VULKAN_MATCH_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_match.spv)
+  set(VULKAN_MATCH_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_match_spv.h)
   add_custom_command(OUTPUT ${VULKAN_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
     COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
@@ -180,6 +182,15 @@ if(TRON_ENABLE_VULKAN)
     COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_BASE58_SPV} -DOUT=${VULKAN_BASE58_GEN}
             -DNAME=kVulkanBase58Spv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
     DEPENDS ${VULKAN_BASE58_SPV} cmake/embed_spirv.cmake VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_MATCH_SPV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
+    COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
+            ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/match.comp -o ${VULKAN_MATCH_SPV}
+    DEPENDS vulkan/match.comp VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_MATCH_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_MATCH_SPV} -DOUT=${VULKAN_MATCH_GEN}
+            -DNAME=kVulkanMatchSpv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    DEPENDS ${VULKAN_MATCH_SPV} cmake/embed_spirv.cmake VERBATIM)
   list(REMOVE_ITEM SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_probe_stub.cpp)
   list(APPEND SRC vulkan/vulkan_probe.cpp vulkan/vulkan_keccak.cpp)
 endif()
@@ -187,15 +198,17 @@ if(APPLE)
   list(APPEND SRC src/metal_backend.mm src/metal_hardware_profile.mm)
 endif()
 if(APPLE)
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN} ${VULKAN_MATCH_GEN})
 else()
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN} ${VULKAN_MATCH_GEN})
 endif()
 target_include_directories(tron_vanity_generator PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/gen)
 target_link_libraries(tron_vanity_generator PRIVATE secp256k1 ${CMAKE_DL_LIBS})
 if(TRON_ENABLE_VULKAN)
   target_link_libraries(tron_vanity_generator PRIVATE Vulkan::Vulkan)
   target_compile_definitions(tron_vanity_generator PRIVATE TRON_ENABLE_VULKAN=1)
+  target_compile_definitions(tron_vanity_generator PRIVATE
+    VULKAN_TEST_WORDS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/vulkan_words.txt")
 endif()
 if(TRON_ENABLE_CUDA)
   target_sources(tron_vanity_generator PRIVATE ${CUDA_GEN})

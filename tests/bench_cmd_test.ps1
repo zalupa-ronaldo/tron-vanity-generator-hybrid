@@ -29,6 +29,7 @@ exit /b 0
             $output = & cmd.exe /d /c bench.cmd 2>&1
             $exitCode = $LASTEXITCODE
             $calls = @(Get-Content -LiteralPath (Join-Path $dir "calls.txt"))
+            $outputText = $output -join "`n"
         } finally { Pop-Location }
         if ($exitCode -ne $case.Exit) {
             throw "$($case.Name) exit mismatch: $exitCode`n$($output -join "`n")"
@@ -37,7 +38,7 @@ exit /b 0
             $calls[1] -notmatch 'bench-vulkan\.ps1') {
             throw "$($case.Name) did not run both suites in order: $($calls -join '; ')"
         }
-        if ($output -notmatch 'Send the summary.txt and benchmark.csv from both report folders') {
+        if ($outputText -notmatch 'Send the summary.txt and benchmark.csv from both report folders') {
             throw "$($case.Name) did not explain which reports to share"
         }
     }

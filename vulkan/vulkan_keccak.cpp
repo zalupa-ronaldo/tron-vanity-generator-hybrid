@@ -28,24 +28,65 @@ constexpr size_t kPayloadWords = 6;
 constexpr size_t kFullWords = 7;
 constexpr size_t kAddressWords = 9;
 constexpr size_t kMatchWords = 18;
+constexpr size_t kOffsetWindows = 3;
+constexpr size_t kOffsetDigits = 256;
+constexpr uint32_t kWalkBaseScalar = 0x123456u;
 using PublicBatch = std::array<uint32_t, kItems * kPublicWords>;
 using PayloadBatch = std::array<uint32_t, kItems * kPayloadWords>;
 using FullBatch = std::array<uint32_t, kItems * kFullWords>;
 using AddressBatch = std::array<uint32_t, kItems * kAddressWords>;
 using MatchBatch = std::array<uint32_t, kItems * kMatchWords>;
+using OffsetTable = std::array<uint32_t, kOffsetWindows * kOffsetDigits * kPublicWords>;
+
+bool makeOffsetTable(OffsetTable& table, std::string& error) {
+    using SecpContext = std::unique_ptr<secp256k1_context, decltype(&secp256k1_context_destroy)>;
+    SecpContext ctx(secp256k1_context_create(SECP256K1_CONTEXT_NONE), secp256k1_context_destroy);
+    if (!ctx) { error = "secp256k1 context creation failed"; return false; }
+    for (size_t window = 0; window < kOffsetWindows; ++window) {
+        for (size_t digit = 1; digit < kOffsetDigits; ++digit) {
+            unsigned char scalar[32]{};
+            scalar[31 - window] = static_cast<unsigned char>(digit);
+            secp256k1_pubkey point;
+            if (!secp256k1_ec_pubkey_create(ctx.get(), &point, scalar)) {
+                error = "offset table point generation failed"; return false;
+            }
+            unsigned char serialized[65];
+            size_t length = sizeof(serialized);
+            if (!secp256k1_ec_pubkey_serialize(ctx.get(), serialized, &length, &point,
+                                               SECP256K1_EC_UNCOMPRESSED) || length != 65) {
+                error = "offset table point serialization failed"; return false;
+            }
+            const size_t base = (window * kOffsetDigits + digit) * kPublicWords;
+            for (size_t word = 0; word < kPublicWords; ++word) {
+                const size_t j = 1 + word * 4;
+                table[base + word] = uint32_t(serialized[j]) |
+                    (uint32_t(serialized[j + 1]) << 8) |
+                    (uint32_t(serialized[j + 2]) << 16) |
+                    (uint32_t(serialized[j + 3]) << 24);
+            }
+        }
+    }
+    return true;
+}
 
 // These are deterministic, unfunded *test* keys. Never use them as wallets.
 bool makeTestVectors(PublicBatch& basePubs, PublicBatch& pubs, PayloadBatch& payloads,
                      FullBatch& fulls, AddressBatch& addresses,
                      MatchBatch& matches, const Dictionary& dictionary,
+                     uint32_t curveMode, uint32_t offsetBase,
                      std::string& error) {
     using SecpContext = std::unique_ptr<secp256k1_context, decltype(&secp256k1_context_destroy)>;
     SecpContext ctx(secp256k1_context_create(SECP256K1_CONTEXT_NONE), secp256k1_context_destroy);
     if (!ctx) { error = "secp256k1 context creation failed"; return false; }
     for (uint32_t i = 0; i < kItems; ++i) {
         unsigned char scalar[32]{};
-        scalar[30] = static_cast<unsigned char>((i + 1) >> 8);
-        scalar[31] = static_cast<unsigned char>(i + 1);
+        auto setScalar = [&](uint32_t value) {
+            scalar[28] = static_cast<unsigned char>(value >> 24);
+            scalar[29] = static_cast<unsigned char>(value >> 16);
+            scalar[30] = static_cast<unsigned char>(value >> 8);
+            scalar[31] = static_cast<unsigned char>(value);
+        };
+        setScalar(curveMode == 0 ? i + 1 : kWalkBaseScalar);
         secp256k1_pubkey point;
         if (!secp256k1_ec_pubkey_create(ctx.get(), &point, scalar)) {
             error = "test public key generation failed"; return false;
@@ -56,8 +97,8 @@ bool makeTestVectors(PublicBatch& basePubs, PublicBatch& pubs, PayloadBatch& pay
                                            SECP256K1_EC_UNCOMPRESSED) || length != 65) {
             error = "test public key serialization failed"; return false;
         }
-        // The Vulkan curve stage computes (i+1)G + G. Address stages must
-        // therefore process (i+2)G, independently derived by libsecp256k1.
+        // Mode 0 checks P+G; mode 1 checks a single base plus three 8-bit
+        // offset-table windows, including carry boundaries.
         const unsigned char* xy = serialized + 1;
         for (size_t word = 0; word < kPublicWords; ++word) {
             const size_t j = word * 4;
@@ -65,8 +106,7 @@ bool makeTestVectors(PublicBatch& basePubs, PublicBatch& pubs, PayloadBatch& pay
                 (uint32_t(xy[j + 1]) << 8) | (uint32_t(xy[j + 2]) << 16) |
                 (uint32_t(xy[j + 3]) << 24);
         }
-        scalar[30] = static_cast<unsigned char>((i + 2) >> 8);
-        scalar[31] = static_cast<unsigned char>(i + 2);
+        setScalar(curveMode == 0 ? i + 2 : kWalkBaseScalar + offsetBase + i);
         if (!secp256k1_ec_pubkey_create(ctx.get(), &point, scalar)) {
             error = "next test public key generation failed"; return false;
         }
@@ -166,7 +206,8 @@ struct State {
     }
 };
 
-bool runKeccak(uint32_t activeItems, std::string& error) {
+bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
+               const OffsetTable& offsetTable, std::string& error) {
     if (!activeItems || activeItems > kItems) {
         error = "invalid Vulkan test batch size";
         return false;
@@ -180,7 +221,7 @@ bool runKeccak(uint32_t activeItems, std::string& error) {
     auto dictionary = Dictionary::load(VULKAN_TEST_WORDS_PATH, true, &error);
     if (!dictionary) return false;
     if (!makeTestVectors(basePubs, pubs, expectedPayload, expectedFull, expectedAddresses,
-                         expectedMatches, *dictionary, error)) return false;
+                         expectedMatches, *dictionary, curveMode, offsetBase, error)) return false;
     size_t overflows = 0, inRange = 0;
     for (uint32_t i = 0; i < activeItems; ++i) {
         if (expectedMatches[i * kMatchWords + 1]) ++overflows;
@@ -193,8 +234,11 @@ bool runKeccak(uint32_t activeItems, std::string& error) {
     std::vector<uint32_t> automaton;
     struct PushConstants {
         uint32_t count, dfaOffset, outStartOffset, outLenOffset, outIdsOffset;
+        uint32_t curveMode, offsetBase;
     } constants{};
     constants.count = activeItems;
+    constants.curveMode = curveMode;
+    constants.offsetBase = offsetBase;
     constants.dfaOffset = 0;
     automaton.insert(automaton.end(), dictionary->dfa.begin(), dictionary->dfa.end());
     constants.outStartOffset = static_cast<uint32_t>(automaton.size());
@@ -267,6 +311,7 @@ bool runKeccak(uint32_t activeItems, std::string& error) {
     constexpr VkDeviceSize fullBytes = sizeof(FullBatch);
     constexpr VkDeviceSize addressBytes = sizeof(AddressBatch);
     constexpr VkDeviceSize matchBytes = sizeof(MatchBatch);
+    constexpr VkDeviceSize tableBytes = sizeof(OffsetTable);
     const VkDeviceSize automatonBytes = automaton.size() * sizeof(uint32_t);
     const VkDeviceSize alignment = properties.limits.minStorageBufferOffsetAlignment;
     const VkDeviceSize outputOffset = (inBytes + alignment - 1) / alignment * alignment;
@@ -275,8 +320,9 @@ bool runKeccak(uint32_t activeItems, std::string& error) {
     const VkDeviceSize automatonOffset = (addressOffset + addressBytes + alignment - 1) / alignment * alignment;
     const VkDeviceSize matchOffset = (automatonOffset + automatonBytes + alignment - 1) / alignment * alignment;
     const VkDeviceSize baseOffset = (matchOffset + matchBytes + alignment - 1) / alignment * alignment;
+    const VkDeviceSize tableOffset = (baseOffset + inBytes + alignment - 1) / alignment * alignment;
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bufferInfo.size = baseOffset + inBytes;
+    bufferInfo.size = tableOffset + tableBytes;
     bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(state.device, &bufferInfo, nullptr, &state.buffer), "vkCreateBuffer")) return false;
@@ -315,21 +361,22 @@ bool runKeccak(uint32_t activeItems, std::string& error) {
                 automaton.data(), automatonBytes);
     std::memset(static_cast<unsigned char*>(mapped) + matchOffset, kCanary, matchBytes);
     std::memcpy(static_cast<unsigned char*>(mapped) + baseOffset, basePubs.data(), inBytes);
+    std::memcpy(static_cast<unsigned char*>(mapped) + tableOffset, offsetTable.data(), tableBytes);
     vkUnmapMemory(state.device, state.memory);
 
-    VkDescriptorSetLayoutBinding bindings[7]{};
-    for (uint32_t i = 0; i < 7; ++i) {
+    VkDescriptorSetLayoutBinding bindings[8]{};
+    for (uint32_t i = 0; i < 8; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = 7;
+    layoutInfo.bindingCount = 8;
     layoutInfo.pBindings = bindings;
     if (!check(vkCreateDescriptorSetLayout(state.device, &layoutInfo, nullptr, &state.descriptorLayout),
                "vkCreateDescriptorSetLayout")) return false;
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7};
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = 1;
     poolInfo.poolSizeCount = 1;
@@ -342,14 +389,14 @@ bool runKeccak(uint32_t activeItems, std::string& error) {
     setInfo.pSetLayouts = &state.descriptorLayout;
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (!check(vkAllocateDescriptorSets(state.device, &setInfo, &set), "vkAllocateDescriptorSets")) return false;
-    VkDescriptorBufferInfo ranges[7] = {
+    VkDescriptorBufferInfo ranges[8] = {
         {state.buffer, 0, inBytes}, {state.buffer, outputOffset, outBytes},
         {state.buffer, fullOffset, fullBytes}, {state.buffer, addressOffset, addressBytes},
         {state.buffer, automatonOffset, automatonBytes}, {state.buffer, matchOffset, matchBytes},
-        {state.buffer, baseOffset, inBytes}
+        {state.buffer, baseOffset, inBytes}, {state.buffer, tableOffset, tableBytes}
     };
-    VkWriteDescriptorSet writes[7]{};
-    for (uint32_t i = 0; i < 7; ++i) {
+    VkWriteDescriptorSet writes[8]{};
+    for (uint32_t i = 0; i < 8; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
         writes[i].dstBinding = i;
@@ -357,7 +404,7 @@ bool runKeccak(uint32_t activeItems, std::string& error) {
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[i].pBufferInfo = &ranges[i];
     }
-    vkUpdateDescriptorSets(state.device, 7, writes, 0, nullptr);
+    vkUpdateDescriptorSets(state.device, 8, writes, 0, nullptr);
 
     VkShaderModuleCreateInfo shaderInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     shaderInfo.codeSize = sizeof(kVulkanKeccakSpv);
@@ -490,14 +537,28 @@ bool runKeccak(uint32_t activeItems, std::string& error) {
 
 int vulkanKeccakSelfTest() {
     std::string error;
+    OffsetTable offsetTable{};
+    if (!makeOffsetTable(offsetTable, error)) {
+        std::cerr << "Vulkan offset table test setup failed: " << error << "\n";
+        return 1;
+    }
     for (uint32_t count : {1u, 63u, 64u, 65u, kItems}) {
-        if (!runKeccak(count, error)) {
-            std::cerr << "Vulkan address pipeline test failed at count " << count
+        if (!runKeccak(count, 0u, 0u, offsetTable, error)) {
+            std::cerr << "Vulkan P+G pipeline test failed at count " << count
                       << ": " << error << "\n";
             return error == "no Vulkan compute device with shaderInt64" ? 77 : 1;
         }
     }
-    std::cout << "Vulkan curve + address + dictionary stages PASS "
-                 "(1/63/64/65/257 full TRON addresses; no wallets)\n";
+    struct WalkCase { uint32_t count, offsetBase; };
+    for (const WalkCase test : {WalkCase{1u, 0u}, WalkCase{65u, 255u},
+                                WalkCase{65u, 65535u}, WalkCase{65u, (1u << 22) - 65u}}) {
+        if (!runKeccak(test.count, 1u, test.offsetBase, offsetTable, error)) {
+            std::cerr << "Vulkan offset-walk pipeline test failed at count " << test.count
+                      << ", offset " << test.offsetBase << ": " << error << "\n";
+            return error == "no Vulkan compute device with shaderInt64" ? 77 : 1;
+        }
+    }
+    std::cout << "Vulkan curve walk + address + dictionary stages PASS "
+                 "(P+G and 24-bit offset boundaries; no wallets)\n";
     return 0;
 }

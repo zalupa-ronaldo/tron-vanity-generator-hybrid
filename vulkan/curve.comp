@@ -8,7 +8,16 @@
 layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 6) readonly buffer InputPoints { uint words[]; } inputs;
 layout(std430, set = 0, binding = 0) writeonly buffer PublicKeys { uint words[]; } publics;
-layout(push_constant) uniform Params { uint count; } params;
+layout(std430, set = 0, binding = 7) readonly buffer OffsetTable { uint words[]; } table;
+layout(push_constant) uniform Params {
+    uint count;
+    uint dfaOffset;
+    uint outStartOffset;
+    uint outLenOffset;
+    uint outIdsOffset;
+    uint curveMode;
+    uint offsetBase;
+} params;
 
 struct Fe { uint n[10]; };
 struct Ge { Fe x, y; bool inf; };
@@ -156,13 +165,15 @@ Fe feInv(Fe a) {
     return feMul(feSqrN(t, 2), a);
 }
 
-uint inputByte(uint index, uint byteIndex) {
-    uint word = inputs.words[index * 16u + byteIndex / 4u];
+uint sourceByte(uint index, uint byteIndex, bool fromTable) {
+    uint address = index * 16u + byteIndex / 4u;
+    uint word = fromTable ? table.words[address] : inputs.words[address];
     return (word >> (8u * (byteIndex & 3u))) & 255u;
 }
-Fe feFromBytes(uint index, uint start) {
+Fe feFromBytes(uint index, uint start, bool fromTable) {
     uint a[32];
-    for (uint i = 0u; i < 32u; ++i) a[i] = inputByte(index, start + i);
+    for (uint i = 0u; i < 32u; ++i)
+        a[i] = sourceByte(index, start + i, fromTable);
     Fe r;
     r.n[0] = a[31] | (a[30] << 8) | (a[29] << 16) | ((a[28] & 3u) << 24);
     r.n[1] = ((a[28] >> 2) & 63u) | (a[27] << 6) | (a[26] << 14) | ((a[25] & 15u) << 22);
@@ -231,16 +242,32 @@ Gej gejAddGe(Gej a, Ge b) {
 void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (gid >= params.count) return;
-    Ge generator;
-    generator.x = feFromBytes(0u, 0u);
-    generator.y = feFromBytes(0u, 32u);
-    generator.inf = false;
     Gej point;
-    point.x = feFromBytes(gid, 0u);
-    point.y = feFromBytes(gid, 32u);
+    uint baseIndex = params.curveMode == 0u ? gid : 0u;
+    point.x = feFromBytes(baseIndex, 0u, false);
+    point.y = feFromBytes(baseIndex, 32u, false);
     point.z = feInt(1u);
     point.inf = false;
-    point = gejAddGe(point, generator);
+    if (params.curveMode == 0u) {
+        Ge generator;
+        generator.x = feFromBytes(0u, 0u, false);
+        generator.y = feFromBytes(0u, 32u, false);
+        generator.inf = false;
+        point = gejAddGe(point, generator);
+    } else {
+        uint offset = params.offsetBase + gid;
+        for (uint w = 0u; w < 3u; ++w) {
+            uint digit = (offset >> (w * 8u)) & 255u;
+            if (digit != 0u) {
+                uint tableIndex = w * 256u + digit;
+                Ge add;
+                add.x = feFromBytes(tableIndex, 0u, true);
+                add.y = feFromBytes(tableIndex, 32u, true);
+                add.inf = false;
+                point = gejAddGe(point, add);
+            }
+        }
+    }
     Fe zi = feInv(point.z);
     Fe zi2 = feSqr(zi);
     Fe x = feNormalize(feMul(point.x, zi2));

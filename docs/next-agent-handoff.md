@@ -77,7 +77,9 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    reusable bounded dispatch, CSPRNG base rollover, ring drain and CPU
    verification of candidate private keys. `--backend vulkan` is explicit and
    fails closed; `test-vulkan` also exercises the production backend without
-   writing wallets. The default curve inverts each key separately; optional
+   writing wallets, including a full 32,768-slot ring and CSPRNG base
+   rollover. The embedded 58-word Base58 alphabet guarantees one match per
+   address in that test. The default curve inverts each key separately; optional
    `--vulkan-curve-batch 4` is a separately compiled four-key Montgomery
    inversion variant. Mesa CPU/GPU equivalence and short software-driver
    A/B/A profiles pass, but no RX speed claim is justified. Matched RX/OpenCL

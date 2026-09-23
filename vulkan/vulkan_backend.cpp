@@ -750,6 +750,41 @@ public:
                 std::cerr << "Vulkan verification stopped: " << error_ << "\n";
         }
     }
+    bool selfTestRollover() {
+        if (!ensureReady()) return false;
+        // Force one full dispatch to finish precisely at the end of the
+        // 22-bit offset window. The next one-key dispatch must choose a fresh
+        // CSPRNG base; production run() verifies every ring candidate.
+        base_.bytes.fill(0);
+        base_.bytes[31] = 1;
+        if (!publicXY(context_, base_.data(), basePub_.data())) {
+            error_ = "Vulkan rollover test base point failed";
+            return false;
+        }
+        baseReady_ = true;
+        offsetBase_ = kBaseWindowKeys - kBatchKeys;
+        RunConfig config;
+        config.dictionary = dictionary_;
+        config.maxAttempts = kBatchKeys + 1;
+        config.seconds = 0;
+        RunState state;
+        bool validReports = true;
+        run(config, state, [&](const FoundKey& key) {
+            validReports &= key.address.size() == 34 && key.privHex.size() == 64 &&
+                            !key.words.empty();
+        });
+        if (!validReports || !error_.empty() || state.stop.load() ||
+            state.checked.load() != kBatchKeys + 1 ||
+            state.gpuChecked.load() != kBatchKeys + 1 ||
+            state.found.load() != kBatchKeys + 1 ||
+            offsetBase_ != 1 ||
+            (std::all_of(base_.bytes.begin(), base_.bytes.end() - 1,
+                         [](unsigned char byte) { return byte == 0; }) && base_.bytes[31] == 1)) {
+            if (error_.empty()) error_ = "Vulkan base rollover or bounded production run failed";
+            return false;
+        }
+        return true;
+    }
 private:
     bool ensureReady() {
         if (tried_) return ready_;
@@ -823,7 +858,7 @@ VulkanProfileResult profileVulkanResident(std::shared_ptr<const Dictionary> dict
 
 int vulkanResidentSelfTest() {
     std::string error;
-    auto dictionary = vulkanTestDictionary();
+    auto dictionary = vulkanFullAlphabetTestDictionary();
     if (!dictionary) { std::cerr << "Vulkan test dictionary: " << error << "\n"; return 1; }
     auto* context = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     if (!context) return 1;
@@ -879,9 +914,14 @@ int vulkanResidentSelfTest() {
         });
         if (!validReports || !backend->note().empty() ||
             state.checked.load() != 65 || state.gpuChecked.load() != 65 ||
-            state.found.load() == 0) {
+            state.found.load() != 65) {
             std::cerr << "Vulkan production backend batch " << batch
                       << " bounded no-wallet run failed: " << backend->note() << "\n";
+            return 1;
+        }
+        if (!backend->selfTestRollover()) {
+            std::cerr << "Vulkan production backend batch " << batch
+                      << " rollover failed: " << backend->note() << "\n";
             return 1;
         }
     }

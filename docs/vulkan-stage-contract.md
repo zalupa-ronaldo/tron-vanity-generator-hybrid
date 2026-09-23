@@ -53,12 +53,19 @@ a slot in metadata binding 8 and writes a 20-word record at binding 9 (key
 index, count, flags, reserved, 16 IDs). Tests use capacity 8 plus two canary
 guard slots, compare concurrent records without assuming write order, cover
 exact-capacity and over-capacity cases, and check both overflow flags. The
-host constructs the 30 embedded one-letter test words through the production
+host constructs the 30 embedded one-letter stage-test words through the production
 Dictionary builder (the same list is in `tests/vulkan_words.txt`)
 and compares records with `Dictionary::matchIds()`. This is still a *test*
 ring: no scalar/address is emitted to user output. Capacity overflow is
 fail-closed; a truncated ID list can be recovered only if the production host
 recomputes every match from the full CPU dictionary.
+The production-backend self-test instead uses the full 58-character Base58
+alphabet and starts one full 32,768-key dispatch at the
+end of the 22-bit offset window, then forces a one-key dispatch after base
+rollover. With every Base58 character in the test dictionary, every address
+must produce exactly one ring record. The host validates all 32,769 reported
+keys and addresses through the normal production callback without saving
+wallets, checks that the base changed, and checks the new offset is one.
 
 This is deliberately a simple 32-bit buffer ABI. Before performance work,
 benchmark the unpack/pack cost and consider an aligned packed layout that

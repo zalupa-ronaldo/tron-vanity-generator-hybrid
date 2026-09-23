@@ -65,17 +65,20 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    publish working secret buffers.
 4. Vulkan: `vulkan/probe.comp`, `vulkan/vulkan_probe.cpp` and
    `src/vulkan_probe.h` implement a deterministic native compute dispatch.
-   `vulkan/keccak.comp`, `vulkan/checksum.comp`, `vulkan/base58.comp`,
-   `vulkan/match.comp` and `vulkan/vulkan_keccak.cpp` chain four native
-   stages and compare intermediate bytes, Base58Check text, dictionary IDs
-   and overflow flags with CPU vectors. They
+   `vulkan/curve.comp`, `vulkan/keccak.comp`, `vulkan/checksum.comp`,
+   `vulkan/base58.comp`, `vulkan/match.comp` and `vulkan/vulkan_keccak.cpp`
+   chain a native 10x26 secp256k1 offset walk, full-address encoding and a
+   bounded atomic match ring. The test compares every stage and ring record
+   with CPU/libsecp256k1, including offset-window and capacity boundaries. They
    are built only with `-DTRON_ENABLE_VULKAN=ON`. Linux CI uses Mesa's
    software Vulkan driver; Windows SDK CI compiles the optional stages but
    has no RX 9070 XT to execute them. The Windows release uses the stub;
    the separate CI artifact is only for stage testing. A production
-   integration still needs the curve, result ring and bounded
-   dispatch, along with GPU/CPU verification of each stage and overflow
-   behavior. It also needs a reusable descriptor and scratch layout;
+   integration still needs reusable bounded dispatch, batched affine
+   inversion, CSPRNG base rollover, ring drain and CPU verification of
+   candidate private keys. The current curve inverts each key separately,
+   and the one-shot test recreates every Vulkan object per case. It also needs
+   a reusable descriptor and scratch layout;
    OpenCL running on `clvk` would be a compatibility
    experiment, not evidence of a native Vulkan backend. Khronos's
    [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)

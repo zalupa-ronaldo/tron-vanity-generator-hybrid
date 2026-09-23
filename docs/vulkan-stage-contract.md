@@ -1,26 +1,33 @@
 # Native Vulkan pipeline: stage contract and verification gates
 
 The native Vulkan wallet backend is **not yet complete**. Source builds with
-`-DTRON_ENABLE_VULKAN=ON` have a generic dispatch probe and a first useful
-SPIR-V Keccak-256 stage from a secp256k1 public key to a 21-byte TRON
-payload, plus SHA-256d from that payload to a checksum-bearing 25-byte
-binary address, then Base58Check to full 34-character TRON address text, then
-matching against the flattened dictionary DFA.
+`-DTRON_ENABLE_VULKAN=ON` have a generic dispatch probe, a native secp256k1
+10x26 field-math point stage, Keccak-256, SHA-256d, Base58Check and flattened
+dictionary matching. The curve stage can compute `P + G` or walk from one
+base point through three 8-bit offset-table windows; it currently inverts
+each result individually, not with the faster OpenCL batch inversion.
 Neither test is a wallet search or a throughput benchmark. The
 Windows release remains OpenCL/CUDA only.
 
 ## Verified interface to preserve
 
+`vulkan/curve.comp` reads 16 little-endian words per affine base point at
+binding 6 and a `3 × 256 × 16`-word table at binding 7. Mode 1 computes
+`P0 + offset·G`, where the offset is a push-constant base plus the invocation
+ID, and writes 16 words per public key at binding 0. Mode 0 tests `P + G`,
+including doubling at `P = G`. The host derives every expected point
+independently with `libsecp256k1`; tested offsets cross 255/256, 65535/65536
+and end at `2^22 - 1`. A compute barrier separates curve from Keccak.
+
 `vulkan/keccak.comp` takes 16 little-endian `uint32_t` words per 64-byte
 uncompressed public key (`X||Y`, no `0x04` prefix) at storage binding 0. It
 outputs six little-endian words at binding 1: byte `0x41`, the last 20 bytes
-of Keccak-256, and three zero padding bytes. A four-byte push constant is the
-key count. The test uses up to 257 deterministic, unfunded secp256k1 test
-scalars. It dispatches counts 1, 63, 64, 65 and 257, comparing every active
+of Keccak-256, and three zero padding bytes. The first push-constant word is
+the key count. The test uses up to 257 deterministic, test-only secp256k1
+scalars. It dispatches counts 1, 8, 63, 64, 65 and 257, comparing every active
 output word with CPU references and checking that inactive workgroup lanes
 leave canary-filled output records untouched. `vulkan/checksum.comp` then
-reads binding 1 and writes
-seven little-endian words at binding 2: the 25-byte address plus three zero
+reads binding 1 and writes seven little-endian words at binding 2: the 25-byte address plus three zero
 padding bytes. A compute-to-compute barrier separates the two dispatches;
 both intermediate and final buffers are checked. The test never prints or
 saves a scalar.
@@ -28,13 +35,18 @@ saves a scalar.
 binding 3 (34 ASCII characters and two zero padding bytes). The test compares
 this final text with `tronAddressFromPubXY()` on every vector. It uses the
 same two-digit (base 58²) long division as the OpenCL resident kernel.
-`vulkan/match.comp` reads the text at binding 3, a packed DFA and output
-tables at binding 4, and writes one 18-word scratch record per address at
-binding 5: retained count, overflow flag, then 16 distinct word IDs. The
-test loads `tests/vulkan_words.txt` through the production Dictionary parser
-and compares all records with `Dictionary::matchIds()`. Its fixed vectors
-must include both in-range and overflow cases; overflow is a fail-closed
-signal, not permission to silently drop extra matches.
+`vulkan/match.comp` reads text at binding 3 and packed DFA/output tables at
+binding 4. In test mode it writes one 18-word record per address at binding 5
+(count, overflow, 16 distinct word IDs). In ring mode it atomically reserves
+a slot in metadata binding 8 and writes a 20-word record at binding 9 (key
+index, count, flags, reserved, 16 IDs). Tests use capacity 8 plus two canary
+guard slots, compare concurrent records without assuming write order, cover
+exact-capacity and over-capacity cases, and check both overflow flags. The
+host loads `tests/vulkan_words.txt` through the production Dictionary parser
+and compares records with `Dictionary::matchIds()`. This is still a *test*
+ring: no scalar/address is emitted to user output. Capacity overflow is
+fail-closed; a truncated ID list can be recovered only if the production host
+recomputes every match from the full CPU dictionary.
 
 This is deliberately a simple 32-bit buffer ABI. Before performance work,
 benchmark the unpack/pack cost and consider an aligned packed layout that
@@ -44,18 +56,21 @@ CPU/GPU vectors covering each input/output word and the final partial word.
 
 ## Remaining gates to a selectable `--backend vulkan`
 
-1. Port the OpenCL staged curve and affine math with the same 128-byte point
-   wire layout or a documented replacement. Compare every scalar/public key
-   with CPU `libsecp256k1`, including the random-base window rollover.
-2. Integrate the verified address stages into a reusable bounded Vulkan
+1. Move the verified single-point curve math to a staged point/affine layout
+   with batched inversion. Compare every scalar/public key with CPU
+   `libsecp256k1`, including random-base rollover; measure actual full-wall
+   speed before selecting a batch size. The current `P0 + offset·G` shader is
+   correct on Mesa but not yet a competitive resident pipeline.
+2. Integrate the verified stages into a reusable bounded Vulkan
    dispatch path rather than the current one-shot test harness. Preserve the
    `T` prefix and final checksum; a payload-only or prefix-only rate is not
    comparable. Add varying batch sizes, boundary counts and driver-error
    tests before permitting production output.
-3. Add a bounded result ring for actual findings, scalar/address records and
-   CPU validation. Test wraparound, concurrent writes and overflow. Overflow
-   must stop the search, never silently discard found keys. The current
-   matcher only writes a deterministic per-key scratch record for testing.
+3. Promote the tested atomic candidate ring into actual findings: reset/drain
+   it between batches, reconstruct scalars from a CSPRNG base and offset,
+   verify every address and full dictionary match on CPU, and test repeated
+   batches plus overflow. Capacity overflow must stop the search, never
+   silently discard candidates.
 4. Integrate dispatch with the existing `Backend` interface, CLI/config,
    OS CSPRNG base generation, output verification and error handling. Never
    fall back to CPU silently when a strict GPU backend is requested.

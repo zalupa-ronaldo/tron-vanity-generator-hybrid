@@ -73,7 +73,7 @@ bool makeOffsetTable(OffsetTable& table, std::string& error) {
     return true;
 }
 
-// These are deterministic, unfunded *test* keys. Never use them as wallets.
+// These are deterministic *test* keys. Never use them as wallets.
 bool makeTestVectors(PublicBatch& basePubs, PublicBatch& pubs, PayloadBatch& payloads,
                      FullBatch& fulls, AddressBatch& addresses,
                      MatchBatch& matches, const Dictionary& dictionary,

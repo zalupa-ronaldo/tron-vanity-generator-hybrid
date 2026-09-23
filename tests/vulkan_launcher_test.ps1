@@ -66,9 +66,15 @@ try {
                 }
             } elseif ($vulkan4.Result -notlike "FAIL*") { throw "Profile failure was not recorded" }
         }
+        if (Get-ChildItem -LiteralPath $dir -Recurse -Filter *.jsonl) {
+            throw "$($case.Mode) wrote wallet output"
+        }
     }
     Write-Host "Vulkan benchmark launcher PASS (success and failure paths)"
 } finally {
     $env:TRON_VULKAN_FIXTURE = $previousMode
     if (Test-Path -LiteralPath $root) { [IO.Directory]::Delete($root, $true) }
 }
+# The final fixture intentionally exits 1. Do not leak that LASTEXITCODE into
+# the GitHub Actions PowerShell host after all assertions have passed.
+exit 0

@@ -7,7 +7,8 @@
 param(
     [string]$Config = "Release",
     [switch]$EnableCuda,
-    [switch]$EnableVulkan
+    [switch]$EnableVulkan,
+    [switch]$SkipVulkanRuntimeTests
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -68,7 +69,15 @@ if ($EnableVulkan -and -not $env:VULKAN_SDK) {
 if ($LASTEXITCODE) { throw "cmake configure failed" }
 & $cmake --build build --config $Config
 if ($LASTEXITCODE) { throw "build failed" }
-& $cmake --build build --config $Config --target test
+if ($SkipVulkanRuntimeTests) {
+    $cmakeDir = if (Test-Path $cmake) { Split-Path $cmake } else { $null }
+    $ctest = if ($cmakeDir -and (Test-Path (Join-Path $cmakeDir "ctest.exe"))) {
+        Join-Path $cmakeDir "ctest.exe"
+    } else { "ctest" }
+    & $ctest --test-dir build -C $Config -E '^vulkan_' --output-on-failure
+} else {
+    & $cmake --build build --config $Config --target test
+}
 if ($LASTEXITCODE) { throw "kernel correctness tests failed" }
 
 Write-Host ""

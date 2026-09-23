@@ -7,8 +7,11 @@ param(
     [ValidateRange(0, 5)][int]$Retries = 2
 )
 $ErrorActionPreference = "Stop"
-$token = $env:TRON_BENCH_UPLOAD_TOKEN
+$token = ([string]$env:TRON_BENCH_UPLOAD_TOKEN).Trim()
 if ([string]::IsNullOrWhiteSpace($token)) { throw "Set TRON_BENCH_UPLOAD_TOKEN before uploading." }
+if ($token -match '[\x00-\x1F\x7F]') {
+    throw "TRON_BENCH_UPLOAD_TOKEN contains an internal control character; copy the token without line breaks or quotes."
+}
 
 if (-not $ReportDir) {
     $searchRoot = Split-Path -Parent $PSScriptRoot

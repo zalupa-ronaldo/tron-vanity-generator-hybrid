@@ -12,6 +12,10 @@ try {
     if ($launcherText -notmatch 'test-opencl\.ps1.*-All.*-UpdateConfig') {
         throw "bench.cmd does not enable safe benchmark config update"
     }
+    $uploadText = Get-Content -LiteralPath (Join-Path $PSScriptRoot "../tools/upload-benchmark-results.ps1") -Raw
+    if ($uploadText -notmatch '\$env:TRON_BENCH_UPLOAD_TOKEN\)\.Trim\(\)') {
+        throw "upload helper does not normalize copied token whitespace"
+    }
     foreach ($case in @(
         @{ Name = "success"; Exit = 0 },
         @{ Name = "fail-opencl"; Exit = 1 },

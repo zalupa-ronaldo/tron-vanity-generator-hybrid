@@ -84,7 +84,8 @@ prints each HTTP response, and retries transient failures. It uploads only
 `tools\upload-benchmark-results.cmd`:
 
 ```powershell
-$env:TRON_BENCH_UPLOAD_TOKEN = "<endpoint token>"
+# Paste the token value only: no angle brackets, quotes, or line breaks.
+$env:TRON_BENCH_UPLOAD_TOKEN = (Get-Clipboard).Trim()
 $env:TRON_BENCH_UPLOAD_URL = "https://turbobuff.beer/tron-bench-upload"
 .\bench.cmd
 # Or, after a completed run:

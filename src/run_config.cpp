@@ -48,6 +48,7 @@ bool loadRunConfig(const std::filesystem::path& path,
     static const std::set<std::string> values = {
         "backend", "seconds", "threads", "words", "out", "output", "gpu-rng",
         "gpu-buffer-mb", "gpu-chunk-ms", "gpu-group-size", "metal-keys-per-lane",
+        "vulkan-curve-batch",
         "opencl-pipeline", "opencl-inverse", "opencl-affine-batch", "opencl-curve-batch",
         "opencl-compiler", "opencl-opt-mask"
     };

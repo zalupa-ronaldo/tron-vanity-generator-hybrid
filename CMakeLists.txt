@@ -148,6 +148,8 @@ if(TRON_ENABLE_VULKAN)
   set(VULKAN_MATCH_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_match_spv.h)
   set(VULKAN_CURVE_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve.spv)
   set(VULKAN_CURVE_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_spv.h)
+  set(VULKAN_CURVE_BATCH4_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_batch4.spv)
+  set(VULKAN_CURVE_BATCH4_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_batch4_spv.h)
   add_custom_command(OUTPUT ${VULKAN_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
     COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
@@ -202,6 +204,16 @@ if(TRON_ENABLE_VULKAN)
     COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_CURVE_SPV} -DOUT=${VULKAN_CURVE_GEN}
             -DNAME=kVulkanCurveSpv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
     DEPENDS ${VULKAN_CURVE_SPV} cmake/embed_spirv.cmake VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_CURVE_BATCH4_SPV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
+    COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
+            -DVULKAN_BATCH4=1 ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/curve.comp
+            -o ${VULKAN_CURVE_BATCH4_SPV}
+    DEPENDS vulkan/curve.comp VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_CURVE_BATCH4_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_CURVE_BATCH4_SPV} -DOUT=${VULKAN_CURVE_BATCH4_GEN}
+            -DNAME=kVulkanCurveBatch4Spv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    DEPENDS ${VULKAN_CURVE_BATCH4_SPV} cmake/embed_spirv.cmake VERBATIM)
   list(REMOVE_ITEM SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_probe_stub.cpp
                        ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_backend_stub.cpp)
   list(APPEND SRC vulkan/vulkan_probe.cpp vulkan/vulkan_keccak.cpp vulkan/vulkan_backend.cpp)
@@ -210,9 +222,9 @@ if(APPLE)
   list(APPEND SRC src/metal_backend.mm src/metal_hardware_profile.mm)
 endif()
 if(APPLE)
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN} ${VULKAN_MATCH_GEN} ${VULKAN_CURVE_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN} ${VULKAN_MATCH_GEN} ${VULKAN_CURVE_GEN} ${VULKAN_CURVE_BATCH4_GEN})
 else()
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN} ${VULKAN_MATCH_GEN} ${VULKAN_CURVE_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN} ${VULKAN_MATCH_GEN} ${VULKAN_CURVE_GEN} ${VULKAN_CURVE_BATCH4_GEN})
 endif()
 target_include_directories(tron_vanity_generator PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/gen)
 target_link_libraries(tron_vanity_generator PRIVATE secp256k1 ${CMAKE_DL_LIBS})
@@ -234,11 +246,16 @@ if(BUILD_TESTING)
     add_test(NAME vulkan_compute COMMAND tron_vanity_generator --vulkan-test)
     set_tests_properties(vulkan_compute PROPERTIES TIMEOUT 20)
     add_test(NAME vulkan_address_pipeline COMMAND tron_vanity_generator test-vulkan)
-    set_tests_properties(vulkan_address_pipeline PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
+    set_tests_properties(vulkan_address_pipeline PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     add_test(NAME vulkan_profile COMMAND tron_vanity_generator --no-config --backend vulkan
       --words ${CMAKE_CURRENT_SOURCE_DIR}/tests/vulkan_words.txt
       --vulkan-profile --bench-seconds 0.1)
     set_tests_properties(vulkan_profile PROPERTIES
+      ENVIRONMENT "TRON_VULKAN_ALLOW_SOFTWARE=1" TIMEOUT 60)
+    add_test(NAME vulkan_profile_batch4 COMMAND tron_vanity_generator --no-config --backend vulkan
+      --words ${CMAKE_CURRENT_SOURCE_DIR}/tests/vulkan_words.txt
+      --vulkan-curve-batch 4 --vulkan-profile --bench-seconds 0.1)
+    set_tests_properties(vulkan_profile_batch4 PROPERTIES
       ENVIRONMENT "TRON_VULKAN_ALLOW_SOFTWARE=1" TIMEOUT 60)
   endif()
   add_executable(run_config_test tests/run_config_test.cpp src/run_config.cpp)

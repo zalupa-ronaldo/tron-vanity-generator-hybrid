@@ -83,7 +83,9 @@ It fails closed on a driver timeout or result-ring overflow. The reusable
 backend passes software-Vulkan tests but is **not yet validated on RX 9070 XT**;
 do not use it for funds until `test-vulkan` passes on the actual card and its
 wallet output is independently checked. It is not expected to beat staged
-OpenCL yet because the Vulkan curve shader inverts each point separately.
+OpenCL yet. The conservative Vulkan curve mode inverts each point separately;
+experimental `--vulkan-curve-batch 4` shares one field inversion across four
+points, but has not been timed on the RX 9070 XT.
 An opt-in `vulkan-stage-test-windows-x64` executable is also saved as a
 short-lived artifact of successful GitHub Actions builds; on an RX 9070 XT it
 can run `tron_vanity_generator.exe test-vulkan` without writing wallets.
@@ -98,7 +100,8 @@ For a bounded, no-wallet A/B test from the optional executable, use:
 ```bat
 tron_vanity_generator.exe --no-config test-vulkan
 tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --bench --bench-seconds 5
-tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --vulkan-profile --bench-seconds 5
+tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --vulkan-profile --vulkan-curve-batch 1 --bench-seconds 5
+tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --vulkan-profile --vulkan-curve-batch 4 --bench-seconds 5
 ```
 
 Use `--no-config` because the bundled default config intentionally selects
@@ -113,6 +116,13 @@ host-visible buffer is device-local. GPU-stage rate excludes host work and
 must not be presented as wallet-search throughput. The backend prefers
 host-visible device-local memory when exposed; if the only coherent mapping
 is system memory, a future device-local buffer plus staging path may win.
+The batch-4 shader is compiled separately so the default batch-1 shader does
+not inherit its larger live point arrays. Compare both modes in A/B/A order
+with the same dictionary and no competing GPU workload; only promote batch 4
+after `test-vulkan` and an RX wall-rate win.
+An opt-in Vulkan config may use `backend=vulkan` and
+`vulkan-curve-batch=4`; the bundled RX config remains on its proven OpenCL
+settings.
 
 ## Build on Windows
 

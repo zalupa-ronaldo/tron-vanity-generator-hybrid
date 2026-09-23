@@ -1,10 +1,12 @@
 #version 450
 #extension GL_ARB_gpu_shader_int64 : require
+#ifndef VULKAN_BATCH4
+#define VULKAN_BATCH4 0
+#endif
 
-// Correctness-first native Vulkan secp256k1 mixed point addition. Binding 6
-// holds affine X||Y points; binding 0 receives (P + G) in the same 64-byte
-// public-key layout consumed by keccak.comp. This is a deterministic test
-// stage, not yet the production batched point walk.
+// Native Vulkan secp256k1 mixed point addition. Modes 0/1 retain the
+// one-key reference path. Mode 2 computes four keys per invocation and uses
+// one Montgomery batch inversion for their four Jacobian Z coordinates.
 layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 6) readonly buffer InputPoints { uint words[]; } inputs;
 layout(std430, set = 0, binding = 0) writeonly buffer PublicKeys { uint words[]; } publics;
@@ -239,16 +241,14 @@ Gej gejAddGe(Gej a, Ge b) {
     return r;
 }
 
-void main() {
-    uint gid = gl_GlobalInvocationID.x;
-    if (gid >= params.count) return;
+Gej computePoint(uint gid, uint mode) {
     Gej point;
-    uint baseIndex = params.curveMode == 0u ? gid : 0u;
+    uint baseIndex = mode == 0u ? gid : 0u;
     point.x = feFromBytes(baseIndex, 0u, false);
     point.y = feFromBytes(baseIndex, 32u, false);
     point.z = feInt(1u);
     point.inf = false;
-    if (params.curveMode == 0u) {
+    if (mode == 0u) {
         Ge generator;
         generator.x = feFromBytes(0u, 0u, false);
         generator.y = feFromBytes(0u, 32u, false);
@@ -268,7 +268,10 @@ void main() {
             }
         }
     }
-    Fe zi = feInv(point.z);
+    return point;
+}
+
+void writePoint(uint gid, Gej point, Fe zi) {
     Fe zi2 = feSqr(zi);
     Fe x = feNormalize(feMul(point.x, zi2));
     Fe y = feNormalize(feMul(point.y, feMul(zi, zi2)));
@@ -283,4 +286,36 @@ void main() {
         uint b3 = p < 32u ? xb[p + 3u] : yb[p + 3u - 32u];
         publics.words[gid * 16u + i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     }
+}
+
+void main() {
+    uint invocation = gl_GlobalInvocationID.x;
+#if VULKAN_BATCH4
+    if (params.curveMode == 2u) {
+        uint first = invocation * 4u;
+        if (first >= params.count) return;
+        uint batchCount = min(4u, params.count - first);
+        Gej points[4];
+        Fe prefix[4];
+        for (uint i = 0u; i < batchCount; ++i) {
+            points[i] = computePoint(first + i, 2u);
+            if (i == 0u) prefix[i] = points[i].z;
+            else prefix[i] = feMul(prefix[i - 1u], points[i].z);
+        }
+        // inv = 1 / product(Z[0..batchCount-1]). Walk backward to derive every
+        // 1/Z[i] with one field inversion and 2*(batchCount-1) multiplications.
+        Fe inv = feInv(prefix[batchCount - 1u]);
+        for (int i = int(batchCount) - 1; i >= 0; --i) {
+            Fe zi;
+            if (i == 0) zi = inv;
+            else zi = feMul(inv, prefix[i - 1]);
+            if (i > 0) inv = feMul(inv, points[i].z);
+            writePoint(first + uint(i), points[i], zi);
+        }
+        return;
+    }
+#endif
+    if (invocation >= params.count) return;
+    Gej point = computePoint(invocation, params.curveMode);
+    writePoint(invocation, point, feInv(point.z));
 }

@@ -77,11 +77,15 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    reusable bounded dispatch, CSPRNG base rollover, ring drain and CPU
    verification of candidate private keys. `--backend vulkan` is explicit and
    fails closed; `test-vulkan` also exercises the production backend without
-   writing wallets. The current curve still inverts each key separately, so
-   batched inversion and matched RX/OpenCL A/B performance work remain. The
+   writing wallets. The default curve inverts each key separately; optional
+   `--vulkan-curve-batch 4` is a separately compiled four-key Montgomery
+   inversion variant. Mesa CPU/GPU equivalence and short software-driver
+   A/B/A profiles pass, but no RX speed claim is justified. Matched RX/OpenCL
+   A/B performance work remains. The
    native backend has not yet run on the user's RX 9070 XT; do not include it
    in a normal Windows release or recommend it for funds until that test
-   passes. `--vulkan-profile --bench-seconds 5` collects wall rate and
+   passes. `--vulkan-profile --vulkan-curve-batch 1|4 --bench-seconds 5`
+   collects wall rate and
    per-stage GPU timestamps (when supported), plus host-visible memory
    locality, without writing wallets. Use the same dictionary as OpenCL and
    compare wall rate first. A non-device-local mapping may be limited by PCIe;

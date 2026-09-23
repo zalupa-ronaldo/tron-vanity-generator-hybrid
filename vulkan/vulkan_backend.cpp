@@ -4,6 +4,7 @@
 #include "rng.h"
 
 #include "vulkan_curve_spv.h"
+#include "vulkan_curve_batch4_spv.h"
 #include "vulkan_keccak_spv.h"
 #include "vulkan_checksum_spv.h"
 #include "vulkan_base58_spv.h"
@@ -85,8 +86,10 @@ static_assert(sizeof(PushConstants) == 36, "Vulkan push-constant ABI changed");
 
 class VulkanEngine {
 public:
-    explicit VulkanEngine(std::shared_ptr<const Dictionary> dictionary, bool allowSoftware)
-        : dictionary_(std::move(dictionary)), allowSoftware_(allowSoftware) {}
+    explicit VulkanEngine(std::shared_ptr<const Dictionary> dictionary,
+                          bool allowSoftware, uint32_t curveBatch)
+        : dictionary_(std::move(dictionary)), allowSoftware_(allowSoftware),
+          curveBatch_(curveBatch) {}
     VulkanEngine(const VulkanEngine&) = delete;
     VulkanEngine& operator=(const VulkanEngine&) = delete;
     ~VulkanEngine() {
@@ -159,6 +162,7 @@ private:
     std::array<VkDeviceSize, kBindings> offsets_{};
     std::array<VkDeviceSize, kBindings> sizes_{};
     PushConstants constants_{};
+    uint32_t curveBatch_ = 1;
     std::array<double, kStageCount> stageSeconds_{};
     double gpuSeconds_ = 0.0;
     double timestampPeriod_ = 0.0;
@@ -354,7 +358,7 @@ bool VulkanEngine::init(std::string& error) {
     std::memset(bytes, 0, static_cast<size_t>(total));
     std::memcpy(bytes + offsets_[4], automaton.data(), sizes_[4]);
     std::memcpy(bytes + offsets_[7], table.data(), sizes_[7]);
-    constants_.curveMode = 1;
+    constants_.curveMode = curveBatch_ == 4 ? 2u : 1u;
     constants_.ringMode = 1;
     constants_.ringCapacity = kBatchKeys;
     std::array<VkDescriptorSetLayoutBinding, kBindings> bindings{};
@@ -394,11 +398,13 @@ bool VulkanEngine::init(std::string& error) {
     }
     vkUpdateDescriptorSets(device_, kBindings, writes.data(), 0, nullptr);
     const std::array<const uint32_t*, kStageCount> codes = {
-        kVulkanCurveSpv, kVulkanKeccakSpv, kVulkanChecksumSpv,
+        curveBatch_ == 4 ? kVulkanCurveBatch4Spv : kVulkanCurveSpv,
+        kVulkanKeccakSpv, kVulkanChecksumSpv,
         kVulkanBase58Spv, kVulkanMatchSpv
     };
     const std::array<size_t, kStageCount> codeSizes = {
-        sizeof(kVulkanCurveSpv), sizeof(kVulkanKeccakSpv), sizeof(kVulkanChecksumSpv),
+        curveBatch_ == 4 ? sizeof(kVulkanCurveBatch4Spv) : sizeof(kVulkanCurveSpv),
+        sizeof(kVulkanKeccakSpv), sizeof(kVulkanChecksumSpv),
         sizeof(kVulkanBase58Spv), sizeof(kVulkanMatchSpv)
     };
     for (uint32_t i = 0; i < kStageCount; ++i) {
@@ -475,6 +481,12 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     auto* bytes = static_cast<unsigned char*>(mapped_);
     std::memcpy(bytes + offsets_[6], basePub, 64);
     std::memset(bytes + offsets_[8], 0, sizes_[8]);
+    if (allAddresses) {
+        // Deterministic no-wallet tests must not pass because an earlier
+        // dispatch left the expected addresses in the same mapped buffer.
+        for (uint32_t binding = 0; binding < 4; ++binding)
+            std::memset(bytes + offsets_[binding], 0xa5, sizes_[binding]);
+    }
     constants_.count = count;
     constants_.offsetBase = offsetBase;
     if (!check(vkResetCommandPool(device_, commandPool_, 0), "vkResetCommandPool") ||
@@ -496,7 +508,8 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     for (uint32_t stage = 0; stage < kStageCount; ++stage) {
         vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_[stage]);
-        vkCmdDispatch(command_, (count + kGroupSize - 1) / kGroupSize, 1, 1);
+        const uint32_t invocations = stage == 0 ? (count + curveBatch_ - 1) / curveBatch_ : count;
+        vkCmdDispatch(command_, (invocations + kGroupSize - 1) / kGroupSize, 1, 1);
         if (queryThisBatch)
             vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                 queryPool_, stage + 1);
@@ -619,8 +632,10 @@ bool verifyScan(VulkanEngine& engine, secp256k1_context* context,
 
 class VulkanResidentBackend final : public Backend {
 public:
-    explicit VulkanResidentBackend(std::shared_ptr<const Dictionary> dictionary, bool allowSoftware)
-        : dictionary_(std::move(dictionary)), engine_(dictionary_, allowSoftware) {
+    explicit VulkanResidentBackend(std::shared_ptr<const Dictionary> dictionary,
+                                   bool allowSoftware, uint32_t curveBatch)
+        : dictionary_(std::move(dictionary)), engine_(dictionary_, allowSoftware, curveBatch),
+          curveBatch_(curveBatch) {
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     }
     ~VulkanResidentBackend() override {
@@ -640,6 +655,7 @@ public:
         out.lines.push_back(engine_.deviceLocalHostVisible() ?
                             "Host-visible device-local memory" :
                             "Host-visible non-device-local memory; PCIe staging may be faster");
+        out.lines.push_back("Curve batch: " + std::to_string(curveBatch_));
         return out;
     }
     double benchmark(double seconds) override {
@@ -658,6 +674,7 @@ public:
         VulkanProfileResult result;
         if (!ensureReady()) { result.error = error_; return result; }
         result.device = engine_.deviceName();
+        result.curveBatch = curveBatch_;
         result.deviceLocalHostVisible = engine_.deviceLocalHostVisible();
         result.timestampsSupported = engine_.timestampsSupported();
         // One unmeasured full-size batch primes JIT compilation, caches and
@@ -737,6 +754,10 @@ private:
     bool ensureReady() {
         if (tried_) return ready_;
         tried_ = true;
+        if (curveBatch_ != 1 && curveBatch_ != 4) {
+            error_ = "Vulkan curve batch must be 1 or 4";
+            return false;
+        }
         if (!context_) { error_ = "secp256k1 context creation failed"; return false; }
         if (!engine_.init(error_)) return false;
         SecretScalar test;
@@ -772,6 +793,7 @@ private:
     }
     std::shared_ptr<const Dictionary> dictionary_;
     VulkanEngine engine_;
+    uint32_t curveBatch_ = 1;
     secp256k1_context* context_ = nullptr;
     SecretScalar base_;
     std::array<unsigned char, 64> basePub_{};
@@ -782,18 +804,20 @@ private:
 }
 
 std::unique_ptr<Backend> makeVulkanResidentBackend(
-    std::shared_ptr<const Dictionary> dictionary) {
+    std::shared_ptr<const Dictionary> dictionary, uint32_t curveBatch) {
     // Software Vulkan is for reproducible tests only; production selection
     // must not silently replace the requested GPU with CPU llvmpipe.
     const char* allow = std::getenv("TRON_VULKAN_ALLOW_SOFTWARE");
     return std::make_unique<VulkanResidentBackend>(std::move(dictionary),
-                                                   allow && std::strcmp(allow, "1") == 0);
+                                                   allow && std::strcmp(allow, "1") == 0,
+                                                   curveBatch);
 }
 
 VulkanProfileResult profileVulkanResident(std::shared_ptr<const Dictionary> dictionary,
-                                          double seconds) {
+                                          double seconds, uint32_t curveBatch) {
     const char* allow = std::getenv("TRON_VULKAN_ALLOW_SOFTWARE");
-    VulkanResidentBackend backend(std::move(dictionary), allow && std::strcmp(allow, "1") == 0);
+    VulkanResidentBackend backend(std::move(dictionary), allow && std::strcmp(allow, "1") == 0,
+                                  curveBatch);
     return backend.profile(seconds);
 }
 
@@ -803,46 +827,63 @@ int vulkanResidentSelfTest() {
     if (!dictionary) { std::cerr << "Vulkan test dictionary: " << error << "\n"; return 1; }
     auto* context = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     if (!context) return 1;
-    VulkanEngine engine(dictionary, true);
-    if (!engine.init(error)) {
-        secp256k1_context_destroy(context);
-        std::cerr << "Vulkan resident setup: " << error << "\n";
-        return error.find("no Vulkan") != std::string::npos ? 77 : 1;
-    }
     SecretScalar base;
     base.bytes[31] = 1;
     bool passed = true;
-    for (const auto& test : {std::pair<uint32_t,uint32_t>{0, 1}, {255, 65},
-                             {65535, 65}, {kBaseWindowKeys - 65, 65}, {0, 65}}) {
-        if (!verifyScan(engine, context, *dictionary, base.data(), test.first, test.second, error)) {
-            passed = false;
-            break;
+    for (uint32_t batch : {1u, 4u}) {
+        // Different SPIR-V modules are selected at pipeline creation. Do
+        // not switch just the push constant on an already-created pipeline.
+        VulkanEngine engine(dictionary, true, batch);
+        if (!engine.init(error)) {
+            secp256k1_context_destroy(context);
+            std::cerr << "Vulkan resident setup batch " << batch << ": " << error << "\n";
+            return error.find("no Vulkan") != std::string::npos ? 77 : 1;
         }
+        std::vector<std::pair<uint32_t, uint32_t>> cases;
+        if (batch == 1)
+            cases = {{0, 1}, {255, 65}, {65535, 65},
+                     {kBaseWindowKeys - 65, 65}, {0, 65}};
+        else
+            cases = {{0, 1}, {0, 3}, {0, 4}, {0, 5}, {255, 5},
+                     {65535, 5}, {kBaseWindowKeys - 5, 5}, {0, 65}};
+        for (const auto& test : cases) {
+            if (!verifyScan(engine, context, *dictionary, base.data(), test.first, test.second,
+                            error)) {
+                error = "curve batch " + std::to_string(batch) + ", offset " +
+                        std::to_string(test.first) + ", count " +
+                        std::to_string(test.second) + ": " + error;
+                passed = false;
+                break;
+            }
+        }
+        if (!passed) break;
     }
     secp256k1_context_destroy(context);
     if (!passed) { std::cerr << "Vulkan resident test: " << error << "\n"; return 1; }
-    auto backend = std::make_unique<VulkanResidentBackend>(dictionary, true);
-    if (!backend || !backend->available()) {
-        std::cerr << "Vulkan production backend test: "
-                  << (backend ? backend->note() : "not built") << "\n";
-        return 1;
-    }
-    RunConfig config;
-    config.dictionary = dictionary;
-    config.maxAttempts = 65;
-    config.seconds = 0;
-    RunState state;
-    bool validReports = true;
-    backend->run(config, state, [&](const FoundKey& key) {
-        validReports &= key.address.size() == 34 && key.privHex.size() == 64 &&
-                        !key.words.empty();
-    });
-    if (!validReports || !backend->note().empty() ||
-        state.checked.load() != 65 || state.gpuChecked.load() != 65 ||
-        state.found.load() == 0) {
-        std::cerr << "Vulkan production backend bounded no-wallet run failed: "
-                  << backend->note() << "\n";
-        return 1;
+    for (uint32_t batch : {1u, 4u}) {
+        auto backend = std::make_unique<VulkanResidentBackend>(dictionary, true, batch);
+        if (!backend || !backend->available()) {
+            std::cerr << "Vulkan production backend batch " << batch << ": "
+                      << (backend ? backend->note() : "not built") << "\n";
+            return 1;
+        }
+        RunConfig config;
+        config.dictionary = dictionary;
+        config.maxAttempts = 65;
+        config.seconds = 0;
+        RunState state;
+        bool validReports = true;
+        backend->run(config, state, [&](const FoundKey& key) {
+            validReports &= key.address.size() == 34 && key.privHex.size() == 64 &&
+                            !key.words.empty();
+        });
+        if (!validReports || !backend->note().empty() ||
+            state.checked.load() != 65 || state.gpuChecked.load() != 65 ||
+            state.found.load() == 0) {
+            std::cerr << "Vulkan production backend batch " << batch
+                      << " bounded no-wallet run failed: " << backend->note() << "\n";
+            return 1;
+        }
     }
     std::cout << "Vulkan resident repeated dispatch + CPU verification PASS (no wallets)\n";
     return 0;

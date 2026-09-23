@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 
 int main() {
     const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -22,12 +23,17 @@ int main() {
             return false;
         }
         if (!expected) return args.empty();
+        const auto batch = std::find(args.begin(), args.end(), "--vulkan-curve-batch");
+        if (content.find("vulkan-curve-batch") != std::string::npos &&
+            (batch == args.end() || std::next(batch) == args.end() || *std::next(batch) != "4"))
+            return false;
         return std::find(args.begin(), args.end(), (dir / "words.txt").string()) != args.end() &&
                std::find(args.begin(), args.end(), "--strict-backend") != args.end() &&
                std::find(args.begin(), args.end(), "--opencl-sha-ring") == args.end();
     };
     const bool okay =
         check("\xEF\xBB\xBF# config\nwords=words.txt\nstrict-backend=true\nopencl-sha-ring=false\n", true) &&
+        check("backend=vulkan\nvulkan-curve-batch=4\nwords=words.txt\nstrict-backend=true\n", true) &&
         check("words=words.txt\nwords=other.txt\n", false) &&
         check("words=words.txt\nsecret-key=oops\n", false) &&
         check("strict-backend=perhaps\n", false);

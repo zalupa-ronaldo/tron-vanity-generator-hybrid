@@ -84,6 +84,7 @@ struct Options {
     uint32_t gpuPollMs = 50;
     uint32_t gpuGroupSize = 256;
     uint32_t metalKeysPerLane = 32;
+    uint32_t vulkanCurveBatch = 1;
     double benchSeconds = 1.0;
     double tuneSeconds = 5.0;
 };
@@ -114,6 +115,7 @@ void usage() {
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --vulkan-profile  time full Vulkan pipeline by stage; no wallets written\n"
+        "  --vulkan-curve-batch 1|4  Vulkan field inversions per group (default 1)\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-affine-batch 2|4|8  staged paired inversion points per work-item (default 4)\n"
         "  --opencl-curve-batch 2|4|8  staged consecutive public points per work-item (default 2)\n"
@@ -171,6 +173,11 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--gpu-poll-ms") o.gpuPollMs = std::stoul(next(i, "--gpu-poll-ms"));
             else if (a == "--gpu-group-size") o.gpuGroupSize = std::stoul(next(i, "--gpu-group-size"));
             else if (a == "--metal-keys-per-lane") o.metalKeysPerLane = std::stoul(next(i, "--metal-keys-per-lane"));
+            else if (a == "--vulkan-curve-batch") {
+                o.vulkanCurveBatch = std::stoul(next(i, "--vulkan-curve-batch"));
+                if (o.vulkanCurveBatch != 1 && o.vulkanCurveBatch != 4)
+                    throw std::runtime_error("--vulkan-curve-batch must be 1 or 4");
+            }
             else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
             else if (a == "--tune-seconds") o.tuneSeconds = std::stod(next(i, "--tune-seconds"));
             else if (a == "--bench-resident") o.benchResidentOnly = true;
@@ -246,6 +253,9 @@ bool parse(int argc, char** argv, Options& o) {
     }
     if (o.openclOptions.staged && o.backend != "opencl") {
         std::cerr << "--opencl-pipeline staged requires --backend opencl\n"; return false;
+    }
+    if (o.vulkanCurveBatch != 1 && o.backend != "vulkan") {
+        std::cerr << "--vulkan-curve-batch requires --backend vulkan\n"; return false;
     }
     if (!o.openclDiagnostic.empty() && o.openclDiagnostic != "smoke" && o.openclDiagnostic != "rng" &&
         o.openclDiagnostic != "scan" && o.openclDiagnostic != "full" &&
@@ -603,10 +613,11 @@ int main(int argc, char** argv) {
             std::cerr << "--vulkan-profile requires --backend vulkan\n";
             return 1;
         }
-        const auto p = profileVulkanResident(dictionary, opt.benchSeconds);
+        const auto p = profileVulkanResident(dictionary, opt.benchSeconds, opt.vulkanCurveBatch);
         if (!p.error.empty()) { std::cerr << "Vulkan profile failed: " << p.error << "\n"; return 1; }
         const double wallRate = p.wallSeconds > 0 ? double(p.keys) / p.wallSeconds : 0.0;
         std::cout << "Vulkan full-address profile (no wallets): " << p.device << "\n"
+                  << "curve batch: " << p.curveBatch << "\n"
                   << "memory: " << (p.deviceLocalHostVisible ? "host-visible device-local" :
                                        "host-visible non-device-local") << "\n"
                   << "wall: " << p.keys << " keys / " << std::fixed << std::setprecision(3)
@@ -832,7 +843,7 @@ int main(int argc, char** argv) {
             if (wantMetal) std::cout << "Metal: unavailable (not an Apple build)\n";
 #endif
             if (wantVulkan) {
-                auto vulkan = makeVulkanResidentBackend(dictionary);
+                auto vulkan = makeVulkanResidentBackend(dictionary, opt.vulkanCurveBatch);
                 if (!vulkan || !vulkan->available()) {
                     std::cerr << "Vulkan unavailable: " << (vulkan ? vulkan->note() : "not built") << "\n";
                     return 1;
@@ -842,7 +853,9 @@ int main(int argc, char** argv) {
                     std::cerr << "Vulkan benchmark failed: " << vulkan->note() << "\n";
                     return 1;
                 }
-                std::cout << std::left << std::setw(38) << ("Vulkan resident / " + vulkan->info().title)
+                std::cout << std::left << std::setw(38)
+                          << ("Vulkan batch " + std::to_string(opt.vulkanCurveBatch) + " / " +
+                              vulkan->info().title)
                           << std::right << std::setw(16) << benchRate(r) << "\n";
             }
             std::cout << "\nBenchmark complete. Use --bench-seconds N to adjust each row.\n";
@@ -862,7 +875,8 @@ int main(int argc, char** argv) {
 
     std::vector<std::unique_ptr<Backend>> backends;
     if (opt.backend == "auto" || opt.backend == "cpu") backends.push_back(makeCpuBackend());
-    if (opt.backend == "vulkan") backends.push_back(makeVulkanResidentBackend(dictionary));
+    if (opt.backend == "vulkan")
+        backends.push_back(makeVulkanResidentBackend(dictionary, opt.vulkanCurveBatch));
     if (opt.backend == "cuda") {
         if (hw.cudaGpus.empty()) { std::cerr << "CUDA unavailable: " << hw.cudaNote << "\n"; return 1; }
         for (const auto& device : hw.cudaGpus)

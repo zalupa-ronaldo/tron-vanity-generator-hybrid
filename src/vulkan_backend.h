@@ -9,7 +9,7 @@
 
 // Explicit native Vulkan backend. Never silently substitutes a CPU path.
 std::unique_ptr<Backend> makeVulkanResidentBackend(
-    std::shared_ptr<const Dictionary> dictionary);
+    std::shared_ptr<const Dictionary> dictionary, uint32_t curveBatch = 1);
 
 // Bounded, no-wallet runtime verification on the selected Vulkan device.
 int vulkanResidentSelfTest();
@@ -24,8 +24,9 @@ struct VulkanProfileResult {
     std::array<double, 5> stageSeconds{};
     bool timestampsSupported = false;
     bool deviceLocalHostVisible = false;
+    uint32_t curveBatch = 1;
 };
 
 // Full-address, no-wallet wall/GPU-stage profile. No CPU or software fallback.
 VulkanProfileResult profileVulkanResident(std::shared_ptr<const Dictionary> dictionary,
-                                          double seconds);
+                                          double seconds, uint32_t curveBatch = 1);

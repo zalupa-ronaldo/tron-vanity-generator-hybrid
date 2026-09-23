@@ -5,7 +5,10 @@ The native Vulkan wallet backend is **experimental**. Source builds with
 10x26 field-math point stage, Keccak-256, SHA-256d, Base58Check and flattened
 dictionary matching. The curve stage can compute `P + G` or walk from one
 base point through three 8-bit offset-table windows; it currently inverts
-each result individually, not with the faster OpenCL batch inversion.
+each result individually by default. An optional four-key shader shares one
+Montgomery inversion across four Jacobian Z values. It is built as separate
+SPIR-V so its larger live arrays cannot inflate register pressure in the
+default one-key variant. Neither Vulkan mode has been profiled on the RX.
 The generic and deterministic stage tests do not save wallets. A separate
 reusable `--backend vulkan` path now runs full-address searches or no-wallet
 benchmarks, but is not validated on the RX 9070 XT. The regular Windows
@@ -20,6 +23,12 @@ ID, and writes 16 words per public key at binding 0. Mode 0 tests `P + G`,
 including doubling at `P = G`. The host derives every expected point
 independently with `libsecp256k1`; tested offsets cross 255/256, 65535/65536
 and end at `2^22 - 1`. A compute barrier separates curve from Keccak.
+Mode 2 maps each invocation to up to four consecutive offsets. It stores the
+four Jacobian points and prefix products of their Z coordinates, inverts the
+final product once, then walks backward to derive each `1/Z`. Partial groups
+of 1, 3 and 5 keys, table-window boundaries and the last valid offset are
+checked against CPU addresses. The host dispatches only `ceil(count/4)`
+invocations for the curve stage; later address stages still dispatch `count`.
 
 `vulkan/keccak.comp` takes 16 little-endian `uint32_t` words per 64-byte
 uncompressed public key (`X||Y`, no `0x04` prefix) at storage binding 0. It
@@ -59,11 +68,15 @@ CPU/GPU vectors covering each input/output word and the final partial word.
 
 ## Reusable backend and remaining production gates
 
-1. Move the verified single-point curve math to a staged point/affine layout
-   with batched inversion. Compare every scalar/public key with CPU
-   `libsecp256k1`, including random-base rollover; measure actual full-wall
-   speed before selecting a batch size. The current `P0 + offset·G` shader is
-   correct on Mesa but not yet a competitive resident pipeline.
+1. The optional four-key curve shader now has batch inversion and CPU
+   equivalence checks on Mesa, but no RX measurement. On llvmpipe with 30
+   one-letter test words, short 0.5-second A/B/A profiles put batch 1 at
+   72–84 K/s wall and 7.3–7.9 us/key curve, versus batch 4 at 131 K/s wall
+   and 2.9 us/key curve. These are software-driver numbers, not evidence of
+   an RX speedup. Run a matched RX A/B/A with the 358-word dictionary before
+   selecting a default. If batch 4 loses on RX, inspect VGPR/scratch and
+   consider separate point/affine stages, a smaller batch, or a cooperative
+   inversion layout. Verify random-base rollover and long-running searches.
 2. `vulkan/vulkan_backend.cpp` now reuses descriptors, pipelines, buffers and
    command objects across bounded batches. It resets and drains the atomic
    ring every dispatch. The OS CSPRNG base expands into a 22-bit offset

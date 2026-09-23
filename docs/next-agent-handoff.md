@@ -95,10 +95,13 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    address in that test. The default curve inverts each key separately; optional
    `--vulkan-curve-batch 4` is a separately compiled four-key Montgomery
    inversion variant. Mesa CPU/GPU equivalence and short software-driver
-   A/B/A profiles pass, but no RX speed claim is justified. Matched RX/OpenCL
-   A/B performance work remains. The
-   native backend has not yet run on the user's RX 9070 XT; do not recommend
-   it for funds until that test passes. The normal Windows ZIP and opt-in CI
+   A/B/A profiles pass. A matched RX/OpenCL no-wallet A/B/A also passes:
+   OpenCL averages 104.635 M/s, Vulkan batch 1 averages 2.885 M/s and batch 4
+   averages 2.985 M/s. The RX reports host-visible device-local memory, while
+   about 4.2-4.4 seconds of each five-second Vulkan run is outside GPU stages.
+   The native backend is therefore correctness-tested but not performance-ready;
+   do not recommend it for funds until a long-running wallet-output test is
+   independently verified. The normal Windows ZIP and opt-in CI
    artifact both package `bench-vulkan.cmd`, which first
    runs `test-vulkan` and then measures OpenCL / Vulkan batch 1 / batch 4 /
    batch 1 / batch 4 / OpenCL with bounded child processes and the same
@@ -109,8 +112,8 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    Compare wall rate first. A non-device-local mapping may be limited by PCIe;
    test device-local scratch plus staging before optimizing shader math.
    Synthetic `VK_ERROR_DEVICE_LOST` at queue submit is now tested fail-closed;
-   real driver loss/timeouts and a matched RX performance profile still need
-   validation. OpenCL running on `clvk` would be a compatibility experiment,
+   real driver loss/timeouts and long-running RX wallet-output validation still
+   need testing. OpenCL running on `clvk` would be a compatibility experiment,
    not evidence of a native Vulkan backend. Khronos's
    [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
    and the [clspv OpenCL-C mapping](https://github.com/google/clspv/blob/main/docs/OpenCLCOnVulkan.md)
@@ -119,6 +122,18 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    Vulkan speed until full-address/dictionary processing is verified.
    The byte/word contract and remaining stage gates are in
    [`vulkan-stage-contract.md`](vulkan-stage-contract.md).
+
+   The measured Vulkan bottleneck is now concrete: the RX completed only about
+   1.3 ms of GPU stages per 32,768-key dispatch, while the wall profile spent
+   about 4.2-4.4 s outside those stages across roughly 440-457 dispatches in
+   five seconds. First prototype a larger bounded batch (for example 64K,
+   128K and 256K keys) with a correspondingly sized ring, and separately
+   measure fence wait, mapped-buffer/ring drain, address reconstruction and
+   command-recording time. Keep the same full-address CPU verification and
+   compare wall rate in A/B/A; do not infer a win from GPU timestamps alone.
+   The RX already reports host-visible device-local memory, so a staging-buffer
+   rewrite is lower priority until a larger-batch test shows that memory
+   traffic, rather than per-dispatch synchronization, dominates.
 
 ## Reproducibility and rollout
 

@@ -95,13 +95,14 @@ double-clicking the exe does not use Vulkan. Vulkan runs only when explicitly
 selected. In this mode:
 OS CSPRNG chooses a base scalar, GPU computes all address stages and dictionary
 matches, and CPU independently verifies every reported key/address/match.
-It fails closed on a driver timeout or result-ring overflow. The reusable
-backend passes software-Vulkan tests but is **not yet validated on RX 9070 XT**;
-do not use it for funds until `test-vulkan` passes on the actual card and its
-wallet output is independently checked. It is not expected to beat staged
-OpenCL yet. The conservative Vulkan curve mode inverts each point separately;
+It fails closed on a driver timeout or result-ring overflow. The backend now
+passes the no-wallet correctness gate and full-address profile on the RX 9070
+XT, but measured only 2.9-3.0 M keys/s wall versus about 104.6 M/s for staged
+OpenCL. Do not use it for funds until wallet output is independently checked.
+The conservative Vulkan curve mode inverts each point separately;
 experimental `--vulkan-curve-batch 4` shares one field inversion across four
-points, but has not been timed on the RX 9070 XT.
+points and was about 3.5% faster than batch 1 on wall time, but remains far
+behind OpenCL.
 The regular Windows ZIP includes `bench-vulkan.cmd` and `bench-vulkan.ps1` for
 a bounded, no-wallet Vulkan/OpenCL comparison. GitHub Actions also keeps a
 short-lived, standalone `vulkan-stage-test-windows-x64` artifact; it is not
@@ -123,7 +124,9 @@ bench-vulkan.cmd
 It first runs `test-vulkan`, then measures the matched OpenCL reference and
 Vulkan batches 1/4 twice in interleaved order. Every child has a timeout;
 `summary.txt` and `benchmark.csv` contain the wall rates and dictionary hash,
-without wallet files. Send only these two reports, not `results` or wallets.
+without wallet files. On the RX run, batch 4 averaged 2.985 M/s and OpenCL
+averaged 104.635 M/s; about 4.2-4.4 seconds of each five-second Vulkan run
+was outside GPU stages. Send only these two reports, not `results` or wallets.
 The script passes `--no-config` because the bundled config intentionally
 selects OpenCL and includes OpenCL-only options. `--backend vulkan` never silently
 falls back to CPU: software Vulkan devices are rejected for normal runs.
@@ -138,8 +141,8 @@ host-visible device-local memory when exposed; if the only coherent mapping
 is system memory, a future device-local buffer plus staging path may win.
 The batch-4 shader is compiled separately so the default batch-1 shader does
 not inherit its larger live point arrays. Compare both modes in A/B/A order
-with the same dictionary and no competing GPU workload; only promote batch 4
-after `test-vulkan` and an RX wall-rate win.
+with the same dictionary and no competing GPU workload; keep OpenCL as the
+RX default until Vulkan's host/queue overhead is addressed.
 An opt-in Vulkan config may use `backend=vulkan` and
 `vulkan-curve-batch=4`; the bundled RX config remains on its proven OpenCL
 settings.

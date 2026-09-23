@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "provenance": "User-provided no-wallet vulkan-benchmark summary and CSV",
+  "device": "AMD Radeon RX 9070 XT",
+  "architecture": "gfx1201",
+  "dictionary_words": 358,
+  "dictionary_sha256": "ed46b8a4d2e31bf94a5a19b5cf9ea70bd51e10a80e9ac6d060067e5b45c3bd47",
+  "driver": "not included in Vulkan summary",
+  "memory": "host-visible device-local",
+  "correctness": "Vulkan resident repeated dispatch + CPU verification PASS; no wallets or private keys written",
+  "opencl_reference_wall_mkeys_per_s": [104.306, 104.964],
+  "profiles": {
+    "curve_batch_1": {
+      "wall_mkeys_per_s": [2.90, 2.87],
+      "gpu_stage_mkeys_per_s": [19.38, 18.54],
+      "dispatches": [443, 438]
+    },
+    "curve_batch_4": {
+      "wall_mkeys_per_s": [2.99, 2.98],
+      "gpu_stage_mkeys_per_s": [25.04, 24.41],
+      "dispatches": [457, 455]
+    }
+  },
+  "derived": {
+    "opencl_wall_mean_mkeys_per_s": 104.635,
+    "vulkan_batch_1_wall_mean_mkeys_per_s": 2.885,
+    "vulkan_batch_4_wall_mean_mkeys_per_s": 2.985,
+    "vulkan_batch_4_wall_gain_vs_batch_1_percent": 3.5,
+    "opencl_wall_advantage_vs_vulkan_batch_4": 35.0,
+    "vulkan_batch_4_gpu_stage_gain_vs_batch_1_percent": 30.4,
+    "vulkan_wall_bottleneck": "host/queue/transfer overhead: reported wall minus GPU stages was about 4.2-4.4 seconds in each five-second run"
+  },
+  "decision": "Keep OpenCL as the RX default. Keep Vulkan explicit and experimental; batch 4 is the better Vulkan variant, but neither Vulkan variant is competitive in wall throughput yet."
+}

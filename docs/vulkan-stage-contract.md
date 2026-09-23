@@ -8,10 +8,13 @@ base point through three 8-bit offset-table windows; it currently inverts
 each result individually by default. An optional four-key shader shares one
 Montgomery inversion across four Jacobian Z values. It is built as separate
 SPIR-V so its larger live arrays cannot inflate register pressure in the
-default one-key variant. Neither Vulkan mode has been profiled on the RX.
+default one-key variant. Both variants have now been profiled on the RX 9070 XT
+with the same 358-word dictionary; correctness passed, but wall throughput was
+only about 2.9-3.0 M keys/s versus about 104.6 M/s for staged OpenCL.
 The generic and deterministic stage tests do not save wallets. A separate
 reusable `--backend vulkan` path now runs full-address searches or no-wallet
-benchmarks, but is not validated on the RX 9070 XT. The regular Windows
+benchmarks, and has passed a no-wallet correctness/profile run on the RX
+9070 XT. The regular Windows
 release now includes the Vulkan code, while its adjacent config still selects
 OpenCL by default. Vulkan requires an explicit backend selection.
 
@@ -86,11 +89,12 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    one-letter test words, short 0.5-second A/B/A profiles put batch 1 at
    72–84 K/s wall and 7.3–7.9 us/key curve, versus batch 4 at 131 K/s wall
    and 2.9 us/key curve. These are software-driver numbers, not evidence of
-   an RX speedup. Run a matched RX A/B/A with the 358-word dictionary before
-   selecting a default. If batch 4 loses on RX, inspect VGPR/scratch and
-   consider separate point/affine stages, a smaller batch, or a cooperative
-   inversion layout. Verify random-base rollover and long-running searches.
-   The normal Windows ZIP and opt-in CI bundle have `bench-vulkan.cmd`: a bounded no-wallet
+   an RX speedup. The matched RX A/B/A now puts batch 4 at 2.985 M/s wall
+   versus 2.885 M/s for batch 1, still about 35x below OpenCL. If batch 4
+   loses on a future RX run, inspect VGPR/scratch and consider separate
+   point/affine stages, a smaller batch, or a cooperative inversion layout.
+   Verify random-base rollover and long-running searches. The normal Windows
+   ZIP and opt-in CI bundle have `bench-vulkan.cmd`: a bounded no-wallet
    correctness gate followed by interleaved, repeated OpenCL/Vulkan 1/4 wall
    profiles on its adjacent dictionary. Copy the actual 358-word `words.txt`
    into that separate test folder first; do not use the starter file for an
@@ -117,13 +121,14 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    and artificial word mix differ from the target workload.
    A synthetic `VK_ERROR_DEVICE_LOST` at submit is covered; varied production
    batch sizes, actual driver faults and long-running rollover tests remain.
-3. Windows Vulkan SDK CI now compiles the optional backend, but runtime has
-   only been verified with Mesa software Vulkan on Linux. Test the stage
-   executable on the actual RX 9070 XT before enabling any production use.
-   Once the full backend exists, compare full wall keys/s against
-   the same dictionary and GPU workload under staged OpenCL; also measure
-   stage ns/key and transfer overhead. Do not recommend Vulkan on performance
-   grounds until correctness and matched A/B/A runs pass.
+3. Windows Vulkan SDK CI compiles the optional backend, and a no-wallet
+   full-address profile now also passes on the actual RX 9070 XT. The profile
+   reports host-visible device-local memory; GPU stages reached 24.73 M/s for
+   batch 4 on average, but roughly 4.4 s of each five-second run remained
+   host/queue/transfer overhead. Do not recommend Vulkan on performance
+   grounds: the next target is reducing per-dispatch synchronization and host
+   work, not changing the curve batch or staging memory blindly. A long-running
+   funded-wallet run remains unvalidated.
 
 Khronos's [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
 and [shader interface specification](https://docs.vulkan.org/spec/latest/chapters/interfaces.html)

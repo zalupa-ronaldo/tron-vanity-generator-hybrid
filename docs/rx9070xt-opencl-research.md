@@ -70,6 +70,21 @@ The consistency rerun also isolated the compile-time optimization mask:
 These are one five-second pass, so they identify the dominant affine
 optimization but are not a replacement for the planned A/B/A repeats.
 
+## RX Vulkan A/B result
+
+The first real RX 9070 XT Vulkan run passed the repeated-dispatch and CPU
+verification gate with the same 358-word dictionary. OpenCL A/B measured
+104.306 and 104.964 M keys/s. Vulkan measured 2.90/2.87 M/s with curve batch 1
+and 2.99/2.98 M/s with curve batch 4. Thus batch 4 is only about 3.5% faster
+in complete wall throughput and OpenCL is about 35 times faster. The Vulkan
+GPU-stage rate improved from 18.96 to 24.73 M/s on average, but the wall rate
+was dominated by host/queue/transfer overhead: `wall minus GPU stages` was
+roughly 4.2-4.4 seconds in each five-second run. The device reported
+host-visible device-local memory, so this is not evidence that PCIe staging is
+the first fix. Keep OpenCL as the default and Vulkan explicit/experimental.
+The complete redacted record is
+[`amd-rx9070xt-vulkan-2026-09-23.json`](../benchmarks/amd-rx9070xt-vulkan-2026-09-23.json).
+
 ## Hardware facts versus inference
 
 AMD's [GPU specifications](https://rocmdocs.amd.com/en/develop/reference/gpu-specs.html)

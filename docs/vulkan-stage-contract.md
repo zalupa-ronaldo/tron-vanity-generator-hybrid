@@ -27,7 +27,9 @@ ID, and writes 16 words per public key at binding 0. Mode 0 tests `P + G`,
 including doubling at `P = G`. The host derives every expected point
 independently with `libsecp256k1`; tested offsets cross 255/256, 65535/65536
 and end at `2^22 - 1`. A compute barrier separates curve from Keccak.
-Mode 2 maps each invocation to up to four consecutive offsets. It stores the
+Mode 2 maps each invocation to up to four consecutive offsets. It now builds
+the first point from the offset table and walks `+G` for the remaining three
+points, avoiding redundant table lookups and mixed additions. It stores the
 four Jacobian points and prefix products of their Z coordinates, inverts the
 final product once, then walks backward to derive each `1/Z`. Partial groups
 of 1, 3 and 5 keys, table-window boundaries and the last valid offset are

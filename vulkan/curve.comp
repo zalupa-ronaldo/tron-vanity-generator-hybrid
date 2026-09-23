@@ -297,10 +297,22 @@ void main() {
         uint batchCount = min(4u, params.count - first);
         Gej points[4];
         Fe prefix[4];
+        // The four scalars are consecutive. Build the first point from the
+        // offset table only once, then walk +G in Jacobian coordinates on the
+        // GPU. Recomputing each point independently needs up to 12 table
+        // additions per batch; this path needs at most 3 table additions
+        // plus 3 fixed-generator additions. The affine batch inversion below
+        // remains unchanged.
+        Gej current = computePoint(first, 2u);
+        Ge generator;
+        generator.x = feFromBytes(1u, 0u, true);
+        generator.y = feFromBytes(1u, 32u, true);
+        generator.inf = false;
         for (uint i = 0u; i < batchCount; ++i) {
-            points[i] = computePoint(first + i, 2u);
+            points[i] = current;
             if (i == 0u) prefix[i] = points[i].z;
             else prefix[i] = feMul(prefix[i - 1u], points[i].z);
+            if (i + 1u < batchCount) current = gejAddGe(current, generator);
         }
         // inv = 1 / product(Z[0..batchCount-1]). Walk backward to derive every
         // 1/Z[i] with one field inversion and 2*(batchCount-1) multiplications.

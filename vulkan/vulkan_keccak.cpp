@@ -30,6 +30,9 @@ constexpr size_t kAddressWords = 9;
 constexpr size_t kMatchWords = 18;
 constexpr size_t kOffsetWindows = 3;
 constexpr size_t kOffsetDigits = 256;
+constexpr uint32_t kRingCapacity = 8;
+constexpr size_t kRingWords = 20;
+constexpr size_t kRingGuardSlots = 2;
 constexpr uint32_t kWalkBaseScalar = 0x123456u;
 using PublicBatch = std::array<uint32_t, kItems * kPublicWords>;
 using PayloadBatch = std::array<uint32_t, kItems * kPayloadWords>;
@@ -37,6 +40,7 @@ using FullBatch = std::array<uint32_t, kItems * kFullWords>;
 using AddressBatch = std::array<uint32_t, kItems * kAddressWords>;
 using MatchBatch = std::array<uint32_t, kItems * kMatchWords>;
 using OffsetTable = std::array<uint32_t, kOffsetWindows * kOffsetDigits * kPublicWords>;
+using RingBatch = std::array<uint32_t, (kRingCapacity + kRingGuardSlots) * kRingWords>;
 
 bool makeOffsetTable(OffsetTable& table, std::string& error) {
     using SecpContext = std::unique_ptr<secp256k1_context, decltype(&secp256k1_context_destroy)>;
@@ -234,11 +238,12 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     std::vector<uint32_t> automaton;
     struct PushConstants {
         uint32_t count, dfaOffset, outStartOffset, outLenOffset, outIdsOffset;
-        uint32_t curveMode, offsetBase;
+        uint32_t curveMode, offsetBase, ringMode, ringCapacity;
     } constants{};
     constants.count = activeItems;
     constants.curveMode = curveMode;
     constants.offsetBase = offsetBase;
+    constants.ringCapacity = kRingCapacity;
     constants.dfaOffset = 0;
     automaton.insert(automaton.end(), dictionary->dfa.begin(), dictionary->dfa.end());
     constants.outStartOffset = static_cast<uint32_t>(automaton.size());
@@ -312,6 +317,7 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     constexpr VkDeviceSize addressBytes = sizeof(AddressBatch);
     constexpr VkDeviceSize matchBytes = sizeof(MatchBatch);
     constexpr VkDeviceSize tableBytes = sizeof(OffsetTable);
+    constexpr VkDeviceSize ringBytes = sizeof(RingBatch);
     const VkDeviceSize automatonBytes = automaton.size() * sizeof(uint32_t);
     const VkDeviceSize alignment = properties.limits.minStorageBufferOffsetAlignment;
     const VkDeviceSize outputOffset = (inBytes + alignment - 1) / alignment * alignment;
@@ -321,8 +327,10 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     const VkDeviceSize matchOffset = (automatonOffset + automatonBytes + alignment - 1) / alignment * alignment;
     const VkDeviceSize baseOffset = (matchOffset + matchBytes + alignment - 1) / alignment * alignment;
     const VkDeviceSize tableOffset = (baseOffset + inBytes + alignment - 1) / alignment * alignment;
+    const VkDeviceSize metaOffset = (tableOffset + tableBytes + alignment - 1) / alignment * alignment;
+    const VkDeviceSize ringOffset = (metaOffset + 2 * sizeof(uint32_t) + alignment - 1) / alignment * alignment;
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bufferInfo.size = tableOffset + tableBytes;
+    bufferInfo.size = ringOffset + ringBytes;
     bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(state.device, &bufferInfo, nullptr, &state.buffer), "vkCreateBuffer")) return false;
@@ -362,21 +370,23 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     std::memset(static_cast<unsigned char*>(mapped) + matchOffset, kCanary, matchBytes);
     std::memcpy(static_cast<unsigned char*>(mapped) + baseOffset, basePubs.data(), inBytes);
     std::memcpy(static_cast<unsigned char*>(mapped) + tableOffset, offsetTable.data(), tableBytes);
+    std::memset(static_cast<unsigned char*>(mapped) + metaOffset, 0, 2 * sizeof(uint32_t));
+    std::memset(static_cast<unsigned char*>(mapped) + ringOffset, kCanary, ringBytes);
     vkUnmapMemory(state.device, state.memory);
 
-    VkDescriptorSetLayoutBinding bindings[8]{};
-    for (uint32_t i = 0; i < 8; ++i) {
+    VkDescriptorSetLayoutBinding bindings[10]{};
+    for (uint32_t i = 0; i < 10; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = 8;
+    layoutInfo.bindingCount = 10;
     layoutInfo.pBindings = bindings;
     if (!check(vkCreateDescriptorSetLayout(state.device, &layoutInfo, nullptr, &state.descriptorLayout),
                "vkCreateDescriptorSetLayout")) return false;
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = 1;
     poolInfo.poolSizeCount = 1;
@@ -389,14 +399,15 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     setInfo.pSetLayouts = &state.descriptorLayout;
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (!check(vkAllocateDescriptorSets(state.device, &setInfo, &set), "vkAllocateDescriptorSets")) return false;
-    VkDescriptorBufferInfo ranges[8] = {
+    VkDescriptorBufferInfo ranges[10] = {
         {state.buffer, 0, inBytes}, {state.buffer, outputOffset, outBytes},
         {state.buffer, fullOffset, fullBytes}, {state.buffer, addressOffset, addressBytes},
         {state.buffer, automatonOffset, automatonBytes}, {state.buffer, matchOffset, matchBytes},
-        {state.buffer, baseOffset, inBytes}, {state.buffer, tableOffset, tableBytes}
+        {state.buffer, baseOffset, inBytes}, {state.buffer, tableOffset, tableBytes},
+        {state.buffer, metaOffset, 2 * sizeof(uint32_t)}, {state.buffer, ringOffset, ringBytes}
     };
-    VkWriteDescriptorSet writes[8]{};
-    for (uint32_t i = 0; i < 8; ++i) {
+    VkWriteDescriptorSet writes[10]{};
+    for (uint32_t i = 0; i < 10; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
         writes[i].dstBinding = i;
@@ -404,7 +415,7 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[i].pBufferInfo = &ranges[i];
     }
-    vkUpdateDescriptorSets(state.device, 8, writes, 0, nullptr);
+    vkUpdateDescriptorSets(state.device, 10, writes, 0, nullptr);
 
     VkShaderModuleCreateInfo shaderInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     shaderInfo.codeSize = sizeof(kVulkanKeccakSpv);
@@ -498,6 +509,12 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state.matchPipeline);
     vkCmdDispatch(command, (activeItems + 63u) / 64u, 1, 1);
+    // Re-run only the matcher in production-style atomic ring mode. The
+    // preceding pass retains deterministic per-key records for comparison.
+    constants.ringMode = 1u;
+    vkCmdPushConstants(command, state.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(constants), &constants);
+    vkCmdDispatch(command, (activeItems + 63u) / 64u, 1, 1);
     barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
@@ -525,12 +542,44 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     bool validFull = validOutput(fullOffset, expectedFull.data(), kFullWords * 4);
     bool validAddresses = validOutput(addressOffset, expectedAddresses.data(), kAddressWords * 4);
     bool validMatches = validOutput(matchOffset, expectedMatches.data(), kMatchWords * 4);
+    const auto* ringMeta = reinterpret_cast<const uint32_t*>(
+        static_cast<const unsigned char*>(mapped) + metaOffset);
+    const auto* ring = reinterpret_cast<const uint32_t*>(
+        static_cast<const unsigned char*>(mapped) + ringOffset);
+    uint32_t expectedProduced = 0, expectedRingFlags = 0;
+    for (uint32_t i = 0; i < activeItems; ++i) {
+        if (expectedMatches[i * kMatchWords] || expectedMatches[i * kMatchWords + 1])
+            ++expectedProduced;
+        if (expectedMatches[i * kMatchWords + 1]) expectedRingFlags |= 2u;
+    }
+    if (expectedProduced > kRingCapacity) expectedRingFlags |= 1u;
+    bool validRing = ringMeta[0] == expectedProduced && ringMeta[1] == expectedRingFlags;
+    if (curveMode == 0u && activeItems == kRingCapacity &&
+        expectedProduced != kRingCapacity) validRing = false;
+    const uint32_t retained = std::min(expectedProduced, kRingCapacity);
+    std::array<bool, kItems> seen{};
+    for (uint32_t slot = 0; slot < retained; ++slot) {
+        const uint32_t* record = ring + slot * kRingWords;
+        const uint32_t gid = record[0];
+        if (gid >= activeItems || seen[gid]) { validRing = false; continue; }
+        seen[gid] = true;
+        const size_t index = size_t(gid) * kMatchWords;
+        if ((!expectedMatches[index] && !expectedMatches[index + 1]) ||
+            record[1] != expectedMatches[index] ||
+            record[2] != expectedMatches[index + 1] || record[3] != 0u ||
+            std::memcmp(record + 4, expectedMatches.data() + index + 2,
+                        16 * sizeof(uint32_t)) != 0) validRing = false;
+    }
+    const auto* ringBytesPtr = static_cast<const unsigned char*>(mapped) + ringOffset;
+    for (size_t i = size_t(retained) * kRingWords * sizeof(uint32_t); i < ringBytes; ++i)
+        if (ringBytesPtr[i] != kCanary) { validRing = false; break; }
     vkUnmapMemory(state.device, state.memory);
     if (!validPublic) { error = "Vulkan secp256k1 public point differs from libsecp256k1"; return false; }
     if (!validPayload) { error = "Vulkan Keccak payload differs from CPU reference"; return false; }
     if (!validFull) { error = "Vulkan SHA-256d checksum differs from CPU reference"; return false; }
     if (!validAddresses) { error = "Vulkan Base58Check address differs from CPU reference"; return false; }
     if (!validMatches) { error = "Vulkan dictionary matches/overflow differ from CPU reference"; return false; }
+    if (!validRing) { error = "Vulkan bounded atomic result ring differs from CPU reference"; return false; }
     return true;
 }
 }
@@ -542,7 +591,7 @@ int vulkanKeccakSelfTest() {
         std::cerr << "Vulkan offset table test setup failed: " << error << "\n";
         return 1;
     }
-    for (uint32_t count : {1u, 63u, 64u, 65u, kItems}) {
+    for (uint32_t count : {1u, kRingCapacity, 63u, 64u, 65u, kItems}) {
         if (!runKeccak(count, 0u, 0u, offsetTable, error)) {
             std::cerr << "Vulkan P+G pipeline test failed at count " << count
                       << ": " << error << "\n";

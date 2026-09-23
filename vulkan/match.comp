@@ -12,12 +12,22 @@ layout(std430, set = 0, binding = 4) readonly buffer Automaton {
 layout(std430, set = 0, binding = 5) writeonly buffer MatchScratch {
     uint words[];
 } results;
+layout(std430, set = 0, binding = 8) buffer RingMeta {
+    uint words[]; // produced count, overflow bits (1=capacity, 2=word IDs)
+} ringMeta;
+layout(std430, set = 0, binding = 9) writeonly buffer RingRecords {
+    uint words[]; // 20 words: gid, count, flags, reserved, 16 IDs
+} ringRecords;
 layout(push_constant) uniform Params {
     uint count;
     uint dfaOffset;
     uint outStartOffset;
     uint outLenOffset;
     uint outIdsOffset;
+    uint curveMode;
+    uint offsetBase;
+    uint ringMode;
+    uint ringCapacity;
 } params;
 
 const uint ALPHABET[58] = uint[58](
@@ -56,8 +66,24 @@ void main() {
             }
         }
     }
-    uint base = gid * 18u;
-    results.words[base] = count;
-    results.words[base + 1u] = flags;
-    for (int i = 0; i < 16; ++i) results.words[base + 2u + uint(i)] = ids[i];
+    if (params.ringMode == 0u) {
+        uint base = gid * 18u;
+        results.words[base] = count;
+        results.words[base + 1u] = flags;
+        for (int i = 0; i < 16; ++i) results.words[base + 2u + uint(i)] = ids[i];
+    } else if (count != 0u || flags != 0u) {
+        uint slot = atomicAdd(ringMeta.words[0], 1u);
+        if (flags != 0u) atomicOr(ringMeta.words[1], 2u);
+        if (slot >= params.ringCapacity) {
+            atomicOr(ringMeta.words[1], 1u);
+            return;
+        }
+        uint base = slot * 20u;
+        ringRecords.words[base] = gid;
+        ringRecords.words[base + 1u] = count;
+        ringRecords.words[base + 2u] = flags;
+        ringRecords.words[base + 3u] = 0u;
+        for (int i = 0; i < 16; ++i)
+            ringRecords.words[base + 4u + uint(i)] = ids[i];
+    }
 }

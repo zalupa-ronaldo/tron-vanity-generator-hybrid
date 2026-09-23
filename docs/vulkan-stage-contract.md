@@ -4,7 +4,8 @@ The native Vulkan wallet backend is **not yet complete**. Source builds with
 `-DTRON_ENABLE_VULKAN=ON` have a generic dispatch probe and a first useful
 SPIR-V Keccak-256 stage from a secp256k1 public key to a 21-byte TRON
 payload, plus SHA-256d from that payload to a checksum-bearing 25-byte
-binary address, then Base58Check to full 34-character TRON address text.
+binary address, then Base58Check to full 34-character TRON address text, then
+matching against the flattened dictionary DFA.
 Neither test is a wallet search or a throughput benchmark. The
 Windows release remains OpenCL/CUDA only.
 
@@ -25,6 +26,13 @@ saves a scalar.
 binding 3 (34 ASCII characters and two zero padding bytes). The test compares
 this final text with `tronAddressFromPubXY()` on every vector. It uses the
 same two-digit (base 58²) long division as the OpenCL resident kernel.
+`vulkan/match.comp` reads the text at binding 3, a packed DFA and output
+tables at binding 4, and writes one 18-word scratch record per address at
+binding 5: retained count, overflow flag, then 16 distinct word IDs. The
+test loads `tests/vulkan_words.txt` through the production Dictionary parser
+and compares all records with `Dictionary::matchIds()`. Its fixed vectors
+must include both in-range and overflow cases; overflow is a fail-closed
+signal, not permission to silently drop extra matches.
 
 This is deliberately a simple 32-bit buffer ABI. Before performance work,
 benchmark the unpack/pack cost and consider an aligned packed layout that
@@ -42,9 +50,10 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    `T` prefix and final checksum; a payload-only or prefix-only rate is not
    comparable. Add varying batch sizes, boundary counts and driver-error
    tests before permitting production output.
-3. Port the dictionary matcher and bounded result ring. Test multiple matches
-   per address, wraparound and overflow. Overflow must stop the search, never
-   silently discard found keys.
+3. Add a bounded result ring for actual findings, scalar/address records and
+   CPU validation. Test wraparound, concurrent writes and overflow. Overflow
+   must stop the search, never silently discard found keys. The current
+   matcher only writes a deterministic per-key scratch record for testing.
 4. Integrate dispatch with the existing `Backend` interface, CLI/config,
    OS CSPRNG base generation, output verification and error handling. Never
    fall back to CPU silently when a strict GPU backend is requested.

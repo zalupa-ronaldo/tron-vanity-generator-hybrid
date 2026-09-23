@@ -68,10 +68,10 @@ Vulkan compute probe for source builds (`-DTRON_ENABLE_VULKAN=ON`, then
 `tron_vanity_generator --vulkan-test`). It compiles a small SPIR-V shader,
 dispatches it and verifies 256 results against the CPU. This is an API and
 compiler check only: **it does not generate wallets or search addresses**.
-`--vulkan-keccak-test` separately exercises three chained real address stages:
-Keccak-256, double SHA-256 and Base58Check of 256 secp256k1 public keys. It
-checks the 21-byte payload, 25-byte checksum-bearing result and full
-34-character TRON address against the CPU. It requires Vulkan `shaderInt64`.
+`test-vulkan` separately exercises four chained real stages: Keccak-256,
+double SHA-256, Base58Check and dictionary matching on 256 secp256k1 public
+keys. It checks intermediate bytes, full 34-character TRON addresses, match
+IDs and overflow flags against the CPU. It requires Vulkan `shaderInt64`.
 The Windows ZIP does not include this optional probe, and there is no Vulkan
 wallet backend yet.
 An opt-in `vulkan-stage-test-windows-x64` executable is also saved as a

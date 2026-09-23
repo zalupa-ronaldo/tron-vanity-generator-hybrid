@@ -19,7 +19,9 @@
 #include <vector>
 
 namespace {
-constexpr uint32_t kItems = 256;
+// Include a partial fifth workgroup in the maximum-size test. All buffers
+// have room for kItems, while each dispatch may process a smaller prefix.
+constexpr uint32_t kItems = 257;
 constexpr size_t kPublicWords = 16;
 constexpr size_t kPayloadWords = 6;
 constexpr size_t kFullWords = 7;
@@ -141,7 +143,11 @@ struct State {
     }
 };
 
-bool runKeccak(std::string& error) {
+bool runKeccak(uint32_t activeItems, std::string& error) {
+    if (!activeItems || activeItems > kItems) {
+        error = "invalid Vulkan test batch size";
+        return false;
+    }
     PublicBatch pubs{};
     PayloadBatch expectedPayload{};
     FullBatch expectedFull{};
@@ -152,11 +158,11 @@ bool runKeccak(std::string& error) {
     if (!makeTestVectors(pubs, expectedPayload, expectedFull, expectedAddresses,
                          expectedMatches, *dictionary, error)) return false;
     size_t overflows = 0, inRange = 0;
-    for (uint32_t i = 0; i < kItems; ++i) {
+    for (uint32_t i = 0; i < activeItems; ++i) {
         if (expectedMatches[i * kMatchWords + 1]) ++overflows;
         else ++inRange;
     }
-    if (!overflows || !inRange) {
+    if (activeItems == kItems && (!overflows || !inRange)) {
         error = "dictionary vectors did not cover both bounded and overflow matches";
         return false;
     }
@@ -164,7 +170,7 @@ bool runKeccak(std::string& error) {
     struct PushConstants {
         uint32_t count, dfaOffset, outStartOffset, outLenOffset, outIdsOffset;
     } constants{};
-    constants.count = kItems;
+    constants.count = activeItems;
     constants.dfaOffset = 0;
     automaton.insert(automaton.end(), dictionary->dfa.begin(), dictionary->dfa.end());
     constants.outStartOffset = static_cast<uint32_t>(automaton.size());
@@ -274,12 +280,15 @@ bool runKeccak(std::string& error) {
     if (!check(vkMapMemory(state.device, state.memory, 0, bufferInfo.size, 0, &mapped),
                "vkMapMemory(input)")) return false;
     std::memcpy(mapped, pubs.data(), inBytes);
-    std::memset(static_cast<unsigned char*>(mapped) + outputOffset, 0, outBytes);
-    std::memset(static_cast<unsigned char*>(mapped) + fullOffset, 0, fullBytes);
-    std::memset(static_cast<unsigned char*>(mapped) + addressOffset, 0, addressBytes);
+    // A non-zero canary catches accidental writes by inactive lanes in the
+    // final workgroup, which a comparison of only active records would miss.
+    constexpr unsigned char kCanary = 0xa5;
+    std::memset(static_cast<unsigned char*>(mapped) + outputOffset, kCanary, outBytes);
+    std::memset(static_cast<unsigned char*>(mapped) + fullOffset, kCanary, fullBytes);
+    std::memset(static_cast<unsigned char*>(mapped) + addressOffset, kCanary, addressBytes);
     std::memcpy(static_cast<unsigned char*>(mapped) + automatonOffset,
                 automaton.data(), automatonBytes);
-    std::memset(static_cast<unsigned char*>(mapped) + matchOffset, 0, matchBytes);
+    std::memset(static_cast<unsigned char*>(mapped) + matchOffset, kCanary, matchBytes);
     vkUnmapMemory(state.device, state.memory);
 
     VkDescriptorSetLayoutBinding bindings[6]{};
@@ -387,22 +396,22 @@ bool runKeccak(std::string& error) {
                             0, 1, &set, 0, nullptr);
     vkCmdPushConstants(command, state.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(constants), &constants);
-    vkCmdDispatch(command, kItems / 64, 1, 1);
+    vkCmdDispatch(command, (activeItems + 63u) / 64u, 1, 1);
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state.checksumPipeline);
-    vkCmdDispatch(command, kItems / 64, 1, 1);
+    vkCmdDispatch(command, (activeItems + 63u) / 64u, 1, 1);
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state.base58Pipeline);
-    vkCmdDispatch(command, kItems / 64, 1, 1);
+    vkCmdDispatch(command, (activeItems + 63u) / 64u, 1, 1);
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state.matchPipeline);
-    vkCmdDispatch(command, kItems / 64, 1, 1);
+    vkCmdDispatch(command, (activeItems + 63u) / 64u, 1, 1);
     barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
@@ -417,14 +426,18 @@ bool runKeccak(std::string& error) {
                "vkWaitForFences")) return false;
     if (!check(vkMapMemory(state.device, state.memory, 0, bufferInfo.size, 0, &mapped),
                "vkMapMemory(output)")) return false;
-    bool validPayload = std::memcmp(static_cast<const unsigned char*>(mapped) + outputOffset,
-                                    expectedPayload.data(), outBytes) == 0;
-    bool validFull = std::memcmp(static_cast<const unsigned char*>(mapped) + fullOffset,
-                                 expectedFull.data(), fullBytes) == 0;
-    bool validAddresses = std::memcmp(static_cast<const unsigned char*>(mapped) + addressOffset,
-                                      expectedAddresses.data(), addressBytes) == 0;
-    bool validMatches = std::memcmp(static_cast<const unsigned char*>(mapped) + matchOffset,
-                                    expectedMatches.data(), matchBytes) == 0;
+    auto validOutput = [&](VkDeviceSize offset, const void* expected, size_t stride) {
+        const auto* actual = static_cast<const unsigned char*>(mapped) + offset;
+        const size_t activeBytes = size_t(activeItems) * stride;
+        if (std::memcmp(actual, expected, activeBytes) != 0) return false;
+        for (size_t i = activeBytes; i < size_t(kItems) * stride; ++i)
+            if (actual[i] != kCanary) return false;
+        return true;
+    };
+    bool validPayload = validOutput(outputOffset, expectedPayload.data(), kPayloadWords * 4);
+    bool validFull = validOutput(fullOffset, expectedFull.data(), kFullWords * 4);
+    bool validAddresses = validOutput(addressOffset, expectedAddresses.data(), kAddressWords * 4);
+    bool validMatches = validOutput(matchOffset, expectedMatches.data(), kMatchWords * 4);
     vkUnmapMemory(state.device, state.memory);
     if (!validPayload) { error = "Vulkan Keccak payload differs from CPU reference"; return false; }
     if (!validFull) { error = "Vulkan SHA-256d checksum differs from CPU reference"; return false; }
@@ -436,10 +449,14 @@ bool runKeccak(std::string& error) {
 
 int vulkanKeccakSelfTest() {
     std::string error;
-    if (!runKeccak(error)) {
-        std::cerr << "Vulkan Keccak stage test failed: " << error << "\n";
-        return error == "no Vulkan compute device with shaderInt64" ? 77 : 1;
+    for (uint32_t count : {1u, 63u, 64u, 65u, kItems}) {
+        if (!runKeccak(count, error)) {
+            std::cerr << "Vulkan address pipeline test failed at count " << count
+                      << ": " << error << "\n";
+            return error == "no Vulkan compute device with shaderInt64" ? 77 : 1;
+        }
     }
-    std::cout << "Vulkan address + dictionary stages PASS (256 full TRON addresses; no wallets)\n";
+    std::cout << "Vulkan address + dictionary stages PASS "
+                 "(1/63/64/65/257 full TRON addresses; no wallets)\n";
     return 0;
 }

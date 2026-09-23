@@ -15,9 +15,11 @@ Windows release remains OpenCL/CUDA only.
 uncompressed public key (`X||Y`, no `0x04` prefix) at storage binding 0. It
 outputs six little-endian words at binding 1: byte `0x41`, the last 20 bytes
 of Keccak-256, and three zero padding bytes. A four-byte push constant is the
-key count. The test uses 256 deterministic, unfunded secp256k1 test scalars;
-the host computes public keys and CPU Keccak reference values and compares
-every output word. `vulkan/checksum.comp` then reads binding 1 and writes
+key count. The test uses up to 257 deterministic, unfunded secp256k1 test
+scalars. It dispatches counts 1, 63, 64, 65 and 257, comparing every active
+output word with CPU references and checking that inactive workgroup lanes
+leave canary-filled output records untouched. `vulkan/checksum.comp` then
+reads binding 1 and writes
 seven little-endian words at binding 2: the 25-byte address plus three zero
 padding bytes. A compute-to-compute barrier separates the two dispatches;
 both intermediate and final buffers are checked. The test never prints or

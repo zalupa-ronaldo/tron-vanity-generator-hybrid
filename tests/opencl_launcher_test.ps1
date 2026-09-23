@@ -113,6 +113,7 @@ try {
         if ($case.CompareGroups) { $launcherArgs += "-CompareGroupSizes" }
         if ($case.CompareMeta) { $launcherArgs += "-CompareMetaRead" }
         if ($case.CompareRuntime) { $launcherArgs += "-CompareRuntimeSizing" }
+        if ($case.UpdateConfig) { $launcherArgs += "-UpdateConfig" }
         if ($case.All) { $launcherArgs += "-All" }
         $output = & powershell.exe @launcherArgs 2>&1
         if ($LASTEXITCODE -ne $case.Exit) { throw "$($case.Mode) exit mismatch: $LASTEXITCODE`n$($output -join "`n")" }

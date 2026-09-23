@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
 $words = Join-Path $PSScriptRoot "words.txt"
-if (-not (Test-Path -LiteralPath $exe)) { throw "Extract the complete Vulkan test artifact first." }
+if (-not (Test-Path -LiteralPath $exe)) { throw "Extract the complete Windows ZIP next to this script first." }
 if (-not (Test-Path -LiteralPath $words)) { throw "Put the same words.txt used by OpenCL next to the exe." }
 
 $logDir = Join-Path $PSScriptRoot ("vulkan-benchmark-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" +

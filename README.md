@@ -84,8 +84,10 @@ requires Vulkan `shaderInt64`.
 The production-backend part additionally uses the full 58-character Base58
 alphabet to fill the result ring and test fresh-base rollover without saving
 wallets.
-The regular Windows ZIP does not include Vulkan. Opt-in Vulkan builds now
-also provide an **experimental** `--backend vulkan` full-address wallet backend:
+The Windows ZIP includes an **experimental** `--backend vulkan` full-address
+wallet backend, but its adjacent `tron-vanity.conf` still selects OpenCL, so
+double-clicking the exe does not use Vulkan. Vulkan runs only when explicitly
+selected. In this mode:
 OS CSPRNG chooses a base scalar, GPU computes all address stages and dictionary
 matches, and CPU independently verifies every reported key/address/match.
 It fails closed on a driver timeout or result-ring overflow. The reusable
@@ -95,17 +97,17 @@ wallet output is independently checked. It is not expected to beat staged
 OpenCL yet. The conservative Vulkan curve mode inverts each point separately;
 experimental `--vulkan-curve-batch 4` shares one field inversion across four
 points, but has not been timed on the RX 9070 XT.
-An opt-in `vulkan-stage-test-windows-x64` bundle is saved as a short-lived
-artifact of successful GitHub Actions builds. It includes the Vulkan-enabled
-exe, a starter `words.txt` and `bench-vulkan.cmd`. Do not overwrite the working
-OpenCL release with it; extract it into a separate folder.
+The regular Windows ZIP includes `bench-vulkan.cmd` and `bench-vulkan.ps1` for
+a bounded, no-wallet Vulkan/OpenCL comparison. GitHub Actions also keeps a
+short-lived, standalone `vulkan-stage-test-windows-x64` artifact; it is not
+needed if you have the current ZIP.
 
 For a source build on Windows with the [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
 installed, use `powershell -ExecutionPolicy Bypass -File .\build.ps1 -EnableVulkan`.
 The build runs the Vulkan stage and repeated-dispatch tests locally. The SDK
-is a build dependency, not needed by current regular Windows ZIP users.
+is a build dependency, not needed to run the prebuilt Windows ZIP.
 The installed Vulkan runtime/driver is still required on the target machine.
-For a bounded, no-wallet A/B test from that optional folder, replace its
+For a bounded, no-wallet A/B test from the extracted ZIP, replace its
 `words.txt` with the **same 358-word file** used for the OpenCL measurement,
 then double-click `bench-vulkan.cmd` (or run it in a terminal):
 
@@ -117,7 +119,7 @@ It first runs `test-vulkan`, then measures the matched OpenCL reference and
 Vulkan batches 1/4 twice in interleaved order. Every child has a timeout;
 `summary.txt` and `benchmark.csv` contain the wall rates and dictionary hash,
 without wallet files. Send only these two reports, not `results` or wallets.
-The script passes `--no-config` because the regular config intentionally
+The script passes `--no-config` because the bundled config intentionally
 selects OpenCL and includes OpenCL-only options. `--backend vulkan` never silently
 falls back to CPU: software Vulkan devices are rejected for normal runs.
 For a deliberate no-wallet software-driver benchmark in a development

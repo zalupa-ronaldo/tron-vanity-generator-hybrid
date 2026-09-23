@@ -12,7 +12,8 @@ default one-key variant. Neither Vulkan mode has been profiled on the RX.
 The generic and deterministic stage tests do not save wallets. A separate
 reusable `--backend vulkan` path now runs full-address searches or no-wallet
 benchmarks, but is not validated on the RX 9070 XT. The regular Windows
-release remains OpenCL/CUDA only.
+release now includes the Vulkan code, while its adjacent config still selects
+OpenCL by default. Vulkan requires an explicit backend selection.
 
 ## Verified interface to preserve
 
@@ -89,7 +90,7 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    selecting a default. If batch 4 loses on RX, inspect VGPR/scratch and
    consider separate point/affine stages, a smaller batch, or a cooperative
    inversion layout. Verify random-base rollover and long-running searches.
-   The opt-in Windows CI bundle has `bench-vulkan.cmd`: a bounded no-wallet
+   The normal Windows ZIP and opt-in CI bundle have `bench-vulkan.cmd`: a bounded no-wallet
    correctness gate followed by interleaved, repeated OpenCL/Vulkan 1/4 wall
    profiles on its adjacent dictionary. Copy the actual 358-word `words.txt`
    into that separate test folder first; do not use the starter file for an
@@ -114,8 +115,8 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    7,526 ns/key curve and 4,454 ns/key dictionary match. This validates the
    instrumentation path, **not** RX performance: both the software driver
    and artificial word mix differ from the target workload.
-   Driver-error injection, varied production batch sizes and long-running
-   rollover tests remain to be added.
+   A synthetic `VK_ERROR_DEVICE_LOST` at submit is covered; varied production
+   batch sizes, actual driver faults and long-running rollover tests remain.
 3. Windows Vulkan SDK CI now compiles the optional backend, but runtime has
    only been verified with Mesa software Vulkan on Linux. Test the stage
    executable on the actual RX 9070 XT before enabling any production use.

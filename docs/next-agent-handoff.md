@@ -76,8 +76,9 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    with CPU/libsecp256k1, including offset-window and capacity boundaries. They
    are built only with `-DTRON_ENABLE_VULKAN=ON`. Linux CI uses Mesa's
    software Vulkan driver; Windows SDK CI compiles the optional stages but
-   has no RX 9070 XT to execute them. The Windows release uses the stub;
-   the separate CI artifact is opt-in. `vulkan/vulkan_backend.cpp` now adds
+   has no RX 9070 XT to execute them. The Windows release compiles the Vulkan
+   backend, but its adjacent config selects OpenCL; Vulkan is explicit opt-in.
+   `vulkan/vulkan_backend.cpp` now adds
    reusable bounded dispatch, CSPRNG base rollover, ring drain and CPU
    verification of candidate private keys. `--backend vulkan` is explicit and
    fails closed; `test-vulkan` also exercises the production backend without
@@ -88,9 +89,9 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    inversion variant. Mesa CPU/GPU equivalence and short software-driver
    A/B/A profiles pass, but no RX speed claim is justified. Matched RX/OpenCL
    A/B performance work remains. The
-   native backend has not yet run on the user's RX 9070 XT; do not include it
-   in a normal Windows release or recommend it for funds until that test
-   passes. The opt-in CI artifact packages `bench-vulkan.cmd`, which first
+   native backend has not yet run on the user's RX 9070 XT; do not recommend
+   it for funds until that test passes. The normal Windows ZIP and opt-in CI
+   artifact both package `bench-vulkan.cmd`, which first
    runs `test-vulkan` and then measures OpenCL / Vulkan batch 1 / batch 4 /
    batch 1 / batch 4 / OpenCL with bounded child processes and the same
    adjacent `words.txt`. Its `summary.txt` and `benchmark.csv` are safe to

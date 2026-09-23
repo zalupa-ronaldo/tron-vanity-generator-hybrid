@@ -97,21 +97,37 @@ jobs:
       - name: Install build-time CUDA compiler (no GPU needed)
         run: python -m pip install nvidia-cuda-nvrtc-cu12==12.6.85
 
-      - name: Build and run smoke tests
-        shell: pwsh
-        run: .\build.ps1 -EnableCuda
-
-      - name: Validate bounded OpenCL launcher syntax
+      - name: Install pinned Vulkan SDK for the release executable
         shell: pwsh
         run: |
-          $parseErrors = $null
-          $tokens = $null
-          [System.Management.Automation.Language.Parser]::ParseFile("$pwd/test-opencl.ps1", [ref]$tokens, [ref]$parseErrors) | Out-Null
-          if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          choco install vulkan-sdk --version 1.4.350 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK install failed: $LASTEXITCODE" }
+          $env:VULKAN_SDK = 'C:\VulkanSDK\1.4.350.0'
+          if (-not (Test-Path "$env:VULKAN_SDK\Bin\glslangValidator.exe")) {
+            throw 'Vulkan SDK shader compiler missing'
+          }
+          "VULKAN_SDK=$env:VULKAN_SDK" >> $env:GITHUB_ENV
+          "$env:VULKAN_SDK\Bin" >> $env:GITHUB_PATH
+
+      - name: Build and run smoke tests
+        shell: pwsh
+        run: .\build.ps1 -EnableCuda -EnableVulkan -SkipVulkanRuntimeTests
+
+      - name: Validate bounded benchmark launcher syntax
+        shell: pwsh
+        run: |
+          foreach ($script in @('test-opencl.ps1', 'bench-vulkan.ps1')) {
+            $parseErrors = $null
+            $tokens = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $pwd $script), [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) { throw "$script syntax error: $($parseErrors | Out-String)" }
+          }
 
       - name: Test diagnostic launcher process isolation and recovery
         shell: powershell
-        run: .\tests\opencl_launcher_test.ps1
+        run: |
+          .\tests\opencl_launcher_test.ps1
+          .\tests\vulkan_launcher_test.ps1
 
       - name: Package release
         shell: pwsh
@@ -120,13 +136,13 @@ jobs:
           Copy-Item build\tron_vanity_generator.exe release\
           Copy-Item words.example.txt release\words.txt
           Copy-Item README.md,NOTICE,LICENSE,tron-vanity.conf release\
-          Copy-Item test-opencl.ps1,test-opencl.cmd,bench.cmd release\
+          Copy-Item test-opencl.ps1,test-opencl.cmd,bench.cmd,bench-vulkan.ps1,bench-vulkan.cmd release\
           Compress-Archive -Path release\* -DestinationPath tron-vanity-generator-windows-x64.zip
 
       - name: Verify packaged no-argument configuration
         shell: pwsh
         run: |
-          foreach ($name in @('tron_vanity_generator.exe', 'tron-vanity.conf', 'words.txt', 'bench.cmd')) {
+          foreach ($name in @('tron_vanity_generator.exe', 'tron-vanity.conf', 'words.txt', 'bench.cmd', 'bench-vulkan.cmd', 'bench-vulkan.ps1')) {
             if (-not (Test-Path (Join-Path release $name))) { throw "Missing release file: $name" }
           }
           Push-Location release

@@ -57,7 +57,9 @@ bench.cmd                           bounded full configuration benchmark
 ```
 
 `bench.cmd` writes `summary.txt` and `benchmark.csv` in a new
-`opencl-diagnostic-*` folder. It never creates wallet files. Search results,
+`opencl-diagnostic-*` folder. It ignores the adjacent search config and records
+the exe and dictionary SHA-256 hashes, so A/B results can be checked against
+the same build and word list. It never creates wallet files. Search results,
 by contrast, contain **unencrypted private keys** in `results`; protect that
 folder, never upload it, and move funds only after independently verifying an
 address. `tron_vanity_generator.exe bench` also runs an in-process OpenCL

@@ -44,6 +44,13 @@ function Write-Report([string]$Text) {
     Add-Content -LiteralPath $summary -Value $Text -Encoding UTF8
 }
 
+Write-Report "Executable SHA-256: $((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)"
+$dictionaryPath = Join-Path $PSScriptRoot "words.txt"
+if (Test-Path -LiteralPath $dictionaryPath) {
+    Write-Report "Dictionary SHA-256: $((Get-FileHash -LiteralPath $dictionaryPath -Algorithm SHA256).Hash)"
+}
+Write-Report "All diagnostic children use --no-config; the adjacent search config cannot alter benchmark options."
+
 function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments, [bool]$CompactReport = $false) {
     Write-Report ("`n[" + $Name + "] " + ($TestArguments -join " "))
     $stdoutPath = Join-Path $logDir "$Name.stdout.txt"
@@ -149,7 +156,7 @@ function Invoke-Variant([string]$Name, [string[]]$VariantArguments, [string[]]$B
     return Invoke-BoundedTest $Name $profileArgs $true
 }
 
-$common = @("--backend", "opencl", "--gpu-group-size", "64", "--opencl-compiler", $Compiler, "--opencl-pipeline", $Pipeline)
+$common = @("--no-config", "--backend", "opencl", "--gpu-group-size", "64", "--opencl-compiler", $Compiler, "--opencl-pipeline", $Pipeline)
 $smokeOk = Invoke-BoundedTest "01-smoke" ($common + @("--opencl-diagnose", "smoke"))
 if (-not $smokeOk) {
     Write-Report "Even the tiny OpenCL kernel failed/timed out. EC/RNG optimization is not isolated as the cause. Stopping."

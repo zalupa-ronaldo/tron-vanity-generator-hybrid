@@ -14,6 +14,7 @@ public class Fixture {
         return i >= 0 && i + 1 < args.Length ? args[i + 1] : "";
     }
     public static int Main(string[] args) {
+        if (Array.IndexOf(args, "--no-config") < 0) return 3;
         string mode = Environment.GetEnvironmentVariable("TRON_LAUNCHER_FIXTURE");
         string stage = Value(args, "--opencl-diagnose");
         if (Array.IndexOf(args, "--opencl-profile") >= 0) stage = "profile";
@@ -118,6 +119,9 @@ try {
         $report = Get-Content -LiteralPath $reports[0].FullName -Raw
         foreach ($expected in @($case.Text, "OpenCL API: fixture BEGIN", "Send summary.txt")) {
             if (-not $report.Contains($expected)) { throw "$($case.Mode) missing '$expected'`n$report" }
+        }
+        if (-not $report.Contains("Dictionary SHA-256: $((Get-FileHash -LiteralPath (Join-Path $dir 'words.txt') -Algorithm SHA256).Hash)")) {
+            throw "$($case.Mode) missing dictionary fingerprint"
         }
         $expectedTimingLines = if ($case.All) { $case.TimingCount } elseif ($case.CompareStages) { 8 } elseif ($case.CompareRuntime) { 7 } elseif ($case.CompareAffine -or $case.CompareCurve -or $case.CompareGroups) { 4 } elseif ($case.CompareSha -or $case.CompareMeta) { 3 } elseif ($case.Calls.Contains("profile")) { 1 } else { 0 }
         $timingLines = ([regex]::Matches($report, "host timing:")).Count

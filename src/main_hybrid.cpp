@@ -133,7 +133,7 @@ void usage() {
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL/CUDA devices and exit\n"
         "  --vulkan-test     native Vulkan compute API smoke test (not wallet search)\n"
-        "  --vulkan-keccak-test  verify native Vulkan address stages against CPU\n"
+        "  --vulkan-keccak-test  verify native Vulkan curve/address/ring against CPU\n"
         "  --verbose         more frequent progress updates\n"
         "  --selftest | --hashtest | --matchtest | --gputest | --bench\n";
 }

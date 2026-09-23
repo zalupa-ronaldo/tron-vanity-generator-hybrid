@@ -8,7 +8,7 @@ option(STATIC_RUNTIME "静态链接 C/C++ 运行库（便携 exe）" ON)
 project(tron_vanity_generator CXX)
 
 option(TRON_ENABLE_CUDA "Embed native NVIDIA CUDA PTX kernels" OFF)
-option(TRON_ENABLE_VULKAN "Build the native Vulkan compute integration probe" OFF)
+option(TRON_ENABLE_VULKAN "Build the native Vulkan compute pipeline self-test" OFF)
 set(TRON_CUDA_PTX_HEADER "" CACHE FILEPATH "Precompiled cuda_ptx.h for cross-compilation")
 if(TRON_ENABLE_CUDA)
   set(CUDA_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/cuda_ptx.h)

@@ -35,11 +35,25 @@ jobs:
           .\build.ps1 -EnableVulkan -SkipVulkanRuntimeTests
           # GitHub's Windows runner has no RX 9070 XT; it cannot validate the
           # GPU dispatch. Linux Mesa does runtime correctness, RX needs user A/B.
+      - name: Verify optional Vulkan benchmark launcher
+        shell: powershell
+        run: |
+          $parseErrors = $null
+          $tokens = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$pwd/bench-vulkan.ps1", [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          .\tests\vulkan_launcher_test.ps1
+      - name: Package opt-in Vulkan benchmark
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path vulkan-stage-test | Out-Null
+          Copy-Item build\tron_vanity_generator.exe,bench-vulkan.cmd,bench-vulkan.ps1 vulkan-stage-test\
+          Copy-Item words.example.txt vulkan-stage-test\words.txt
       - name: Keep opt-in Vulkan stage-test executable
         uses: actions/upload-artifact@v4
         with:
           name: vulkan-stage-test-windows-x64
-          path: build/tron_vanity_generator.exe
+          path: vulkan-stage-test/
           if-no-files-found: error
           retention-days: 14
 

@@ -84,11 +84,14 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    A/B performance work remains. The
    native backend has not yet run on the user's RX 9070 XT; do not include it
    in a normal Windows release or recommend it for funds until that test
-   passes. `--vulkan-profile --vulkan-curve-batch 1|4 --bench-seconds 5`
-   collects wall rate and
-   per-stage GPU timestamps (when supported), plus host-visible memory
-   locality, without writing wallets. Use the same dictionary as OpenCL and
-   compare wall rate first. A non-device-local mapping may be limited by PCIe;
+   passes. The opt-in CI artifact packages `bench-vulkan.cmd`, which first
+   runs `test-vulkan` and then measures OpenCL / Vulkan batch 1 / batch 4 /
+   batch 1 / batch 4 / OpenCL with bounded child processes and the same
+   adjacent `words.txt`. Its `summary.txt` and `benchmark.csv` are safe to
+   share; wallets are not produced. The underlying `--vulkan-profile
+   --vulkan-curve-batch 1|4 --bench-seconds 5` reports wall rate and per-stage
+   GPU timestamps (when supported), plus host-visible memory locality.
+   Compare wall rate first. A non-device-local mapping may be limited by PCIe;
    test device-local scratch plus staging before optimizing shader math.
    It also needs driver-error injection and a matched RX performance profile;
    OpenCL running on `clvk` would be a compatibility

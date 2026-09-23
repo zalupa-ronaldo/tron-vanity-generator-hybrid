@@ -86,26 +86,30 @@ wallet output is independently checked. It is not expected to beat staged
 OpenCL yet. The conservative Vulkan curve mode inverts each point separately;
 experimental `--vulkan-curve-batch 4` shares one field inversion across four
 points, but has not been timed on the RX 9070 XT.
-An opt-in `vulkan-stage-test-windows-x64` executable is also saved as a
-short-lived artifact of successful GitHub Actions builds; on an RX 9070 XT it
-can run `tron_vanity_generator.exe test-vulkan` without writing wallets.
+An opt-in `vulkan-stage-test-windows-x64` bundle is saved as a short-lived
+artifact of successful GitHub Actions builds. It includes the Vulkan-enabled
+exe, a starter `words.txt` and `bench-vulkan.cmd`. Do not overwrite the working
+OpenCL release with it; extract it into a separate folder.
 
 For a source build on Windows with the [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
 installed, use `powershell -ExecutionPolicy Bypass -File .\build.ps1 -EnableVulkan`.
 The build runs the Vulkan stage and repeated-dispatch tests locally. The SDK
 is a build dependency, not needed by current regular Windows ZIP users.
 The installed Vulkan runtime/driver is still required on the target machine.
-For a bounded, no-wallet A/B test from the optional executable, use:
+For a bounded, no-wallet A/B test from that optional folder, replace its
+`words.txt` with the **same 358-word file** used for the OpenCL measurement,
+then double-click `bench-vulkan.cmd` (or run it in a terminal):
 
 ```bat
-tron_vanity_generator.exe --no-config test-vulkan
-tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --bench --bench-seconds 5
-tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --vulkan-profile --vulkan-curve-batch 1 --bench-seconds 5
-tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --vulkan-profile --vulkan-curve-batch 4 --bench-seconds 5
+bench-vulkan.cmd
 ```
 
-Use `--no-config` because the bundled default config intentionally selects
-OpenCL and includes OpenCL-only options. `--backend vulkan` never silently
+It first runs `test-vulkan`, then measures the matched OpenCL reference and
+Vulkan batches 1/4 twice in interleaved order. Every child has a timeout;
+`summary.txt` and `benchmark.csv` contain the wall rates and dictionary hash,
+without wallet files. Send only these two reports, not `results` or wallets.
+The script passes `--no-config` because the regular config intentionally
+selects OpenCL and includes OpenCL-only options. `--backend vulkan` never silently
 falls back to CPU: software Vulkan devices are rejected for normal runs.
 For a deliberate no-wallet software-driver benchmark in a development
 environment, set `TRON_VULKAN_ALLOW_SOFTWARE=1`. Do not compare that CI rate

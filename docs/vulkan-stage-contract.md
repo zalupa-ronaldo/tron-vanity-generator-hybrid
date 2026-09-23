@@ -77,6 +77,11 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    selecting a default. If batch 4 loses on RX, inspect VGPR/scratch and
    consider separate point/affine stages, a smaller batch, or a cooperative
    inversion layout. Verify random-base rollover and long-running searches.
+   The opt-in Windows CI bundle has `bench-vulkan.cmd`: a bounded no-wallet
+   correctness gate followed by interleaved, repeated OpenCL/Vulkan 1/4 wall
+   profiles on its adjacent dictionary. Copy the actual 358-word `words.txt`
+   into that separate test folder first; do not use the starter file for an
+   RX-versus-OpenCL claim.
 2. `vulkan/vulkan_backend.cpp` now reuses descriptors, pipelines, buffers and
    command objects across bounded batches. It resets and drains the atomic
    ring every dispatch. The OS CSPRNG base expands into a 22-bit offset

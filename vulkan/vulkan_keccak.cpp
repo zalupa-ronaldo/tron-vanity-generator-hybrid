@@ -1,6 +1,7 @@
 #include "vulkan_probe.h"
 #include "vulkan_keccak_spv.h"
 #include "vulkan_checksum_spv.h"
+#include "vulkan_base58_spv.h"
 #include "crypto.h"
 
 #include <vulkan/vulkan.h>
@@ -19,13 +20,15 @@ constexpr uint32_t kItems = 256;
 constexpr size_t kPublicWords = 16;
 constexpr size_t kPayloadWords = 6;
 constexpr size_t kFullWords = 7;
+constexpr size_t kAddressWords = 9;
 using PublicBatch = std::array<uint32_t, kItems * kPublicWords>;
 using PayloadBatch = std::array<uint32_t, kItems * kPayloadWords>;
 using FullBatch = std::array<uint32_t, kItems * kFullWords>;
+using AddressBatch = std::array<uint32_t, kItems * kAddressWords>;
 
 // These are deterministic, unfunded *test* keys. Never use them as wallets.
 bool makeTestVectors(PublicBatch& pubs, PayloadBatch& payloads,
-                     FullBatch& fulls, std::string& error) {
+                     FullBatch& fulls, AddressBatch& addresses, std::string& error) {
     using SecpContext = std::unique_ptr<secp256k1_context, decltype(&secp256k1_context_destroy)>;
     SecpContext ctx(secp256k1_context_create(SECP256K1_CONTEXT_NONE), secp256k1_context_destroy);
     if (!ctx) { error = "secp256k1 context creation failed"; return false; }
@@ -67,6 +70,18 @@ bool makeTestVectors(PublicBatch& pubs, PayloadBatch& payloads,
                 (uint32_t(full[j + 1]) << 8) | (uint32_t(full[j + 2]) << 16) |
                 (uint32_t(full[j + 3]) << 24);
         }
+        const std::string address = tronAddressFromPubXY(xy);
+        if (address.size() != 34 || address[0] != 'T') {
+            error = "CPU TRON test address is not 34 chars starting with T"; return false;
+        }
+        unsigned char padded[36]{};
+        std::memcpy(padded, address.data(), address.size());
+        for (size_t word = 0; word < kAddressWords; ++word) {
+            const size_t j = word * 4;
+            addresses[i * kAddressWords + word] = uint32_t(padded[j]) |
+                (uint32_t(padded[j + 1]) << 8) | (uint32_t(padded[j + 2]) << 16) |
+                (uint32_t(padded[j + 3]) << 24);
+        }
     }
     return true;
 }
@@ -84,8 +99,10 @@ struct State {
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkShaderModule shader = VK_NULL_HANDLE;
     VkShaderModule checksumShader = VK_NULL_HANDLE;
+    VkShaderModule base58Shader = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipeline checksumPipeline = VK_NULL_HANDLE;
+    VkPipeline base58Pipeline = VK_NULL_HANDLE;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     ~State() {
@@ -94,8 +111,10 @@ struct State {
         if (device && commandPool) vkDestroyCommandPool(device, commandPool, nullptr);
         if (device && pipeline) vkDestroyPipeline(device, pipeline, nullptr);
         if (device && checksumPipeline) vkDestroyPipeline(device, checksumPipeline, nullptr);
+        if (device && base58Pipeline) vkDestroyPipeline(device, base58Pipeline, nullptr);
         if (device && shader) vkDestroyShaderModule(device, shader, nullptr);
         if (device && checksumShader) vkDestroyShaderModule(device, checksumShader, nullptr);
+        if (device && base58Shader) vkDestroyShaderModule(device, base58Shader, nullptr);
         if (device && pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
         if (device && descriptorPool) vkDestroyDescriptorPool(device, descriptorPool, nullptr);
         if (device && descriptorLayout) vkDestroyDescriptorSetLayout(device, descriptorLayout, nullptr);
@@ -110,7 +129,8 @@ bool runKeccak(std::string& error) {
     PublicBatch pubs{};
     PayloadBatch expectedPayload{};
     FullBatch expectedFull{};
-    if (!makeTestVectors(pubs, expectedPayload, expectedFull, error)) return false;
+    AddressBatch expectedAddresses{};
+    if (!makeTestVectors(pubs, expectedPayload, expectedFull, expectedAddresses, error)) return false;
     State state;
     auto check = [&](VkResult result, const char* call) {
         if (result == VK_SUCCESS) return true;
@@ -173,11 +193,13 @@ bool runKeccak(std::string& error) {
     constexpr VkDeviceSize inBytes = sizeof(PublicBatch);
     constexpr VkDeviceSize outBytes = sizeof(PayloadBatch);
     constexpr VkDeviceSize fullBytes = sizeof(FullBatch);
+    constexpr VkDeviceSize addressBytes = sizeof(AddressBatch);
     const VkDeviceSize alignment = properties.limits.minStorageBufferOffsetAlignment;
     const VkDeviceSize outputOffset = (inBytes + alignment - 1) / alignment * alignment;
     const VkDeviceSize fullOffset = (outputOffset + outBytes + alignment - 1) / alignment * alignment;
+    const VkDeviceSize addressOffset = (fullOffset + fullBytes + alignment - 1) / alignment * alignment;
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bufferInfo.size = fullOffset + fullBytes;
+    bufferInfo.size = addressOffset + addressBytes;
     bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(state.device, &bufferInfo, nullptr, &state.buffer), "vkCreateBuffer")) return false;
@@ -208,21 +230,22 @@ bool runKeccak(std::string& error) {
     std::memcpy(mapped, pubs.data(), inBytes);
     std::memset(static_cast<unsigned char*>(mapped) + outputOffset, 0, outBytes);
     std::memset(static_cast<unsigned char*>(mapped) + fullOffset, 0, fullBytes);
+    std::memset(static_cast<unsigned char*>(mapped) + addressOffset, 0, addressBytes);
     vkUnmapMemory(state.device, state.memory);
 
-    VkDescriptorSetLayoutBinding bindings[3]{};
-    for (uint32_t i = 0; i < 3; ++i) {
+    VkDescriptorSetLayoutBinding bindings[4]{};
+    for (uint32_t i = 0; i < 4; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = 3;
+    layoutInfo.bindingCount = 4;
     layoutInfo.pBindings = bindings;
     if (!check(vkCreateDescriptorSetLayout(state.device, &layoutInfo, nullptr, &state.descriptorLayout),
                "vkCreateDescriptorSetLayout")) return false;
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = 1;
     poolInfo.poolSizeCount = 1;
@@ -235,12 +258,12 @@ bool runKeccak(std::string& error) {
     setInfo.pSetLayouts = &state.descriptorLayout;
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (!check(vkAllocateDescriptorSets(state.device, &setInfo, &set), "vkAllocateDescriptorSets")) return false;
-    VkDescriptorBufferInfo ranges[3] = {
+    VkDescriptorBufferInfo ranges[4] = {
         {state.buffer, 0, inBytes}, {state.buffer, outputOffset, outBytes},
-        {state.buffer, fullOffset, fullBytes}
+        {state.buffer, fullOffset, fullBytes}, {state.buffer, addressOffset, addressBytes}
     };
-    VkWriteDescriptorSet writes[3]{};
-    for (uint32_t i = 0; i < 3; ++i) {
+    VkWriteDescriptorSet writes[4]{};
+    for (uint32_t i = 0; i < 4; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
         writes[i].dstBinding = i;
@@ -248,7 +271,7 @@ bool runKeccak(std::string& error) {
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[i].pBufferInfo = &ranges[i];
     }
-    vkUpdateDescriptorSets(state.device, 3, writes, 0, nullptr);
+    vkUpdateDescriptorSets(state.device, 4, writes, 0, nullptr);
 
     VkShaderModuleCreateInfo shaderInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     shaderInfo.codeSize = sizeof(kVulkanKeccakSpv);
@@ -259,6 +282,10 @@ bool runKeccak(std::string& error) {
     shaderInfo.pCode = kVulkanChecksumSpv;
     if (!check(vkCreateShaderModule(state.device, &shaderInfo, nullptr, &state.checksumShader),
                "vkCreateShaderModule(checksum)")) return false;
+    shaderInfo.codeSize = sizeof(kVulkanBase58Spv);
+    shaderInfo.pCode = kVulkanBase58Spv;
+    if (!check(vkCreateShaderModule(state.device, &shaderInfo, nullptr, &state.base58Shader),
+               "vkCreateShaderModule(base58)")) return false;
     VkPushConstantRange pushRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t)};
     VkPipelineLayoutCreateInfo pipelineLayout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pipelineLayout.setLayoutCount = 1;
@@ -279,6 +306,10 @@ bool runKeccak(std::string& error) {
     if (!check(vkCreateComputePipelines(state.device, VK_NULL_HANDLE, 1, &pipelineInfo,
                                         nullptr, &state.checksumPipeline),
                "vkCreateComputePipelines(checksum)")) return false;
+    pipelineInfo.stage.module = state.base58Shader;
+    if (!check(vkCreateComputePipelines(state.device, VK_NULL_HANDLE, 1, &pipelineInfo,
+                                        nullptr, &state.base58Pipeline),
+               "vkCreateComputePipelines(base58)")) return false;
     VkCommandPoolCreateInfo commandPoolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     commandPoolInfo.queueFamilyIndex = state.queueFamily;
     if (!check(vkCreateCommandPool(state.device, &commandPoolInfo, nullptr, &state.commandPool),
@@ -306,6 +337,10 @@ bool runKeccak(std::string& error) {
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state.checksumPipeline);
     vkCmdDispatch(command, kItems / 64, 1, 1);
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state.base58Pipeline);
+    vkCmdDispatch(command, kItems / 64, 1, 1);
     barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
@@ -324,9 +359,12 @@ bool runKeccak(std::string& error) {
                                     expectedPayload.data(), outBytes) == 0;
     bool validFull = std::memcmp(static_cast<const unsigned char*>(mapped) + fullOffset,
                                  expectedFull.data(), fullBytes) == 0;
+    bool validAddresses = std::memcmp(static_cast<const unsigned char*>(mapped) + addressOffset,
+                                      expectedAddresses.data(), addressBytes) == 0;
     vkUnmapMemory(state.device, state.memory);
     if (!validPayload) { error = "Vulkan Keccak payload differs from CPU reference"; return false; }
     if (!validFull) { error = "Vulkan SHA-256d checksum differs from CPU reference"; return false; }
+    if (!validAddresses) { error = "Vulkan Base58Check address differs from CPU reference"; return false; }
     return true;
 }
 }
@@ -337,6 +375,6 @@ int vulkanKeccakSelfTest() {
         std::cerr << "Vulkan Keccak stage test failed: " << error << "\n";
         return error == "no Vulkan compute device with shaderInt64" ? 77 : 1;
     }
-    std::cout << "Vulkan Keccak-256 + SHA-256d TRON byte stages PASS (256 public keys; no wallets)\n";
+    std::cout << "Vulkan Keccak-256 + SHA-256d + Base58Check PASS (256 full TRON addresses; no wallets)\n";
     return 0;
 }

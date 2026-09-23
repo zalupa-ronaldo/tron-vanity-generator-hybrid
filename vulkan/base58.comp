@@ -1,0 +1,58 @@
+#version 450
+
+// 25-byte checked TRON address -> 34 Base58Check characters (plus two zero
+// padding bytes). Wire buffers use little-endian uint32 words, but the
+// number being encoded is big-endian, exactly as in the CPU/OpenCL paths.
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 2) readonly buffer FullAddresses {
+    uint words[];
+} fulls;
+layout(std430, set = 0, binding = 3) writeonly buffer TextAddresses {
+    uint words[];
+} addresses;
+layout(push_constant) uniform Params {
+    uint count;
+} params;
+
+const uint ALPHABET[58] = uint[58](
+    49u,50u,51u,52u,53u,54u,55u,56u,57u,
+    65u,66u,67u,68u,69u,70u,71u,72u,74u,75u,76u,77u,78u,
+    80u,81u,82u,83u,84u,85u,86u,87u,88u,89u,90u,
+    97u,98u,99u,100u,101u,102u,103u,104u,105u,106u,107u,
+    109u,110u,111u,112u,113u,114u,115u,116u,117u,118u,119u,120u,121u,122u
+);
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.count) return;
+    uint bytes[25];
+    for (int i = 0; i < 25; ++i) {
+        uint word = fulls.words[gid * 7u + uint(i / 4)];
+        bytes[i] = (word >> (8 * (i % 4))) & 255u;
+    }
+    uint num[13];
+    num[0] = bytes[0];
+    for (int i = 1; i < 13; ++i)
+        num[i] = (bytes[1 + (i - 1) * 2] << 8) | bytes[2 + (i - 1) * 2];
+    uint chars[34];
+    for (int i = 0; i < 34; ++i) chars[i] = 49u;
+    int start = 0;
+    for (int it = 0; it < 17; ++it) {
+        // 58^2 = 3364. A remainder and a base-65536 limb fit in u32.
+        uint rem = 0u;
+        for (int i = start; i < 13; ++i) {
+            uint acc = (rem << 16) | num[i];
+            num[i] = acc / 3364u;
+            rem = acc % 3364u;
+        }
+        chars[33 - 2 * it] = ALPHABET[rem % 58u];
+        chars[32 - 2 * it] = ALPHABET[rem / 58u];
+        while (start < 13 && num[start] == 0u) ++start;
+    }
+    uint packed[9];
+    for (int i = 0; i < 9; ++i) packed[i] = 0u;
+    for (int i = 0; i < 34; ++i)
+        packed[i / 4] |= chars[i] << (8 * (i % 4));
+    for (int i = 0; i < 9; ++i)
+        addresses.words[gid * 9u + uint(i)] = packed[i];
+}

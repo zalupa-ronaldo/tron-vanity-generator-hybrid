@@ -140,6 +140,8 @@ if(TRON_ENABLE_VULKAN)
   set(VULKAN_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_probe_spv.h)
   set(VULKAN_KECCAK_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_keccak.spv)
   set(VULKAN_KECCAK_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_keccak_spv.h)
+  set(VULKAN_CHECKSUM_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_checksum.spv)
+  set(VULKAN_CHECKSUM_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_checksum_spv.h)
   add_custom_command(OUTPUT ${VULKAN_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
     COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
@@ -158,6 +160,15 @@ if(TRON_ENABLE_VULKAN)
     COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_KECCAK_SPV} -DOUT=${VULKAN_KECCAK_GEN}
             -DNAME=kVulkanKeccakSpv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
     DEPENDS ${VULKAN_KECCAK_SPV} cmake/embed_spirv.cmake VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_CHECKSUM_SPV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
+    COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
+            ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/checksum.comp -o ${VULKAN_CHECKSUM_SPV}
+    DEPENDS vulkan/checksum.comp VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_CHECKSUM_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_CHECKSUM_SPV} -DOUT=${VULKAN_CHECKSUM_GEN}
+            -DNAME=kVulkanChecksumSpv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    DEPENDS ${VULKAN_CHECKSUM_SPV} cmake/embed_spirv.cmake VERBATIM)
   list(REMOVE_ITEM SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_probe_stub.cpp)
   list(APPEND SRC vulkan/vulkan_probe.cpp vulkan/vulkan_keccak.cpp)
 endif()
@@ -165,9 +176,9 @@ if(APPLE)
   list(APPEND SRC src/metal_backend.mm src/metal_hardware_profile.mm)
 endif()
 if(APPLE)
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN})
 else()
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN})
 endif()
 target_include_directories(tron_vanity_generator PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/gen)
 target_link_libraries(tron_vanity_generator PRIVATE secp256k1 ${CMAKE_DL_LIBS})

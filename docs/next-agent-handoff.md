@@ -65,12 +65,13 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    publish working secret buffers.
 4. Vulkan: `vulkan/probe.comp`, `vulkan/vulkan_probe.cpp` and
    `src/vulkan_probe.h` implement a deterministic native compute dispatch.
-   `vulkan/keccak.comp` and `vulkan/vulkan_keccak.cpp` add the first real
-   address stage with CPU-checked public-key-to-TRON-payload vectors. Both
+   `vulkan/keccak.comp`, `vulkan/checksum.comp` and
+   `vulkan/vulkan_keccak.cpp` add the first two real chained address stages
+   with CPU-checked public-key-to-TRON-payload and checksum vectors. They
    are built only with `-DTRON_ENABLE_VULKAN=ON`. Linux CI uses Mesa's
    software Vulkan driver; it does not prove RX 9070 XT performance. The
    Windows release uses the stub and cannot run these tests. A production
-   integration still needs the curve, checksum, Base58, dictionary and result
+   integration still needs the curve, Base58, dictionary and result
    ring stages, descriptor and
    scratch layout, barriers, bounded dispatch, result-ring semantics and
    GPU/CPU correctness. OpenCL running on `clvk` would be a compatibility

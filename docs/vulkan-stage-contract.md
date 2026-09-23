@@ -2,8 +2,9 @@
 
 The native Vulkan wallet backend is **not yet complete**. Source builds with
 `-DTRON_ENABLE_VULKAN=ON` have a generic dispatch probe and a first useful
-SPIR-V stage, Keccak-256 from a secp256k1 public key to a 21-byte TRON
-payload. Neither test is a wallet search or a throughput benchmark. The
+SPIR-V Keccak-256 stage from a secp256k1 public key to a 21-byte TRON
+payload, plus SHA-256d from that payload to a checksum-bearing 25-byte
+binary address. Neither test is a wallet search or a throughput benchmark. The
 Windows release remains OpenCL/CUDA only.
 
 ## Verified interface to preserve
@@ -14,7 +15,11 @@ outputs six little-endian words at binding 1: byte `0x41`, the last 20 bytes
 of Keccak-256, and three zero padding bytes. A four-byte push constant is the
 key count. The test uses 256 deterministic, unfunded secp256k1 test scalars;
 the host computes public keys and CPU Keccak reference values and compares
-every output word. The test never prints or saves a scalar.
+every output word. `vulkan/checksum.comp` then reads binding 1 and writes
+seven little-endian words at binding 2: the 25-byte address plus three zero
+padding bytes. A compute-to-compute barrier separates the two dispatches;
+both intermediate and final buffers are checked. The test never prints or
+saves a scalar.
 
 This is deliberately a simple 32-bit buffer ABI. Before performance work,
 benchmark the unpack/pack cost and consider an aligned packed layout that
@@ -27,8 +32,8 @@ CPU/GPU vectors covering each input/output word and the final partial word.
 1. Port the OpenCL staged curve and affine math with the same 128-byte point
    wire layout or a documented replacement. Compare every scalar/public key
    with CPU `libsecp256k1`, including the random-base window rollover.
-2. Port double SHA-256 and Base58Check, then compare complete 34-character
-   TRON addresses with the CPU for each test key. Preserve the `T` prefix and
+2. Port Base58Check, then compare complete 34-character TRON addresses with
+   the CPU for each test key. Preserve the `T` prefix and
    final checksum; a payload-only or prefix-only rate is not comparable.
 3. Port the dictionary matcher and bounded result ring. Test multiple matches
    per address, wraparound and overflow. Overflow must stop the search, never

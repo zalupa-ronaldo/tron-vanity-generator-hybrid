@@ -132,7 +132,7 @@ std::string bytesToHexUpper(const unsigned char* data, size_t len) {
     return out;
 }
 
-std::string tronAddressFromPubXY(const unsigned char pubXY[64]) {
+void tronFullFromPubXY(const unsigned char pubXY[64], unsigned char full[25]) {
     unsigned char hash[32];
     keccak256(pubXY, 64, hash);
 
@@ -144,10 +144,13 @@ std::string tronAddressFromPubXY(const unsigned char pubXY[64]) {
     sha256(payload, 21, h1);
     sha256(h1, 32, h2);
 
-    unsigned char full[25];
     std::memcpy(full, payload, 21);
     std::memcpy(full + 21, h2, 4);
+}
 
+std::string tronAddressFromPubXY(const unsigned char pubXY[64]) {
+    unsigned char full[25];
+    tronFullFromPubXY(pubXY, full);
     return base58Encode(full, 25);
 }
 

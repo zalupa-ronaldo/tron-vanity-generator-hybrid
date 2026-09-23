@@ -63,6 +63,7 @@ struct Options {
     bool help = false;
     bool benchResidentOnly = false;
     bool openclProfile = false;
+    bool vulkanProfile = false;
     std::string openclDiagnostic;
     OpenclResidentOptions openclOptions;
     bool metalProfileStages = false;
@@ -112,6 +113,7 @@ void usage() {
         "  --tune-seconds N seconds per configuration in the full no-wallet benchmark\n"
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
+        "  --vulkan-profile  time full Vulkan pipeline by stage; no wallets written\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-affine-batch 2|4|8  staged paired inversion points per work-item (default 4)\n"
         "  --opencl-curve-batch 2|4|8  staged consecutive public points per work-item (default 2)\n"
@@ -158,6 +160,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--strict-backend") o.strictBackend = true;
             else if (a == "--case-sensitive") o.caseSensitive = true;
             else if (a == "--verbose") o.verbose = true;
+            else if (a == "--vulkan-profile") o.vulkanProfile = true;
             else if (a == "--list") o.list = true;
             else if (a == "--keys-per-item") o.keysPerItem = std::stoul(next(i, "--keys-per-item"));
             else if (a == "--gpu-batch") o.gpuBatch = std::stoul(next(i, "--gpu-batch"));
@@ -595,6 +598,38 @@ int main(int argc, char** argv) {
     std::string error;
     auto dictionary = Dictionary::load(opt.words, opt.caseSensitive, &error);
     if (!dictionary) { std::cerr << error << "\n"; return 1; }
+    if (opt.vulkanProfile) {
+        if (opt.backend != "vulkan") {
+            std::cerr << "--vulkan-profile requires --backend vulkan\n";
+            return 1;
+        }
+        const auto p = profileVulkanResident(dictionary, opt.benchSeconds);
+        if (!p.error.empty()) { std::cerr << "Vulkan profile failed: " << p.error << "\n"; return 1; }
+        const double wallRate = p.wallSeconds > 0 ? double(p.keys) / p.wallSeconds : 0.0;
+        std::cout << "Vulkan full-address profile (no wallets): " << p.device << "\n"
+                  << "memory: " << (p.deviceLocalHostVisible ? "host-visible device-local" :
+                                       "host-visible non-device-local") << "\n"
+                  << "wall: " << p.keys << " keys / " << std::fixed << std::setprecision(3)
+                  << p.wallSeconds << " s, " << benchRate(wallRate)
+                  << ", " << p.dispatches << " dispatches\n";
+        if (!p.timestampsSupported) {
+            std::cout << "GPU stage timestamps unavailable on this Vulkan queue\n";
+        } else {
+            const double gpuRate = p.gpuSeconds > 0 ? double(p.keys) / p.gpuSeconds : 0.0;
+            std::cout << "GPU stages + barriers: " << p.gpuSeconds << " s, "
+                      << benchRate(gpuRate) << " (not wall throughput)\n";
+            std::cout << "Stage intervals include preceding compute barriers and timestamp overhead.\n";
+            const std::array<const char*, 5> names = {"curve", "keccak", "checksum", "base58", "match"};
+            for (size_t i = 0; i < names.size(); ++i)
+                std::cout << "  " << names[i] << ": " << p.stageSeconds[i] << " s, "
+                          << (p.keys ? p.stageSeconds[i] * 1e9 / double(p.keys) : 0.0)
+                          << " ns/key\n";
+            std::cout << "wall minus GPU stages: "
+                      << std::max(0.0, p.wallSeconds - p.gpuSeconds)
+                      << " s (host work, transfers, queueing and timing overhead)\n";
+        }
+        return 0;
+    }
     if (std::find(effective.begin(), effective.end(), "--tune") != effective.end()) {
         if (opt.backend != "opencl" && opt.backend != "auto") {
             std::cerr << "Full tuning matrix currently requires an OpenCL GPU; use --backend opencl\n";

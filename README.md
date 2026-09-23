@@ -98,6 +98,7 @@ For a bounded, no-wallet A/B test from the optional executable, use:
 ```bat
 tron_vanity_generator.exe --no-config test-vulkan
 tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --bench --bench-seconds 5
+tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --vulkan-profile --bench-seconds 5
 ```
 
 Use `--no-config` because the bundled default config intentionally selects
@@ -106,6 +107,12 @@ falls back to CPU: software Vulkan devices are rejected for normal runs.
 For a deliberate no-wallet software-driver benchmark in a development
 environment, set `TRON_VULKAN_ALLOW_SOFTWARE=1`. Do not compare that CI rate
 with RX hardware.
+The profile reports full wall keys/s and separate GPU-stage ns/key when the
+compute queue supports timestamps. It also shows whether the selected
+host-visible buffer is device-local. GPU-stage rate excludes host work and
+must not be presented as wallet-search throughput. The backend prefers
+host-visible device-local memory when exposed; if the only coherent mapping
+is system memory, a future device-local buffer plus staging path may win.
 
 ## Build on Windows
 

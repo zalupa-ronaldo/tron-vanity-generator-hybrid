@@ -74,6 +74,16 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    runs and allowed only for tests or with an explicit developer environment
    override. Mesa tests cover repeated dispatches,
    offset boundaries and a no-wallet call through the production backend.
+   The host now prefers device-local coherent host-visible memory when
+   available, and `--vulkan-profile` reports wall throughput, stage GPU
+   timestamps and memory locality without wallet output. On a discrete GPU
+   exposing only system-memory host mappings, a staging-buffer design is a
+   performance candidate; do not infer its benefit without a matched A/B.
+   A Mesa llvmpipe smoke profile with 30 single-character test words
+   processed 65,536 keys in 0.845 s (77.6 K/s wall); it reported
+   7,526 ns/key curve and 4,454 ns/key dictionary match. This validates the
+   instrumentation path, **not** RX performance: both the software driver
+   and artificial word mix differ from the target workload.
    Driver-error injection, varied production batch sizes and long-running
    rollover tests remain to be added.
 3. Windows Vulkan SDK CI now compiles the optional backend, but runtime has

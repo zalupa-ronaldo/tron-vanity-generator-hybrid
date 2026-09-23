@@ -81,7 +81,12 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    batched inversion and matched RX/OpenCL A/B performance work remain. The
    native backend has not yet run on the user's RX 9070 XT; do not include it
    in a normal Windows release or recommend it for funds until that test
-   passes. It also needs driver-error injection and performance profiling;
+   passes. `--vulkan-profile --bench-seconds 5` collects wall rate and
+   per-stage GPU timestamps (when supported), plus host-visible memory
+   locality, without writing wallets. Use the same dictionary as OpenCL and
+   compare wall rate first. A non-device-local mapping may be limited by PCIe;
+   test device-local scratch plus staging before optimizing shader math.
+   It also needs driver-error injection and a matched RX performance profile;
    OpenCL running on `clvk` would be a compatibility
    experiment, not evidence of a native Vulkan backend. Khronos's
    [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)

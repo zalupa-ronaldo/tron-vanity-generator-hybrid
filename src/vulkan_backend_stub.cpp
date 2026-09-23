@@ -11,3 +11,9 @@ int vulkanResidentSelfTest() {
     std::cerr << "native Vulkan backend is not enabled in this build\n";
     return 77;
 }
+
+VulkanProfileResult profileVulkanResident(std::shared_ptr<const Dictionary>, double) {
+    VulkanProfileResult result;
+    result.error = "native Vulkan backend is not enabled in this build";
+    return result;
+}

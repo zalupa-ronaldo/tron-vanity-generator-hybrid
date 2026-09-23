@@ -97,6 +97,7 @@ public:
         if (device_) vkDeviceWaitIdle(device_);
         if (device_ && mapped_) vkUnmapMemory(device_, memory_);
         if (device_ && fence_) vkDestroyFence(device_, fence_, nullptr);
+        if (device_ && queryPool_) vkDestroyQueryPool(device_, queryPool_, nullptr);
         if (device_ && commandPool_) vkDestroyCommandPool(device_, commandPool_, nullptr);
         for (VkPipeline pipeline : pipelines_)
             if (device_ && pipeline) vkDestroyPipeline(device_, pipeline, nullptr);
@@ -116,6 +117,16 @@ public:
               std::vector<Candidate>& candidates, std::vector<std::string>* allAddresses,
               std::string& error);
     const std::string& deviceName() const { return deviceName_; }
+    bool deviceLocalHostVisible() const { return deviceLocalHostVisible_; }
+    bool timestampsSupported() const { return queryPool_ != VK_NULL_HANDLE; }
+    void beginProfile() {
+        profiling_ = true;
+        stageSeconds_.fill(0.0);
+        gpuSeconds_ = 0.0;
+    }
+    void endProfile() { profiling_ = false; }
+    const std::array<double, kStageCount>& stageSeconds() const { return stageSeconds_; }
+    double gpuSeconds() const { return gpuSeconds_; }
 
 private:
     static VkDeviceSize aligned(VkDeviceSize size, VkDeviceSize alignment) {
@@ -144,9 +155,16 @@ private:
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     VkCommandBuffer command_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
+    VkQueryPool queryPool_ = VK_NULL_HANDLE;
     std::array<VkDeviceSize, kBindings> offsets_{};
     std::array<VkDeviceSize, kBindings> sizes_{};
     PushConstants constants_{};
+    std::array<double, kStageCount> stageSeconds_{};
+    double gpuSeconds_ = 0.0;
+    double timestampPeriod_ = 0.0;
+    uint32_t timestampValidBits_ = 0;
+    bool profiling_ = false;
+    bool deviceLocalHostVisible_ = false;
     bool abandoned_ = false;
 };
 
@@ -243,6 +261,13 @@ bool VulkanEngine::init(std::string& error) {
         return false;
     }
     deviceName_ = selected.deviceName;
+    uint32_t selectedFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_, &selectedFamilyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> selectedFamilies(selectedFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_, &selectedFamilyCount,
+                                             selectedFamilies.data());
+    timestampValidBits_ = selectedFamilies[queueFamily_].timestampValidBits;
+    timestampPeriod_ = selected.limits.timestampPeriod;
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     queueInfo.queueFamilyIndex = queueFamily_;
@@ -297,13 +322,23 @@ bool VulkanEngine::init(std::string& error) {
     VkPhysicalDeviceMemoryProperties memoryProps{};
     vkGetPhysicalDeviceMemoryProperties(physical_, &memoryProps);
     uint32_t memoryType = memoryProps.memoryTypeCount;
+    int memoryScore = -1;
     for (uint32_t i = 0; i < memoryProps.memoryTypeCount; ++i) {
+        const VkMemoryPropertyFlags flags = memoryProps.memoryTypes[i].propertyFlags;
         if ((requirements.memoryTypeBits & (1u << i)) &&
-            (memoryProps.memoryTypes[i].propertyFlags &
+            (flags &
              (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-            memoryType = i;
-            break;
+            // On discrete GPUs, a host-visible GTT heap can make every
+            // intermediate shader access traverse PCIe. Prefer BAR-mapped
+            // device-local memory when the driver exposes it.
+            const int score = ((flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? 2 : 0) +
+                              ((flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? 1 : 0);
+            if (score > memoryScore) {
+                memoryScore = score;
+                memoryType = i;
+                deviceLocalHostVisible_ = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+            }
         }
     }
     if (memoryType == memoryProps.memoryTypeCount) {
@@ -401,7 +436,18 @@ bool VulkanEngine::init(std::string& error) {
     commandInfo.commandBufferCount = 1;
     if (!check(vkAllocateCommandBuffers(device_, &commandInfo, &command_), "vkAllocateCommandBuffers")) return false;
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    return check(vkCreateFence(device_, &fenceInfo, nullptr, &fence_), "vkCreateFence");
+    if (!check(vkCreateFence(device_, &fenceInfo, nullptr, &fence_), "vkCreateFence")) return false;
+    if (selected.limits.timestampComputeAndGraphics && timestampValidBits_ >= 36 &&
+        timestampPeriod_ > 0.0) {
+        VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        queryInfo.queryCount = kStageCount + 1;
+        // Timestamp queries are optional instrumentation, not required for
+        // correctness or normal wallet generation.
+        if (vkCreateQueryPool(device_, &queryInfo, nullptr, &queryPool_) != VK_SUCCESS)
+            queryPool_ = VK_NULL_HANDLE;
+    }
+    return true;
 }
 
 std::string VulkanEngine::readAddress(uint32_t gid) const {
@@ -436,6 +482,11 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if (!check(vkBeginCommandBuffer(command_, &begin), "vkBeginCommandBuffer")) return false;
+    const bool queryThisBatch = profiling_ && queryPool_ != VK_NULL_HANDLE;
+    if (queryThisBatch) {
+        vkCmdResetQueryPool(command_, queryPool_, 0, kStageCount + 1);
+        vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, 0);
+    }
     vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_,
                             0, 1, &descriptorSet_, 0, nullptr);
     vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
@@ -446,6 +497,9 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     for (uint32_t stage = 0; stage < kStageCount; ++stage) {
         vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_[stage]);
         vkCmdDispatch(command_, (count + kGroupSize - 1) / kGroupSize, 1, 1);
+        if (queryThisBatch)
+            vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                queryPool_, stage + 1);
         if (stage + 1 < kStageCount)
             vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -469,6 +523,21 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     if (!check(waited, "vkWaitForFences")) {
         abandoned_ = true;
         return false;
+    }
+    if (queryThisBatch) {
+        std::array<uint64_t, kStageCount + 1> ticks{};
+        if (!check(vkGetQueryPoolResults(device_, queryPool_, 0, kStageCount + 1,
+                                         sizeof(ticks), ticks.data(), sizeof(uint64_t),
+                                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
+                   "vkGetQueryPoolResults")) return false;
+        const uint64_t mask = timestampValidBits_ == 64 ? ~uint64_t(0) :
+                              ((uint64_t(1) << timestampValidBits_) - 1);
+        for (uint32_t stage = 0; stage < kStageCount; ++stage) {
+            const uint64_t elapsed = (ticks[stage + 1] - ticks[stage]) & mask;
+            stageSeconds_[stage] += double(elapsed) * timestampPeriod_ * 1e-9;
+        }
+        const uint64_t elapsed = (ticks[kStageCount] - ticks[0]) & mask;
+        gpuSeconds_ += double(elapsed) * timestampPeriod_ * 1e-9;
     }
     const auto* meta = reinterpret_cast<const uint32_t*>(bytes + offsets_[8]);
     if (meta[0] > kBatchKeys || (meta[1] & 1u)) {
@@ -568,6 +637,9 @@ public:
         out.title = engine_.deviceName().empty() ? "Vulkan compute" : engine_.deviceName();
         out.lines.push_back("Native Vulkan: OS CSPRNG + CPU base expansion + GPU full address and dictionary scan");
         out.lines.push_back("CPU verifies every reported private key/address/match; no CPU fallback");
+        out.lines.push_back(engine_.deviceLocalHostVisible() ?
+                            "Host-visible device-local memory" :
+                            "Host-visible non-device-local memory; PCIe staging may be faster");
         return out;
     }
     double benchmark(double seconds) override {
@@ -581,6 +653,29 @@ public:
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds);
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         return elapsed > 0 ? double(total) / elapsed : 0.0;
+    }
+    VulkanProfileResult profile(double seconds) {
+        VulkanProfileResult result;
+        if (!ensureReady()) { result.error = error_; return result; }
+        result.device = engine_.deviceName();
+        result.deviceLocalHostVisible = engine_.deviceLocalHostVisible();
+        result.timestampsSupported = engine_.timestampsSupported();
+        // One unmeasured full-size batch primes JIT compilation, caches and
+        // the fixed-base table before the bounded wall-clock measurement.
+        if (!scanChunk(kBatchKeys, nullptr)) { result.error = error_; return result; }
+        engine_.beginProfile();
+        const auto start = std::chrono::steady_clock::now();
+        do {
+            if (!scanChunk(kBatchKeys, nullptr)) break;
+            result.keys += kBatchKeys;
+            ++result.dispatches;
+        } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds);
+        result.wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        engine_.endProfile();
+        result.error = error_;
+        result.gpuSeconds = engine_.gpuSeconds();
+        result.stageSeconds = engine_.stageSeconds();
+        return result;
     }
     void run(const RunConfig& cfg, RunState& state, const ReportFn& report) override {
         if (!ensureReady()) {
@@ -693,6 +788,13 @@ std::unique_ptr<Backend> makeVulkanResidentBackend(
     const char* allow = std::getenv("TRON_VULKAN_ALLOW_SOFTWARE");
     return std::make_unique<VulkanResidentBackend>(std::move(dictionary),
                                                    allow && std::strcmp(allow, "1") == 0);
+}
+
+VulkanProfileResult profileVulkanResident(std::shared_ptr<const Dictionary> dictionary,
+                                          double seconds) {
+    const char* allow = std::getenv("TRON_VULKAN_ALLOW_SOFTWARE");
+    VulkanResidentBackend backend(std::move(dictionary), allow && std::strcmp(allow, "1") == 0);
+    return backend.profile(seconds);
 }
 
 int vulkanResidentSelfTest() {

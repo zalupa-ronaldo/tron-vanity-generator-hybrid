@@ -24,8 +24,10 @@ dropping matches. A successful benchmark never writes wallet files.
 - `kernels/tron_vanity_resident.metal`, `src/metal_backend.mm`:
   M4 resident point walk and profiling. Detailed controlled measurements:
   [`apple-m4-metal-hardware-profile.md`](apple-m4-metal-hardware-profile.md).
-- `test-opencl.ps1` / `bench.cmd`: Windows child-process timeout and complete
-  variant matrix. `tests/opencl_launcher_test.ps1`: fake-process launcher
+- `bench.cmd`: one-click orchestration of the bounded OpenCL variant matrix
+  (`test-opencl.ps1`) and Vulkan/OpenCL A/B (`bench-vulkan.ps1`). Each suite
+  has a separate report folder and correctness gate; both reports are needed.
+  `tests/opencl_launcher_test.ps1`: fake-process launcher
   regression test. `tests/opencl_runtime_test.cpp`: actual OpenCL runtime
   integration (CPU OpenCL in Linux CI is correctness evidence, not RX speed).
 - `tron-vanity.conf`: conservative RX 9070 XT defaults. `src/run_config.cpp`:

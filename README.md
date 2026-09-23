@@ -53,11 +53,14 @@ From a terminal in the extracted folder, the short commands are:
 tron_vanity_generator.exe           search using tron-vanity.conf
 tron_vanity_generator.exe devices   list available hardware
 tron_vanity_generator.exe test      verify GPU addresses and private scalars
-bench.cmd                           bounded full configuration benchmark
+bench.cmd                           bounded OpenCL matrix + Vulkan A/B benchmark
 ```
 
-`bench.cmd` writes `summary.txt` and `benchmark.csv` in a new
-`opencl-diagnostic-*` folder. It ignores the adjacent search config and records
+`bench.cmd` runs the complete OpenCL configuration matrix and then the
+Vulkan/OpenCL A/B suite, each with independent correctness gates and timeouts.
+It writes `summary.txt` and `benchmark.csv` in separate
+`opencl-diagnostic-*` and `vulkan-benchmark-*` folders. Send both pairs of
+reports. It ignores the adjacent search config and records
 the exe and dictionary SHA-256 hashes, so A/B results can be checked against
 the same build and word list. It never creates wallet files. Search results,
 by contrast, contain **unencrypted private keys** in `results`; protect that

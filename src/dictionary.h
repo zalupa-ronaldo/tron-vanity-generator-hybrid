@@ -16,8 +16,9 @@ struct Dictionary {
 
     static std::shared_ptr<Dictionary> load(const std::string& path, bool caseSensitive,
                                             std::string* error);
+    static std::shared_ptr<Dictionary> fromWords(std::vector<std::string> source,
+                                                 bool caseSensitive, std::string* error);
     std::vector<uint32_t> matchIds(const std::string& address) const;
     std::vector<std::string> matchWords(const std::string& address) const;
     static int alphabetIndex(char c);
 };
-

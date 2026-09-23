@@ -8,6 +8,7 @@
 #include "vulkan_checksum_spv.h"
 #include "vulkan_base58_spv.h"
 #include "vulkan_match_spv.h"
+#include "test_dictionary.h"
 
 #include <secp256k1.h>
 #include <vulkan/vulkan.h>
@@ -696,7 +697,7 @@ std::unique_ptr<Backend> makeVulkanResidentBackend(
 
 int vulkanResidentSelfTest() {
     std::string error;
-    auto dictionary = Dictionary::load(VULKAN_TEST_WORDS_PATH, true, &error);
+    auto dictionary = vulkanTestDictionary();
     if (!dictionary) { std::cerr << "Vulkan test dictionary: " << error << "\n"; return 1; }
     auto* context = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     if (!context) return 1;

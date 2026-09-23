@@ -5,6 +5,7 @@
 #include <fstream>
 #include <queue>
 #include <unordered_set>
+#include <utility>
 
 namespace {
 struct Node {
@@ -32,7 +33,6 @@ std::shared_ptr<Dictionary> Dictionary::load(const std::string& path, bool caseS
                                               std::string* error) {
     std::ifstream in(path);
     if (!in) { if (error) *error = "cannot read dictionary: " + path; return nullptr; }
-    auto d = std::make_shared<Dictionary>();
     std::vector<std::string> source;
     std::string line;
     while (std::getline(in, line)) {
@@ -41,12 +41,22 @@ std::shared_ptr<Dictionary> Dictionary::load(const std::string& path, bool caseS
         if (first == std::string::npos || line[first] == '#') continue;
         line = line.substr(first);
         if (line.empty() || line.size() > 33) continue;
-        for (char c : line) if (alphabetIndex(c) < 0 && (caseSensitive || alphabetIndex(static_cast<char>(c + ('a' <= c && c <= 'z' ? 'A' - 'a' : 'a' - 'A'))) < 0)) {
-            if (error) *error = "dictionary word is not Base58-compatible: " + line;
-            return nullptr;
-        }
         source.push_back(line);
     }
+    return fromWords(std::move(source), caseSensitive, error);
+}
+
+std::shared_ptr<Dictionary> Dictionary::fromWords(std::vector<std::string> source,
+                                                   bool caseSensitive, std::string* error) {
+    for (const auto& word : source) {
+        for (char c : word) if (alphabetIndex(c) < 0 &&
+            (caseSensitive || alphabetIndex(static_cast<char>(c +
+                ('a' <= c && c <= 'z' ? 'A' - 'a' : 'a' - 'A'))) < 0)) {
+            if (error) *error = "dictionary word is not Base58-compatible: " + word;
+            return nullptr;
+        }
+    }
+    auto d = std::make_shared<Dictionary>();
     std::sort(source.begin(), source.end());
     source.erase(std::unique(source.begin(), source.end()), source.end());
     d->words = source;

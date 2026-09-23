@@ -44,7 +44,8 @@ a slot in metadata binding 8 and writes a 20-word record at binding 9 (key
 index, count, flags, reserved, 16 IDs). Tests use capacity 8 plus two canary
 guard slots, compare concurrent records without assuming write order, cover
 exact-capacity and over-capacity cases, and check both overflow flags. The
-host loads `tests/vulkan_words.txt` through the production Dictionary parser
+host constructs the 30 embedded one-letter test words through the production
+Dictionary builder (the same list is in `tests/vulkan_words.txt`)
 and compares records with `Dictionary::matchIds()`. This is still a *test*
 ring: no scalar/address is emitted to user output. Capacity overflow is
 fail-closed; a truncated ID list can be recovered only if the production host

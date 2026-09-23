@@ -6,6 +6,7 @@
 #include "vulkan_curve_spv.h"
 #include "crypto.h"
 #include "dictionary.h"
+#include "test_dictionary.h"
 
 #include <vulkan/vulkan.h>
 #include <secp256k1.h>
@@ -222,7 +223,7 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     FullBatch expectedFull{};
     AddressBatch expectedAddresses{};
     MatchBatch expectedMatches{};
-    auto dictionary = Dictionary::load(VULKAN_TEST_WORDS_PATH, true, &error);
+    auto dictionary = vulkanTestDictionary();
     if (!dictionary) return false;
     if (!makeTestVectors(basePubs, pubs, expectedPayload, expectedFull, expectedAddresses,
                          expectedMatches, *dictionary, curveMode, offsetBase, error)) return false;

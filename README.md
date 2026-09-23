@@ -72,7 +72,9 @@ compiler check only: **it does not generate wallets or search addresses**.
 single test base, then Keccak-256, double SHA-256, Base58Check and dictionary
 matching. It checks public points, full 34-character TRON addresses, match
 IDs and an atomic bounded result ring against CPU references at workgroup and
-offset-window boundaries. It requires Vulkan `shaderInt64`.
+offset-window boundaries. Its 30-word test dictionary is embedded, so the
+downloaded CI executable can run this test without its source tree. It
+requires Vulkan `shaderInt64`.
 The regular Windows ZIP does not include Vulkan. Opt-in Vulkan builds now
 also provide an **experimental** `--backend vulkan` full-address wallet backend:
 OS CSPRNG chooses a base scalar, GPU computes all address stages and dictionary

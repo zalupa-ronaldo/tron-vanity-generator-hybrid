@@ -219,8 +219,6 @@ target_link_libraries(tron_vanity_generator PRIVATE secp256k1 ${CMAKE_DL_LIBS})
 if(TRON_ENABLE_VULKAN)
   target_link_libraries(tron_vanity_generator PRIVATE Vulkan::Vulkan)
   target_compile_definitions(tron_vanity_generator PRIVATE TRON_ENABLE_VULKAN=1)
-  target_compile_definitions(tron_vanity_generator PRIVATE
-    VULKAN_TEST_WORDS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/vulkan_words.txt")
 endif()
 if(TRON_ENABLE_CUDA)
   target_sources(tron_vanity_generator PRIVATE ${CUDA_GEN})

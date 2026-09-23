@@ -66,6 +66,11 @@ rollover. With every Base58 character in the test dictionary, every address
 must produce exactly one ring record. The host validates all 32,769 reported
 keys and addresses through the normal production callback without saving
 wallets, checks that the base changed, and checks the new offset is one.
+After both curve variants pass, it injects a synthetic `VK_ERROR_DEVICE_LOST`
+at `vkQueueSubmit` for one bounded production run. The run must report zero
+keys, set its stop flag, and reject a retry; the engine then avoids
+`vkDeviceWaitIdle` on the abandoned device. This is fault-path validation,
+not evidence of an actual driver fault on the RX.
 
 This is deliberately a simple 32-bit buffer ABI. Before performance work,
 benchmark the unpack/pack cost and consider an aligned packed layout that

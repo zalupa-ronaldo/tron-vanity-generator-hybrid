@@ -99,9 +99,10 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    GPU timestamps (when supported), plus host-visible memory locality.
    Compare wall rate first. A non-device-local mapping may be limited by PCIe;
    test device-local scratch plus staging before optimizing shader math.
-   It also needs driver-error injection and a matched RX performance profile;
-   OpenCL running on `clvk` would be a compatibility
-   experiment, not evidence of a native Vulkan backend. Khronos's
+   Synthetic `VK_ERROR_DEVICE_LOST` at queue submit is now tested fail-closed;
+   real driver loss/timeouts and a matched RX performance profile still need
+   validation. OpenCL running on `clvk` would be a compatibility experiment,
+   not evidence of a native Vulkan backend. Khronos's
    [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
    and the [clspv OpenCL-C mapping](https://github.com/google/clspv/blob/main/docs/OpenCLCOnVulkan.md)
    identify API and compiler constraints. Start with deterministic seed/curve

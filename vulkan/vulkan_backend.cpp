@@ -93,9 +93,9 @@ public:
     VulkanEngine(const VulkanEngine&) = delete;
     VulkanEngine& operator=(const VulkanEngine&) = delete;
     ~VulkanEngine() {
-        // On a driver timeout, destruction of in-flight Vulkan objects is
-        // invalid and vkDeviceWaitIdle may hang. The process exits after the
-        // backend reports failure; let the OS reclaim abandoned handles.
+        // On a timeout or device loss, destruction of in-flight Vulkan
+        // objects is invalid and vkDeviceWaitIdle may hang. The process exits
+        // after the backend reports failure; let the OS reclaim the handles.
         if (abandoned_) return;
         if (device_) vkDeviceWaitIdle(device_);
         if (device_ && mapped_) vkUnmapMemory(device_, memory_);
@@ -130,6 +130,7 @@ public:
     void endProfile() { profiling_ = false; }
     const std::array<double, kStageCount>& stageSeconds() const { return stageSeconds_; }
     double gpuSeconds() const { return gpuSeconds_; }
+    void injectDeviceLossOnceForTest() { injectDeviceLossOnceForTest_ = true; }
 
 private:
     static VkDeviceSize aligned(VkDeviceSize size, VkDeviceSize alignment) {
@@ -170,6 +171,7 @@ private:
     bool profiling_ = false;
     bool deviceLocalHostVisible_ = false;
     bool abandoned_ = false;
+    bool injectDeviceLossOnceForTest_ = false;
 };
 
 bool VulkanEngine::createTable(std::vector<uint32_t>& table, std::string& error) {
@@ -470,10 +472,11 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
                         std::vector<std::string>* allAddresses, std::string& error) {
     auto check = [&](VkResult result, const char* call) {
         if (result == VK_SUCCESS) return true;
+        if (result == VK_ERROR_DEVICE_LOST) abandoned_ = true;
         error = std::string(call) + " failed: " + std::to_string(result);
         return false;
     };
-    if (abandoned_) { error = "Vulkan device was abandoned after a timeout"; return false; }
+    if (abandoned_) { error = "Vulkan device was abandoned after a GPU failure"; return false; }
     if (!mapped_ || count == 0 || count > kBatchKeys ||
         offsetBase > kBaseWindowKeys - count) {
         error = "invalid Vulkan scan range"; return false;
@@ -526,7 +529,10 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_;
-    if (!check(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit")) return false;
+    const VkResult submitted = injectDeviceLossOnceForTest_ ? VK_ERROR_DEVICE_LOST :
+                               vkQueueSubmit(queue_, 1, &submit, fence_);
+    injectDeviceLossOnceForTest_ = false;
+    if (!check(submitted, "vkQueueSubmit")) return false;
     const VkResult waited = vkWaitForFences(device_, 1, &fence_, VK_TRUE, 30000000000ull);
     if (waited == VK_TIMEOUT) {
         abandoned_ = true;
@@ -785,6 +791,32 @@ public:
         }
         return true;
     }
+    bool selfTestDeviceLoss() {
+        if (!ensureReady()) return false;
+        std::cout << "Vulkan self-test: injecting a synthetic device-loss return; "
+                     "no hardware fault is expected\n";
+        engine_.injectDeviceLossOnceForTest();
+        RunConfig config;
+        config.dictionary = dictionary_;
+        config.maxAttempts = 1;
+        config.seconds = 0;
+        RunState state;
+        bool emitted = false;
+        run(config, state, [&](const FoundKey&) { emitted = true; });
+        if (!state.stop.load() || state.checked.load() != 0 ||
+            state.gpuChecked.load() != 0 || state.found.load() != 0 || emitted ||
+            error_.find("vkQueueSubmit failed") == std::string::npos) {
+            error_ = "Vulkan injected device loss did not stop without wallet output";
+            return false;
+        }
+        std::vector<Candidate> candidates;
+        if (scanChunk(1, &candidates) ||
+            error_ != "Vulkan device was abandoned after a GPU failure") {
+            error_ = "Vulkan device-loss retry was not rejected";
+            return false;
+        }
+        return true;
+    }
 private:
     bool ensureReady() {
         if (tried_) return ready_;
@@ -922,6 +954,11 @@ int vulkanResidentSelfTest() {
         if (!backend->selfTestRollover()) {
             std::cerr << "Vulkan production backend batch " << batch
                       << " rollover failed: " << backend->note() << "\n";
+            return 1;
+        }
+        if (batch == 4 && !backend->selfTestDeviceLoss()) {
+            std::cerr << "Vulkan production backend device-loss test failed: "
+                      << backend->note() << "\n";
             return 1;
         }
     }

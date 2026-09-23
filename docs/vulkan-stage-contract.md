@@ -1,13 +1,15 @@
 # Native Vulkan pipeline: stage contract and verification gates
 
-The native Vulkan wallet backend is **not yet complete**. Source builds with
+The native Vulkan wallet backend is **experimental**. Source builds with
 `-DTRON_ENABLE_VULKAN=ON` have a generic dispatch probe, a native secp256k1
 10x26 field-math point stage, Keccak-256, SHA-256d, Base58Check and flattened
 dictionary matching. The curve stage can compute `P + G` or walk from one
 base point through three 8-bit offset-table windows; it currently inverts
 each result individually, not with the faster OpenCL batch inversion.
-Neither test is a wallet search or a throughput benchmark. The
-Windows release remains OpenCL/CUDA only.
+The generic and deterministic stage tests do not save wallets. A separate
+reusable `--backend vulkan` path now runs full-address searches or no-wallet
+benchmarks, but is not validated on the RX 9070 XT. The regular Windows
+release remains OpenCL/CUDA only.
 
 ## Verified interface to preserve
 
@@ -54,27 +56,24 @@ the curve, Keccak, SHA-256 and Base58 stages can share without conversions.
 Do not change byte order based only on a single address sample. Add multiple
 CPU/GPU vectors covering each input/output word and the final partial word.
 
-## Remaining gates to a selectable `--backend vulkan`
+## Reusable backend and remaining production gates
 
 1. Move the verified single-point curve math to a staged point/affine layout
    with batched inversion. Compare every scalar/public key with CPU
    `libsecp256k1`, including random-base rollover; measure actual full-wall
    speed before selecting a batch size. The current `P0 + offset·G` shader is
    correct on Mesa but not yet a competitive resident pipeline.
-2. Integrate the verified stages into a reusable bounded Vulkan
-   dispatch path rather than the current one-shot test harness. Preserve the
-   `T` prefix and final checksum; a payload-only or prefix-only rate is not
-   comparable. Add varying batch sizes, boundary counts and driver-error
-   tests before permitting production output.
-3. Promote the tested atomic candidate ring into actual findings: reset/drain
-   it between batches, reconstruct scalars from a CSPRNG base and offset,
-   verify every address and full dictionary match on CPU, and test repeated
-   batches plus overflow. Capacity overflow must stop the search, never
-   silently discard candidates.
-4. Integrate dispatch with the existing `Backend` interface, CLI/config,
-   OS CSPRNG base generation, output verification and error handling. Never
-   fall back to CPU silently when a strict GPU backend is requested.
-5. Windows Vulkan SDK CI now compiles the optional stages, but runtime has
+2. `vulkan/vulkan_backend.cpp` now reuses descriptors, pipelines, buffers and
+   command objects across bounded batches. It resets and drains the atomic
+   ring every dispatch. The OS CSPRNG base expands into a 22-bit offset
+   window; every candidate scalar, address and full dictionary match is
+   rechecked on CPU before output. Metadata overflow and driver timeouts stop
+   the search. The `Backend` interface and explicit `--backend vulkan` CLI
+   are wired; no CPU fallback occurs. Mesa tests cover repeated dispatches,
+   offset boundaries and a no-wallet call through the production backend.
+   Driver-error injection, varied production batch sizes and long-running
+   rollover tests remain to be added.
+3. Windows Vulkan SDK CI now compiles the optional backend, but runtime has
    only been verified with Mesa software Vulkan on Linux. Test the stage
    executable on the actual RX 9070 XT before enabling any production use.
    Once the full backend exists, compare full wall keys/s against

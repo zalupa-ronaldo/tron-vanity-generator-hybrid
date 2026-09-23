@@ -73,12 +73,15 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    are built only with `-DTRON_ENABLE_VULKAN=ON`. Linux CI uses Mesa's
    software Vulkan driver; Windows SDK CI compiles the optional stages but
    has no RX 9070 XT to execute them. The Windows release uses the stub;
-   the separate CI artifact is only for stage testing. A production
-   integration still needs reusable bounded dispatch, batched affine
-   inversion, CSPRNG base rollover, ring drain and CPU verification of
-   candidate private keys. The current curve inverts each key separately,
-   and the one-shot test recreates every Vulkan object per case. It also needs
-   a reusable descriptor and scratch layout;
+   the separate CI artifact is opt-in. `vulkan/vulkan_backend.cpp` now adds
+   reusable bounded dispatch, CSPRNG base rollover, ring drain and CPU
+   verification of candidate private keys. `--backend vulkan` is explicit and
+   fails closed; `test-vulkan` also exercises the production backend without
+   writing wallets. The current curve still inverts each key separately, so
+   batched inversion and matched RX/OpenCL A/B performance work remain. The
+   native backend has not yet run on the user's RX 9070 XT; do not include it
+   in a normal Windows release or recommend it for funds until that test
+   passes. It also needs driver-error injection and performance profiling;
    OpenCL running on `clvk` would be a compatibility
    experiment, not evidence of a native Vulkan backend. Khronos's
    [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)

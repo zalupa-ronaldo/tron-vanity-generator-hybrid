@@ -6,6 +6,7 @@
 #include "resident_backend.h"
 #include "run_config.h"
 #include "vulkan_probe.h"
+#include "vulkan_backend.h"
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -88,7 +89,7 @@ struct Options {
 
 void usage() {
     std::cout <<
-        "TRON vanity generator - CPU + OpenCL + CUDA + Apple Metal\n"
+        "TRON vanity generator - CPU + OpenCL + CUDA + Metal + Vulkan\n"
         "  (no arguments)   run with tron-vanity.conf next to the executable\n"
         "  run|test|devices|bench|test-vulkan  short commands; --config FILE overrides config\n"
         "  --no-config      ignore the adjacent config file\n"
@@ -97,7 +98,7 @@ void usage() {
         "  --words FILE      dictionary; default words.txt\n"
         "  --out DIR         output directory; default results\n"
         "  --output FILE     direct JSONL output override\n"
-        "  --backend auto|cpu|opencl|cuda|metal\n"
+        "  --backend auto|cpu|opencl|cuda|metal|vulkan\n"
         "  --strict-backend fail if the selected GPU backend is unavailable\n"
         "  --gpu-batch N     GPU batch size (power of two, 1024..1048576)\n"
         "  --gpu-resident    GPU CSPRNG + device result ring mode\n"
@@ -228,8 +229,8 @@ bool parse(int argc, char** argv, Options& o) {
         std::cerr << e.what() << "\n"; return false;
     }
     if (o.backend == "gpu") o.backend = "opencl";
-    if (o.backend != "auto" && o.backend != "cpu" && o.backend != "opencl" && o.backend != "cuda" && o.backend != "metal") {
-        std::cerr << "backend must be auto, cpu, opencl, cuda, or metal\n"; return false;
+    if (o.backend != "auto" && o.backend != "cpu" && o.backend != "opencl" && o.backend != "cuda" && o.backend != "metal" && o.backend != "vulkan") {
+        std::cerr << "backend must be auto, cpu, opencl, cuda, metal, or vulkan\n"; return false;
     }
     if (!std::isfinite(o.benchSeconds) || o.benchSeconds <= 0) {
         std::cerr << "--bench-seconds must be finite and positive\n"; return false;
@@ -549,10 +550,16 @@ int main(int argc, char** argv) {
     for (auto& a : effective) effectiveArgv.push_back(a.data());
     Options opt;
     if (!parse(static_cast<int>(effectiveArgv.size()), effectiveArgv.data(), opt)) return opt.help ? 0 : 1;
+    // The short "bench" command retains OpenCL's tuning matrix, but an
+    // explicitly selected Vulkan backend uses the common no-wallet bench.
+    if (opt.backend == "vulkan") for (auto& arg : effective)
+        if (arg == "--tune") arg = "--bench";
     if (std::find(effective.begin(), effective.end(), "--vulkan-test") != effective.end())
         return vulkanComputeSelfTest();
-    if (std::find(effective.begin(), effective.end(), "--vulkan-keccak-test") != effective.end())
-        return vulkanKeccakSelfTest();
+    if (std::find(effective.begin(), effective.end(), "--vulkan-keccak-test") != effective.end()) {
+        const int stageResult = vulkanKeccakSelfTest();
+        return stageResult == 0 ? vulkanResidentSelfTest() : stageResult;
+    }
     HardwareReport hw = detectHardware();
     if (opt.list) { printDevices(hw); return 0; }
     if (!opt.openclDiagnostic.empty()) {
@@ -569,6 +576,7 @@ int main(int argc, char** argv) {
     }
     for (size_t i = 1; i < effective.size(); ++i) {
         if (effective[i] == "--gputest") {
+            if (opt.backend == "vulkan") return vulkanResidentSelfTest();
             if (opt.backend == "cuda") {
                 if (hw.cudaGpus.empty()) { std::cerr << "CUDA unavailable: " << hw.cudaNote << "\n"; return 1; }
                 for (const auto& device : hw.cudaGpus) if (cudaSelfTest(device)) return 1;
@@ -694,10 +702,12 @@ int main(int argc, char** argv) {
             const bool wantOpencl = all || opt.backend == "opencl";
             const bool wantCuda = all || opt.backend == "cuda";
             const bool wantMetal = all || opt.backend == "metal";
+            const bool wantVulkan = opt.backend == "vulkan";
             const std::vector<std::string> rngs = {"chacha12", "aes-ctr", "philox"};
             std::cout << "\n=== " << (opt.benchResidentOnly ? "Resident GPU benchmark" : "Full benchmark matrix")
                       << " (" << seconds << " s per method) ===\n"
-                      << (opt.benchResidentOnly ? "Resident OpenCL/CUDA/Metal RNGs; legacy tuning skipped\n"
+                      << (wantVulkan ? "Native Vulkan full-address resident pipeline\n" :
+                          opt.benchResidentOnly ? "Resident OpenCL/CUDA/Metal RNGs; legacy tuning skipped\n"
                                                  : "CPU + legacy OpenCL tuning + resident OpenCL/CUDA/Metal RNGs\n")
                       << "No wallet output is written by benchmark mode.\n\n"
                       << std::left << std::setw(38) << "method"
@@ -786,6 +796,20 @@ int main(int argc, char** argv) {
 #else
             if (wantMetal) std::cout << "Metal: unavailable (not an Apple build)\n";
 #endif
+            if (wantVulkan) {
+                auto vulkan = makeVulkanResidentBackend(dictionary);
+                if (!vulkan || !vulkan->available()) {
+                    std::cerr << "Vulkan unavailable: " << (vulkan ? vulkan->note() : "not built") << "\n";
+                    return 1;
+                }
+                const double r = vulkan->benchmark(seconds);
+                if (!vulkan->note().empty()) {
+                    std::cerr << "Vulkan benchmark failed: " << vulkan->note() << "\n";
+                    return 1;
+                }
+                std::cout << std::left << std::setw(38) << ("Vulkan resident / " + vulkan->info().title)
+                          << std::right << std::setw(16) << benchRate(r) << "\n";
+            }
             std::cout << "\nBenchmark complete. Use --bench-seconds N to adjust each row.\n";
             return 0;
         }
@@ -803,6 +827,7 @@ int main(int argc, char** argv) {
 
     std::vector<std::unique_ptr<Backend>> backends;
     if (opt.backend == "auto" || opt.backend == "cpu") backends.push_back(makeCpuBackend());
+    if (opt.backend == "vulkan") backends.push_back(makeVulkanResidentBackend(dictionary));
     if (opt.backend == "cuda") {
         if (hw.cudaGpus.empty()) { std::cerr << "CUDA unavailable: " << hw.cudaNote << "\n"; return 1; }
         for (const auto& device : hw.cudaGpus)

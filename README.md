@@ -1,4 +1,4 @@
-# TRON Vanity Generator — CPU + OpenCL + CUDA + Metal
+# TRON Vanity Generator — CPU + OpenCL + CUDA + Metal + experimental Vulkan
 
 [![Windows release](https://img.shields.io/github/v/release/zalupa-ronaldo/tron-vanity-generator-hybrid?display_name=tag)](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/releases)
 [![Build](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml/badge.svg)](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/actions/workflows/release.yml)
@@ -73,17 +73,34 @@ single test base, then Keccak-256, double SHA-256, Base58Check and dictionary
 matching. It checks public points, full 34-character TRON addresses, match
 IDs and an atomic bounded result ring against CPU references at workgroup and
 offset-window boundaries. It requires Vulkan `shaderInt64`.
-The Windows ZIP does not include this optional probe, and there is no Vulkan
-wallet backend yet.
+The regular Windows ZIP does not include Vulkan. Opt-in Vulkan builds now
+also provide an **experimental** `--backend vulkan` full-address wallet backend:
+OS CSPRNG chooses a base scalar, GPU computes all address stages and dictionary
+matches, and CPU independently verifies every reported key/address/match.
+It fails closed on a driver timeout or result-ring overflow. The reusable
+backend passes software-Vulkan tests but is **not yet validated on RX 9070 XT**;
+do not use it for funds until `test-vulkan` passes on the actual card and its
+wallet output is independently checked. It is not expected to beat staged
+OpenCL yet because the Vulkan curve shader inverts each point separately.
 An opt-in `vulkan-stage-test-windows-x64` executable is also saved as a
 short-lived artifact of successful GitHub Actions builds; on an RX 9070 XT it
 can run `tron_vanity_generator.exe test-vulkan` without writing wallets.
 
 For a source build on Windows with the [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
 installed, use `powershell -ExecutionPolicy Bypass -File .\build.ps1 -EnableVulkan`.
-The build runs the Vulkan stage tests locally; it still does not add
-`--backend vulkan` for wallet generation. The SDK is a build dependency, not
-needed by the current Windows ZIP users.
+The build runs the Vulkan stage and repeated-dispatch tests locally. The SDK
+is a build dependency, not needed by current regular Windows ZIP users.
+The installed Vulkan runtime/driver is still required on the target machine.
+For a bounded, no-wallet A/B test from the optional executable, use:
+
+```bat
+tron_vanity_generator.exe --no-config test-vulkan
+tron_vanity_generator.exe --no-config --backend vulkan --words words.txt --bench --bench-seconds 5
+```
+
+Use `--no-config` because the bundled default config intentionally selects
+OpenCL and includes OpenCL-only options. `--backend vulkan` never silently
+falls back to CPU. Do not compare the software-Vulkan CI rate with RX hardware.
 
 ## Build on Windows
 
@@ -352,6 +369,11 @@ and measured 105.082 M/s wall throughput (525,467,648 keys / 5.001 s),
 and match 0.222 s. They processed more keys than v1.7.2, so compare time
 per key rather than the unnormalized totals. These are still profile numbers,
 not wallet-output search speed.
+In a later full diagnostic run on the same reported RX 9070 XT / driver
+3665.0, all 16 checks passed. Paired affine batch 2/4/8 measured 83.848,
+104.684 and 101.804 M/s wall throughput respectively over five-second
+profiles; batch 4 was again the best of those three. Its kernel-only rate
+was 132.786 M/s, which is not the user-visible wallet search rate.
 
 ```bat
 tron_vanity_generator.exe --backend opencl --opencl-pipeline staged --opencl-inverse pair --opencl-affine-batch 4 --gpu-group-size 64 --opencl-profile --words words.txt --bench-seconds 5

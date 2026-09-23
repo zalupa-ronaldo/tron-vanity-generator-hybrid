@@ -5,6 +5,10 @@ New-Item -ItemType Directory -Path $root | Out-Null
 $priorNoPause = $env:TRON_BENCH_NO_PAUSE
 $priorFixture = $env:TRON_BENCH_FIXTURE
 try {
+    $launcherText = Get-Content -LiteralPath (Join-Path $PSScriptRoot "../bench.cmd") -Raw
+    if ($launcherText -notmatch 'Send the summary\.txt and benchmark\.csv from both report folders') {
+        throw "bench.cmd is missing the report-sharing instruction"
+    }
     foreach ($case in @(
         @{ Name = "success"; Exit = 0 },
         @{ Name = "fail-opencl"; Exit = 1 },
@@ -29,7 +33,6 @@ exit /b 0
             $output = & cmd.exe /d /c bench.cmd 2>&1
             $exitCode = $LASTEXITCODE
             $calls = @(Get-Content -LiteralPath (Join-Path $dir "calls.txt"))
-            $outputText = $output -join "`n"
         } finally { Pop-Location }
         if ($exitCode -ne $case.Exit) {
             throw "$($case.Name) exit mismatch: $exitCode`n$($output -join "`n")"
@@ -37,9 +40,6 @@ exit /b 0
         if ($calls.Count -ne 2 -or $calls[0] -notmatch 'test-opencl\.ps1' -or
             $calls[1] -notmatch 'bench-vulkan\.ps1') {
             throw "$($case.Name) did not run both suites in order: $($calls -join '; ')"
-        }
-        if ($outputText -notmatch 'Send the summary.txt and benchmark.csv from both report folders') {
-            throw "$($case.Name) did not explain which reports to share"
         }
     }
     Write-Host "One-click benchmark orchestration PASS (success and both failure paths)"

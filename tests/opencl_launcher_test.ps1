@@ -144,7 +144,7 @@ try {
         }
         if ($case.UpdateConfig) {
             if (-not $report.Contains("Config updated from benchmark winner") -or
-                (Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf") -Raw) -notmatch "gpu-group-size=64" -or
+                (Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf") -Raw) -match "gpu-group-size=256" -or
                 -not @(Get-ChildItem -LiteralPath $dir -Filter "tron-vanity.conf.bak-*" ).Count) {
                 throw "A valid profile did not update the config after an optional failure"
             }

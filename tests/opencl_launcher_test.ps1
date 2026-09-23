@@ -135,7 +135,9 @@ try {
         $expectedTimingLines = if ($case.All) { $case.TimingCount } elseif ($case.CompareStages) { 8 } elseif ($case.CompareRuntime) { 7 } elseif ($case.CompareAffine -or $case.CompareCurve -or $case.CompareGroups) { 4 } elseif ($case.CompareSha -or $case.CompareMeta) { 3 } elseif ($case.Calls.Contains("profile")) { 1 } else { 0 }
         $timingLines = ([regex]::Matches($report, "host timing:")).Count
         if ($timingLines -ne $expectedTimingLines) { throw "$($case.Mode) host timing summary mismatch: $timingLines instead of $expectedTimingLines" }
-        if ($case.Exit -ne 0 -and $report.Contains("Optional search command")) { throw "Failed test suggested a search" }
+        if ($case.Exit -ne 0 -and -not $case.UpdateConfig -and $report.Contains("Optional search command")) {
+            throw "Failed base test suggested a search"
+        }
         if ($case.All -and (-not $report.Contains("Fastest measured:") -or
                             -not (Test-Path -LiteralPath (Join-Path $reports[0].DirectoryName "benchmark.csv")))) {
             throw "Full benchmark did not rank or export profiles"

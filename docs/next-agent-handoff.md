@@ -46,6 +46,12 @@ The 105 M/s profile used an 8 MiB result ring, while the shipped config uses
 128 MiB for capacity. Its relative wall rate is unmeasured; `bench.cmd`
 now tests 8/128/8 and chunk targets 16/32/64 ms before anyone should tune
 the release config on throughput grounds.
+The later v1.9.3 rerun, with matching executable and dictionary SHA-256
+fingerprints, measured 104.532 M/s with all stage optimizations and 77.799 M/s
+with the optimization mask cleared; its partial mask sweep is recorded in
+[`amd-rx9070xt-opencl-2026-09-23-partial.json`](../benchmarks/amd-rx9070xt-opencl-2026-09-23-partial.json).
+The pasted report ended before the remaining matrix and Vulkan suite, so do
+not infer 128 MiB or Vulkan performance from it.
 
 On base M4 with a 1,665-word dictionary, measured Metal 10x26 field
 multiplication was 2.13x the 8x32 port; `128 threads x 512 keys/lane` was

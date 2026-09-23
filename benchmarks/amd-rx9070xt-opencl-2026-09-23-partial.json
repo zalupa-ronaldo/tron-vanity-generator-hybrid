@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "provenance": "User-provided report excerpt; the -All run ended in the excerpt during 08-affine-2-check, so only completed rows are recorded.",
+  "executable_sha256": "06e7c1c16eba7fe027a9201fc37ec651093b0613a2cc93f0c7033fabb2ea4878",
+  "dictionary_sha256": "ed46b8a4d2e31bf94a5a19b5cf9ea70bd51e10a80e9ac6d060067e5b45c3bd47",
+  "device": "AMD Radeon RX 9070 XT",
+  "architecture": "gfx1201",
+  "driver": "3665.0 (PAL,LC)",
+  "api": "OpenCL 2.0 AMD-APP; OpenCL C 2.0; kernel build CL1.2",
+  "dictionary_words": 358,
+  "seconds_per_profile": 5,
+  "common": {
+    "pipeline": "staged",
+    "compiler": "compact",
+    "inverse": "pair",
+    "group_size": 64,
+    "curve_batch": 2,
+    "buffer_mib": 8,
+    "chunk_ms": 32
+  },
+  "correctness": "Smoke, RNG, seven staged program builds, both scan inverse variants and combined GPU/CPU self-test passed before the recorded profiles. No wallet output was produced.",
+  "profiles": [
+    {
+      "name": "full optimized profile",
+      "opencl_opt_mask": 63,
+      "affine_batch": 4,
+      "wall_mkeys_per_s": 104.532,
+      "stage_ns_per_key": {
+        "curve": 1.351,
+        "affine": 3.406,
+        "keccak": 0.825,
+        "checksum": 0.728,
+        "base58": 0.817,
+        "match": 0.439
+      }
+    },
+    { "name": "pre-optimization math", "opencl_opt_mask": 0, "wall_mkeys_per_s": 77.799 },
+    { "name": "curve only", "opencl_opt_mask": 1, "wall_mkeys_per_s": 77.986 },
+    { "name": "affine only", "opencl_opt_mask": 2, "wall_mkeys_per_s": 95.234 },
+    { "name": "keccak only", "opencl_opt_mask": 4, "wall_mkeys_per_s": 78.079 },
+    { "name": "checksum only", "opencl_opt_mask": 8, "wall_mkeys_per_s": 78.774 },
+    { "name": "Base58 only", "opencl_opt_mask": 16, "wall_mkeys_per_s": 82.811 },
+    { "name": "match only", "opencl_opt_mask": 32, "wall_mkeys_per_s": 78.149 }
+  ],
+  "not_recorded": [
+    "affine batch 2/4/8 timed rows",
+    "curve batch, group size, metadata-read, SHA-ring, RNG and 8/128/8 runtime sizing rows",
+    "Vulkan/OpenCL A/B report"
+  ]
+}

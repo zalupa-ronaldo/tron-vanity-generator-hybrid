@@ -27,6 +27,14 @@ comparison between 8 and 128 MiB has not yet been reported. Do not claim the
 128 MiB search runs at 105.58 M/s from this profile alone. `bench.cmd` now
 includes 8/128/8 MiB and 16/32/64 ms chunk rows for that measurement.
 
+A later `v1.9.3` report with the same executable and dictionary fingerprints
+recorded 104.532 M keys/s for the optimized 8 MiB profile. Its executable
+SHA-256 was `06e7c1c1...ea4878` (the v1.9.3 release executable) and its
+dictionary SHA-256 was `ed46b8a4...c3bd47`; the pasted report ended before the
+remaining matrix rows. This is a consistency rerun, not evidence that 128 MiB
+or Vulkan has been measured. The redacted completed rows are in
+[`amd-rx9070xt-opencl-2026-09-23-partial.json`](../benchmarks/amd-rx9070xt-opencl-2026-09-23-partial.json).
+
 | Paired affine batch | Wall M keys/s | Affine ns/key | Decision |
 | ---: | ---: | ---: | --- |
 | 2 | 83.85 | 5.729 | Reject |
@@ -45,6 +53,22 @@ reported 0.456 s in the separate blocking metadata-read API across the
 five-second run. That API time is *not* a promised removable 0.456 s: queued
 read completion can move into `clFinish`, and only a full wall-rate A/B can
 establish the net gain. The new queued mode is therefore off by default.
+
+The consistency rerun also isolated the compile-time optimization mask:
+
+| Enabled stage optimization | Wall M keys/s |
+| --- | ---: |
+| none (`0`) | 77.799 |
+| curve (`1`) | 77.986 |
+| affine (`2`) | 95.234 |
+| Keccak (`4`) | 78.079 |
+| checksum (`8`) | 78.774 |
+| Base58 (`16`) | 82.811 |
+| match (`32`) | 78.149 |
+| all (`63`) | **104.532** |
+
+These are one five-second pass, so they identify the dominant affine
+optimization but are not a replacement for the planned A/B/A repeats.
 
 ## Hardware facts versus inference
 

@@ -58,7 +58,10 @@ bench.cmd                           bounded OpenCL matrix + Vulkan A/B benchmark
 
 `bench.cmd` runs the complete OpenCL configuration matrix and then the
 Vulkan/OpenCL A/B suite, each with independent correctness gates and timeouts.
-It writes `summary.txt` and `benchmark.csv` in separate
+After every required and optional OpenCL case succeeds, it updates the adjacent
+`tron-vanity.conf` to the fastest measured OpenCL variant and saves the
+previous file as a timestamped `.bak-YYYYMMDD-HHmmss` copy. Failed or
+incomplete runs leave the existing config unchanged. It writes `summary.txt` and `benchmark.csv` in separate
 `opencl-diagnostic-*` and `vulkan-benchmark-*` folders. Send both pairs of
 reports. It ignores the adjacent search config and records
 the exe and dictionary SHA-256 hashes, so A/B results can be checked against
@@ -72,15 +75,20 @@ The full `bench.cmd` matrix includes an 8/128/8 MiB ring comparison and
 16/32/64 ms chunk comparison on the 128 MiB release ring; use its *wall*
 rates to decide whether to change those two config values.
 
-If `TRON_BENCH_UPLOAD_TOKEN` is set, `bench.cmd` also uploads only
-`summary.txt` and `benchmark.csv` from the newest report folders to the
-configured HTTPS endpoint. The Windows release includes the helper under
+The upload step runs only when `TRON_BENCH_UPLOAD_TOKEN` is already set in the
+same PowerShell environment before starting `bench.cmd`. If it was set after
+the benchmark, upload the finished folders explicitly with the helper. The
+helper chooses the newest OpenCL folder and newest Vulkan folder separately,
+prints each HTTP response, and retries transient failures. It uploads only
+`summary.txt` and `benchmark.csv` to the configured HTTPS endpoint. The Windows release includes the helper under
 `tools\upload-benchmark-results.cmd`:
 
 ```powershell
 $env:TRON_BENCH_UPLOAD_TOKEN = "<endpoint token>"
 $env:TRON_BENCH_UPLOAD_URL = "https://turbobuff.beer/tron-bench-upload"
 .\bench.cmd
+# Or, after a completed run:
+.\tools\upload-benchmark-results.cmd
 ```
 
 The upload service rejects wallets, private keys, and all other filenames.

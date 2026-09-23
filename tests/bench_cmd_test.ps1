@@ -9,6 +9,9 @@ try {
     if ($launcherText -notmatch 'Send the summary\.txt and benchmark\.csv from both report folders') {
         throw "bench.cmd is missing the report-sharing instruction"
     }
+    if ($launcherText -notmatch 'test-opencl\.ps1.*-All.*-UpdateConfig') {
+        throw "bench.cmd does not enable safe benchmark config update"
+    }
     foreach ($case in @(
         @{ Name = "success"; Exit = 0 },
         @{ Name = "fail-opencl"; Exit = 1 },

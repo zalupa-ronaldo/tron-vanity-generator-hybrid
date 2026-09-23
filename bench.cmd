@@ -2,7 +2,7 @@
 rem One-command, no-wallet RX 9070 XT benchmark. Every child has its own timeout.
 rem Keep running the second suite if the first fails: each suite reports its
 rem own correctness gate and the failure may be backend-specific.
-call powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0test-opencl.ps1" -All -TimeoutSeconds 120
+call powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0test-opencl.ps1" -All -UpdateConfig -TimeoutSeconds 120
 set "opencl_exit=%errorlevel%"
 call powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bench-vulkan.ps1" -TimeoutSeconds 120
 set "vulkan_exit=%errorlevel%"

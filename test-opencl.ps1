@@ -1,4 +1,6 @@
 # Diagnostics only: no wallet files or private keys, no driver/cache changes.
+# With -UpdateConfig, the existing search config is backed up and updated only
+# after the selected benchmark suite has a valid winning profile.
 param(
     [ValidateSet("single", "pair")][string]$Inverse = "pair",
     [ValidateSet("compact", "default")][string]$Compiler = "compact",
@@ -11,6 +13,7 @@ param(
     [switch]$CompareGroupSizes,
     [switch]$CompareMetaRead,
     [switch]$CompareRuntimeSizing,
+    [switch]$UpdateConfig,
     [switch]$All
 )
 $ErrorActionPreference = "Stop"
@@ -122,6 +125,75 @@ function Invoke-BoundedTest([string]$Name, [string[]]$TestArguments, [bool]$Comp
     return $status -eq "PASS"
 }
 
+function Get-ArgumentValue([string[]]$Arguments, [string]$Name, [string]$Default = "") {
+    $index = [array]::IndexOf($Arguments, $Name)
+    if ($index -ge 0 -and $index + 1 -lt $Arguments.Count) { return $Arguments[$index + 1] }
+    return $Default
+}
+
+function Has-Argument([string[]]$Arguments, [string]$Name) {
+    return [array]::IndexOf($Arguments, $Name) -ge 0
+}
+
+function Update-SearchConfig([object]$Best) {
+    $configPath = Join-Path $PSScriptRoot "tron-vanity.conf"
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        Write-Report "Config update skipped: $configPath was not found."
+        return $false
+    }
+    $tokens = @($Best.Arguments -split ' ' | Where-Object { $_ -ne "" })
+    $updates = [ordered]@{
+        "backend" = "opencl"
+        "gpu-rng" = Get-ArgumentValue $tokens "--gpu-rng" "chacha12"
+        "gpu-buffer-mb" = Get-ArgumentValue $tokens "--gpu-buffer-mb" "8"
+        "gpu-chunk-ms" = Get-ArgumentValue $tokens "--gpu-chunk-ms" "32"
+        "gpu-group-size" = Get-ArgumentValue $tokens "--gpu-group-size" "64"
+        "opencl-pipeline" = Get-ArgumentValue $tokens "--opencl-pipeline" "staged"
+        "opencl-inverse" = Get-ArgumentValue $tokens "--opencl-inverse" "pair"
+        "opencl-affine-batch" = Get-ArgumentValue $tokens "--opencl-affine-batch" "4"
+        "opencl-curve-batch" = Get-ArgumentValue $tokens "--opencl-curve-batch" "2"
+        "opencl-compiler" = Get-ArgumentValue $tokens "--opencl-compiler" "compact"
+        "opencl-opt-mask" = Get-ArgumentValue $tokens "--opencl-opt-mask" "63"
+        "opencl-async-meta-read" = if (Has-Argument $tokens "--opencl-async-meta-read") { "true" } else { "false" }
+        "opencl-sha-ring" = if (Has-Argument $tokens "--opencl-sha-ring") { "true" } else { "false" }
+        "opencl-host-seed" = if (Has-Argument $tokens "--opencl-host-seed") { "true" } else { "false" }
+    }
+    $lines = @(Get-Content -LiteralPath $configPath -Encoding UTF8)
+    $output = [System.Collections.Generic.List[string]]::new()
+    $seen = @{}
+    foreach ($line in $lines) {
+        if ($line -match '^(\s*)([A-Za-z0-9-]+)(\s*=).*$') {
+            $key = $matches[2]
+            if ($updates.Contains($key)) {
+                $output.Add(($matches[1] + $key + $matches[3] + [string]$updates[$key]))
+                $seen[$key] = $true
+                continue
+            }
+        }
+        $output.Add($line)
+    }
+    foreach ($key in $updates.Keys) {
+        if (-not $seen.ContainsKey($key)) { $output.Add("$key=$($updates[$key])") }
+    }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backupPath = "$configPath.bak-$stamp"
+    $tempPath = "$configPath.tmp-$([guid]::NewGuid().ToString('N'))"
+    try {
+        Copy-Item -LiteralPath $configPath -Destination $backupPath -ErrorAction Stop
+        Set-Content -LiteralPath $tempPath -Value $output.ToArray() -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath $tempPath -Destination $configPath -Force -ErrorAction Stop
+        Write-Report ("Config updated from benchmark winner: {0} ({1:N3} M/s)" -f $Best.Test, $Best.MKeysPerSecond)
+        Write-Report "Config backup: $backupPath"
+        Write-Report ((($updates.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ", "))
+        return $true
+    } catch {
+        Write-Report "Config update failed; existing config was left in place: $($_.Exception.Message)"
+        return $false
+    } finally {
+        if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Write-Summary {
     Write-Report ($results | Select-Object Test, Result, Seconds, MKeysPerSecond | Format-Table -AutoSize | Out-String)
     $csv = Join-Path $logDir "benchmark.csv"
@@ -132,6 +204,14 @@ function Write-Summary {
         Write-Report "Ranked wall throughput (same dictionary and five-second workload):"
         Write-Report ($ranked | Select-Object Test, MKeysPerSecond | Format-Table -AutoSize | Out-String)
         Write-Report ("Fastest measured: " + $ranked[0].Test + " (" + $ranked[0].MKeysPerSecond + " M/s)")
+        $failed = @($results | Where-Object { $_.Result -ne "PASS" })
+        if ($UpdateConfig -and (-not $All -or $failed.Count -eq 0)) {
+            [void](Update-SearchConfig $ranked[0])
+        } elseif ($UpdateConfig) {
+            Write-Report "Config update skipped: the full benchmark had failed or timed-out cases."
+        }
+    } elseif ($UpdateConfig) {
+        Write-Report "Config update skipped: no successful timed profile was available."
     }
     Write-Report "Machine-readable benchmark: $csv"
     Write-Report "Send summary.txt from: $logDir"

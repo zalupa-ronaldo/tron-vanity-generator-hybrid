@@ -71,5 +71,14 @@ Khronos's [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.h
 and [shader interface specification](https://docs.vulkan.org/spec/latest/chapters/interfaces.html)
 define dispatch/descriptor requirements. If experimenting with `clspv`, use
 its [OpenCL-C mapping](https://github.com/google/clspv/blob/main/docs/OpenCLCOnVulkan.md)
-and inspect the produced descriptor map; `clvk` is a compatibility route, not
-the native backend above.
+and inspect the reflected bindings; `clvk` is a compatibility route, not the
+native backend above. Current upstream `clspv` documents the old
+`-descriptormap` flag as removed: compile the isolated `resident_stage_curve`
+and `resident_stage_affine` OpenCL sources ahead of time, then run
+`clspv-reflection` on each SPIR-V module. Confirm the generated binding map,
+`Int8`/`Int64` and variable-pointer capabilities against the actual RX Vulkan
+features before writing a host descriptor layout. This is an *experiment*, not
+a claim that the complete OpenCL source compiles or runs unchanged. If it
+fails or performs poorly, port the 10x26 field/group math to GLSL and keep the
+same 128-byte point wire layout. Either path needs the CPU/libsecp256k1
+boundary tests above before any search output is enabled.

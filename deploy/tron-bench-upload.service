@@ -1,0 +1,24 @@
+[Unit]
+Description=Authenticated TRON benchmark report upload endpoint
+After=network.target
+
+[Service]
+Type=simple
+User=tronbench
+Group=tronbench
+Environment=TRON_BENCH_ROOT=/srv/tron-benchmark-reports
+Environment=TRON_BENCH_TOKEN_FILE=/etc/tron-bench-upload/token
+Environment=TRON_BENCH_BIND=127.0.0.1
+Environment=TRON_BENCH_PORT=8768
+ExecStart=/opt/energy-service/venv/bin/uvicorn tron_bench_upload:app --app-dir /opt/tron-bench-upload --host 127.0.0.1 --port 8768 --workers 1
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/srv/tron-benchmark-reports
+ReadOnlyPaths=/etc/tron-bench-upload/token /opt/tron-bench-upload/tron_bench_upload.py
+
+[Install]
+WantedBy=multi-user.target

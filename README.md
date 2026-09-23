@@ -72,6 +72,19 @@ The full `bench.cmd` matrix includes an 8/128/8 MiB ring comparison and
 16/32/64 ms chunk comparison on the 128 MiB release ring; use its *wall*
 rates to decide whether to change those two config values.
 
+If `TRON_BENCH_UPLOAD_TOKEN` is set, `bench.cmd` also uploads only
+`summary.txt` and `benchmark.csv` from the newest report folders to the
+configured HTTPS endpoint. The Windows release includes the helper under
+`tools\upload-benchmark-results.cmd`:
+
+```powershell
+$env:TRON_BENCH_UPLOAD_TOKEN = "<endpoint token>"
+$env:TRON_BENCH_UPLOAD_URL = "https://turbobuff.beer/tron-bench-upload"
+.\bench.cmd
+```
+
+The upload service rejects wallets, private keys, and all other filenames.
+
 See the measured [M4 Metal profile](docs/apple-m4-metal-hardware-profile.md),
 [RX 9070 XT OpenCL profile](docs/rx9070xt-opencl-research.md), and
 [engineering handoff](docs/next-agent-handoff.md). There is an optional native

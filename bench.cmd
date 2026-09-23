@@ -9,8 +9,16 @@ set "vulkan_exit=%errorlevel%"
 echo.
 echo OpenCL suite exit: %opencl_exit%  Vulkan suite exit: %vulkan_exit%
 echo Send the summary.txt and benchmark.csv from both report folders only.
+if defined TRON_BENCH_UPLOAD_TOKEN (
+  call powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\upload-benchmark-results.ps1"
+  set "upload_exit=%errorlevel%"
+) else (
+  echo Upload skipped: set TRON_BENCH_UPLOAD_TOKEN to publish reports to the configured HTTPS endpoint.
+  set "upload_exit=0"
+)
 set "bench_exit=0"
 if not "%opencl_exit%"=="0" set "bench_exit=1"
 if not "%vulkan_exit%"=="0" set "bench_exit=1"
+if not "%upload_exit%"=="0" set "bench_exit=1"
 if not defined TRON_BENCH_NO_PAUSE pause
 exit /b %bench_exit%

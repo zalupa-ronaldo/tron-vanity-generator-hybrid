@@ -138,12 +138,14 @@ jobs:
           Copy-Item words.example.txt release\words.txt
           Copy-Item README.md,NOTICE,LICENSE,tron-vanity.conf release\
           Copy-Item test-opencl.ps1,test-opencl.cmd,bench.cmd,bench-vulkan.ps1,bench-vulkan.cmd release\
+          New-Item -ItemType Directory -Force release\tools | Out-Null
+          Copy-Item tools\upload-benchmark-results.ps1,tools\upload-benchmark-results.cmd release\tools\
           Compress-Archive -Path release\* -DestinationPath tron-vanity-generator-windows-x64.zip
 
       - name: Verify packaged no-argument configuration
         shell: pwsh
         run: |
-          foreach ($name in @('tron_vanity_generator.exe', 'tron-vanity.conf', 'words.txt', 'bench.cmd', 'bench-vulkan.cmd', 'bench-vulkan.ps1')) {
+          foreach ($name in @('tron_vanity_generator.exe', 'tron-vanity.conf', 'words.txt', 'bench.cmd', 'bench-vulkan.cmd', 'bench-vulkan.ps1', 'tools\upload-benchmark-results.ps1', 'tools\upload-benchmark-results.cmd')) {
             if (-not (Test-Path (Join-Path release $name))) { throw "Missing release file: $name" }
           }
           Push-Location release

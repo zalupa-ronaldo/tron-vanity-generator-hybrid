@@ -100,7 +100,11 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    into that separate test folder first; do not use the starter file for an
    RX-versus-OpenCL claim.
 2. `vulkan/vulkan_backend.cpp` now reuses descriptors, pipelines, buffers and
-   command objects across bounded batches. It resets and drains the atomic
+   command objects across bounded batches. The default submit batch is 131,072
+   keys (configurable to 32,768/65,536/131,072/262,144); this reduces fixed
+   `vkQueueSubmit`/fence work without changing the GPU math or result ABI. The
+   profile also reports host setup/record/submit/fence/collection intervals so
+   wall-rate loss can be separated from shader time. It resets and drains the atomic
    ring every dispatch. The OS CSPRNG base expands into a 22-bit offset
    window; every candidate scalar, address and full dictionary match is
    rechecked on CPU before output. Metadata overflow and driver timeouts stop
@@ -126,9 +130,11 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    reports host-visible device-local memory; GPU stages reached 24.73 M/s for
    batch 4 on average, but roughly 4.4 s of each five-second run remained
    host/queue/transfer overhead. Do not recommend Vulkan on performance
-   grounds: the next target is reducing per-dispatch synchronization and host
-   work, not changing the curve batch or staging memory blindly. A long-running
-   funded-wallet run remains unvalidated.
+   grounds until the larger-submit A/B is measured: the next target is
+   reducing per-dispatch synchronization and host work, not changing the
+   curve batch or staging memory blindly. `bench-vulkan.ps1 -VulkanBatchKeys
+   32768` reproduces the old baseline; `-VulkanBatchKeys 131072` exercises the
+   larger submit. A long-running funded-wallet run remains unvalidated.
 
 Khronos's [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
 and [shader interface specification](https://docs.vulkan.org/spec/latest/chapters/interfaces.html)

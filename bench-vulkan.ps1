@@ -1,7 +1,8 @@
 # Opt-in RX 9070 XT comparison. Only no-wallet self-test/profile commands run.
 param(
     [ValidateRange(30, 600)][int]$TimeoutSeconds = 120,
-    [ValidateRange(1, 60)][int]$Seconds = 5
+    [ValidateRange(1, 60)][int]$Seconds = 5,
+    [ValidateSet(32768, 65536, 131072, 262144)][int]$VulkanBatchKeys = 131072
 )
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
@@ -126,9 +127,11 @@ $opencl = @("--no-config", "--backend", "opencl", "--gpu-group-size", "64",
             "--opencl-profile", "--words", "words.txt", "--gpu-buffer-mb", "8",
             "--bench-seconds", $secondsToken)
 $vulkan1 = @("--no-config", "--backend", "vulkan", "--words", "words.txt",
-             "--vulkan-profile", "--vulkan-curve-batch", "1", "--bench-seconds", $secondsToken)
+             "--vulkan-profile", "--vulkan-curve-batch", "1", "--vulkan-batch-keys",
+             "$VulkanBatchKeys", "--bench-seconds", $secondsToken)
 $vulkan4 = @("--no-config", "--backend", "vulkan", "--words", "words.txt",
-             "--vulkan-profile", "--vulkan-curve-batch", "4", "--bench-seconds", $secondsToken)
+             "--vulkan-profile", "--vulkan-curve-batch", "4", "--vulkan-batch-keys",
+             "$VulkanBatchKeys", "--bench-seconds", $secondsToken)
 $allPassed = $true
 foreach ($run in @(
     @{ Name = "02-opencl-A"; Args = $opencl },

@@ -173,6 +173,18 @@ An opt-in Vulkan config may use `backend=vulkan` and
 `vulkan-curve-batch=4`; the bundled RX config remains on its proven OpenCL
 settings.
 
+The native Vulkan path submits 131,072 keys per dispatch by default instead of
+32,768, reducing CPU queue/fence churn. Use `--vulkan-batch-keys 32768`,
+`65536`, `131072`, or `262144` for an A/B run. Curve, Keccak, checksum, Base58
+and dictionary matching remain GPU stages; the CPU only seeds a large scalar
+window, waits for completion, and validates reported matches before output.
+
+The native Vulkan path submits 131,072 keys per dispatch by default instead of
+32,768, reducing CPU queue/fence churn. Use `--vulkan-batch-keys 32768`,
+`65536`, `131072`, or `262144` for an A/B run. Curve, Keccak, checksum, Base58
+and dictionary matching remain GPU stages; the CPU only seeds a large scalar
+window, waits for completion, and validates reported matches before output.
+
 ## Build on Windows
 
 Install Visual Studio Build Tools with the C++ workload, CMake, Ninja and Git.

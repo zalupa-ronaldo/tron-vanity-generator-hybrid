@@ -1,0 +1,259 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Correctness-first native Vulkan secp256k1 mixed point addition. Binding 6
+// holds affine X||Y points; binding 0 receives (P + G) in the same 64-byte
+// public-key layout consumed by keccak.comp. This is a deterministic test
+// stage, not yet the production batched point walk.
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 6) readonly buffer InputPoints { uint words[]; } inputs;
+layout(std430, set = 0, binding = 0) writeonly buffer PublicKeys { uint words[]; } publics;
+layout(push_constant) uniform Params { uint count; } params;
+
+struct Fe { uint n[10]; };
+struct Ge { Fe x, y; bool inf; };
+struct Gej { Fe x, y, z; bool inf; };
+const uint64_t MASK26 = 0x3fffffful;
+const uint64_t R0 = 0x3d10ul;
+const uint64_t R1 = 0x400ul;
+
+uint64_t mulWide(uint a, uint b) { return uint64_t(a) * uint64_t(b); }
+
+// The 10x26 reduction is the same field representation as the OpenCL stage.
+// This loop form keeps the first Vulkan port auditable against fe_mul_inner.
+Fe feMul(Fe a, Fe b) {
+    uint64_t d = 0ul;
+    for (int i = 0; i < 10; ++i) d += mulWide(a.n[i], b.n[9 - i]);
+    uint t9 = uint(d & MASK26);
+    d >>= 26;
+    uint64_t c = mulWide(a.n[0], b.n[0]);
+    uint t[8];
+    for (int k = 0; k < 8; ++k) {
+        for (int i = k + 1; i < 10; ++i)
+            d += mulWide(a.n[i], b.n[k + 10 - i]);
+        uint64_t u = d & MASK26;
+        d >>= 26;
+        c += u * R0;
+        t[k] = uint(c & MASK26);
+        c >>= 26;
+        c += u * R1;
+        for (int i = 0; i <= k + 1; ++i)
+            c += mulWide(a.n[i], b.n[k + 1 - i]);
+    }
+    d += mulWide(a.n[9], b.n[9]);
+    uint64_t u8 = d & MASK26;
+    d >>= 26;
+    c += u8 * R0;
+    Fe r;
+    for (int i = 3; i <= 7; ++i) r.n[i] = t[i];
+    r.n[8] = uint(c & MASK26);
+    c >>= 26;
+    c += u8 * R1 + d * R0 + uint64_t(t9);
+    r.n[9] = uint(c & (MASK26 >> 4));
+    c >>= 22;
+    c += d * (R1 << 4);
+    d = c * (R0 >> 4) + uint64_t(t[0]);
+    r.n[0] = uint(d & MASK26);
+    d >>= 26;
+    d += c * (R1 >> 4) + uint64_t(t[1]);
+    r.n[1] = uint(d & MASK26);
+    d >>= 26;
+    r.n[2] = uint(d + uint64_t(t[2]));
+    return r;
+}
+
+Fe feSqr(Fe a) { return feMul(a, a); }
+Fe feInt(uint x) {
+    Fe r;
+    r.n[0] = x;
+    for (int i = 1; i < 10; ++i) r.n[i] = 0u;
+    return r;
+}
+Fe feAdd(Fe a, Fe b) {
+    for (int i = 0; i < 10; ++i) a.n[i] += b.n[i];
+    return a;
+}
+Fe feMulInt(Fe a, uint x) {
+    for (int i = 0; i < 10; ++i) a.n[i] *= x;
+    return a;
+}
+Fe feNegate(Fe a, uint m) {
+    Fe r;
+    r.n[0] = 0x3fffc2fu * 2u * (m + 1u) - a.n[0];
+    r.n[1] = 0x3ffffbfu * 2u * (m + 1u) - a.n[1];
+    for (int i = 2; i < 9; ++i)
+        r.n[i] = 0x3ffffffu * 2u * (m + 1u) - a.n[i];
+    r.n[9] = 0x03fffffu * 2u * (m + 1u) - a.n[9];
+    return r;
+}
+Fe feHalf(Fe r) {
+    uint t[10];
+    for (int i = 0; i < 10; ++i) t[i] = r.n[i];
+    uint mask = uint(-int(t[0] & 1u)) >> 6;
+    t[0] += 0x3fffc2fu & mask;
+    t[1] += 0x3ffffbfu & mask;
+    for (int i = 2; i < 9; ++i) t[i] += mask;
+    t[9] += mask >> 4;
+    for (int i = 0; i < 9; ++i)
+        r.n[i] = (t[i] >> 1) + ((t[i + 1] & 1u) << 25);
+    r.n[9] = t[9] >> 1;
+    return r;
+}
+
+Fe feNormalize(Fe r) {
+    uint t[10];
+    for (int i = 0; i < 10; ++i) t[i] = r.n[i];
+    uint x = t[9] >> 22;
+    t[9] &= 0x03fffffu;
+    t[0] += x * 0x3d1u;
+    t[1] += x << 6;
+    for (int i = 0; i < 9; ++i) {
+        t[i + 1] += t[i] >> 26;
+        t[i] &= 0x3ffffffu;
+    }
+    uint m = 0x3ffffffu;
+    for (int i = 2; i <= 8; ++i) m &= t[i];
+    x = (t[9] >> 22) | uint(
+        t[9] == 0x03fffffu && m == 0x3ffffffu &&
+        (t[1] + 0x40u + ((t[0] + 0x3d1u) >> 26)) > 0x3ffffffu);
+    t[0] += x * 0x3d1u;
+    t[1] += x << 6;
+    for (int i = 0; i < 9; ++i) {
+        t[i + 1] += t[i] >> 26;
+        t[i] &= 0x3ffffffu;
+    }
+    t[9] &= 0x03fffffu;
+    for (int i = 0; i < 10; ++i) r.n[i] = t[i];
+    return r;
+}
+bool feZero(Fe a) {
+    a = feNormalize(a);
+    for (int i = 0; i < 10; ++i)
+        if (a.n[i] != 0u) return false;
+    return true;
+}
+
+Fe feSqrN(Fe a, int n) {
+    for (int i = 0; i < n; ++i) a = feSqr(a);
+    return a;
+}
+// Fermat inversion addition chain from the existing OpenCL/libsecp256k1 path.
+Fe feInv(Fe a) {
+    Fe x2 = feMul(feSqr(a), a);
+    Fe x3 = feMul(feSqr(x2), a);
+    Fe x6 = feMul(feSqrN(x3, 3), x3);
+    Fe x9 = feMul(feSqrN(x6, 3), x3);
+    Fe x11 = feMul(feSqrN(x9, 2), x2);
+    Fe x22 = feMul(feSqrN(x11, 11), x11);
+    Fe x44 = feMul(feSqrN(x22, 22), x22);
+    Fe x88 = feMul(feSqrN(x44, 44), x44);
+    Fe x176 = feMul(feSqrN(x88, 88), x88);
+    Fe x220 = feMul(feSqrN(x176, 44), x44);
+    Fe x223 = feMul(feSqrN(x220, 3), x3);
+    Fe t = feMul(feSqrN(x223, 23), x22);
+    t = feMul(feSqrN(t, 5), a);
+    t = feMul(feSqrN(t, 3), x2);
+    return feMul(feSqrN(t, 2), a);
+}
+
+uint inputByte(uint index, uint byteIndex) {
+    uint word = inputs.words[index * 16u + byteIndex / 4u];
+    return (word >> (8u * (byteIndex & 3u))) & 255u;
+}
+Fe feFromBytes(uint index, uint start) {
+    uint a[32];
+    for (uint i = 0u; i < 32u; ++i) a[i] = inputByte(index, start + i);
+    Fe r;
+    r.n[0] = a[31] | (a[30] << 8) | (a[29] << 16) | ((a[28] & 3u) << 24);
+    r.n[1] = ((a[28] >> 2) & 63u) | (a[27] << 6) | (a[26] << 14) | ((a[25] & 15u) << 22);
+    r.n[2] = ((a[25] >> 4) & 15u) | (a[24] << 4) | (a[23] << 12) | ((a[22] & 63u) << 20);
+    r.n[3] = ((a[22] >> 6) & 3u) | (a[21] << 2) | (a[20] << 10) | (a[19] << 18);
+    r.n[4] = a[18] | (a[17] << 8) | (a[16] << 16) | ((a[15] & 3u) << 24);
+    r.n[5] = ((a[15] >> 2) & 63u) | (a[14] << 6) | (a[13] << 14) | ((a[12] & 15u) << 22);
+    r.n[6] = ((a[12] >> 4) & 15u) | (a[11] << 4) | (a[10] << 12) | ((a[9] & 63u) << 20);
+    r.n[7] = ((a[9] >> 6) & 3u) | (a[8] << 2) | (a[7] << 10) | (a[6] << 18);
+    r.n[8] = a[5] | (a[4] << 8) | (a[3] << 16) | ((a[2] & 3u) << 24);
+    r.n[9] = ((a[2] >> 2) & 63u) | (a[1] << 6) | (a[0] << 14);
+    return r;
+}
+void feToBytes(Fe a, out uint bytes[32]) {
+    uint words[8];
+    words[0] = (a.n[9] << 10) | (a.n[8] >> 16);
+    words[1] = (a.n[8] << 16) | (a.n[7] >> 10);
+    words[2] = (a.n[7] << 22) | (a.n[6] >> 4);
+    words[3] = (a.n[6] << 28) | (a.n[5] << 2) | (a.n[4] >> 24);
+    words[4] = (a.n[4] << 8) | (a.n[3] >> 18);
+    words[5] = (a.n[3] << 14) | (a.n[2] >> 12);
+    words[6] = (a.n[2] << 20) | (a.n[1] >> 6);
+    words[7] = (a.n[1] << 26) | a.n[0];
+    for (int i = 0; i < 8; ++i) {
+        bytes[i * 4] = (words[i] >> 24) & 255u;
+        bytes[i * 4 + 1] = (words[i] >> 16) & 255u;
+        bytes[i * 4 + 2] = (words[i] >> 8) & 255u;
+        bytes[i * 4 + 3] = words[i] & 255u;
+    }
+}
+
+// Unified mixed addition from the same libsecp256k1-derived formula as the
+// resident OpenCL curve stage; handles P == G without a separate double path.
+Gej gejAddGe(Gej a, Ge b) {
+    Fe zz = feSqr(a.z);
+    Fe u1 = a.x;
+    Fe u2 = feMul(b.x, zz);
+    Fe s1 = a.y;
+    Fe s2 = feMul(feMul(b.y, zz), a.z);
+    Fe t = feAdd(u1, u2);
+    Fe m = feAdd(s1, s2);
+    Fe rr = feAdd(feSqr(t), feMul(u1, feNegate(u2, 1u)));
+    bool degenerate = feZero(m);
+    Fe rrAlt = feMulInt(s1, 2u);
+    Fe mAlt = feAdd(feNegate(u2, 1u), u1);
+    if (!degenerate) { rrAlt = rr; mAlt = m; }
+    Fe n = feSqr(mAlt);
+    Fe q = feMul(feNegate(t, 5u), n);
+    n = feSqr(n);
+    if (degenerate) n = m;
+    t = feSqr(rrAlt);
+    Gej r;
+    r.z = feMul(a.z, mAlt);
+    t = feAdd(t, q);
+    r.x = t;
+    t = feMulInt(t, 2u);
+    t = feAdd(t, q);
+    t = feMul(t, rrAlt);
+    t = feAdd(t, n);
+    r.y = feHalf(feNegate(t, 6u));
+    if (a.inf) { r.x = b.x; r.y = b.y; r.z = feInt(1u); }
+    r.inf = feZero(r.z);
+    return r;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.count) return;
+    Ge generator;
+    generator.x = feFromBytes(0u, 0u);
+    generator.y = feFromBytes(0u, 32u);
+    generator.inf = false;
+    Gej point;
+    point.x = feFromBytes(gid, 0u);
+    point.y = feFromBytes(gid, 32u);
+    point.z = feInt(1u);
+    point.inf = false;
+    point = gejAddGe(point, generator);
+    Fe zi = feInv(point.z);
+    Fe zi2 = feSqr(zi);
+    Fe x = feNormalize(feMul(point.x, zi2));
+    Fe y = feNormalize(feMul(point.y, feMul(zi, zi2)));
+    uint xb[32], yb[32];
+    feToBytes(x, xb);
+    feToBytes(y, yb);
+    for (uint i = 0u; i < 16u; ++i) {
+        uint p = i * 4u;
+        uint b0 = p < 32u ? xb[p] : yb[p - 32u];
+        uint b1 = p < 32u ? xb[p + 1u] : yb[p + 1u - 32u];
+        uint b2 = p < 32u ? xb[p + 2u] : yb[p + 2u - 32u];
+        uint b3 = p < 32u ? xb[p + 3u] : yb[p + 3u - 32u];
+        publics.words[gid * 16u + i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    }
+}

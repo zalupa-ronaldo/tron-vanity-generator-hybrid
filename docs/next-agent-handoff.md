@@ -40,6 +40,10 @@ RX 9070 XT staged OpenCL at group 64, curve batch 2, paired affine batch 4,
 [`rx9070xt-opencl-research.md`](rx9070xt-opencl-research.md). The queued
 metadata-read mode, SHA ring, curve batches 4/8 and group 128/256 remain
 unproven on RX until fresh A/B results arrive. Do not silently promote them.
+The 105 M/s profile used an 8 MiB result ring, while the shipped config uses
+128 MiB for capacity. Its relative wall rate is unmeasured; `bench.cmd`
+now tests 8/128/8 and chunk targets 16/32/64 ms before anyone should tune
+the release config on throughput grounds.
 
 On base M4 with a 1,665-word dictionary, measured Metal 10x26 field
 multiplication was 2.13x the 8x32 port; `128 threads x 512 keys/lane` was

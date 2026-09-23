@@ -21,6 +21,11 @@ This agrees with an earlier 105.15 M keys/s run to within about 0.4%. It does
 not prove how fast a funded-wallet search will be if output/verification is
 frequent: the profile deliberately excludes CPU match verification and file
 writing.
+That profile used an 8 MiB result ring. The packaged double-click config
+uses 128 MiB to leave more room for bursts of matches; a matched wall-rate
+comparison between 8 and 128 MiB has not yet been reported. Do not claim the
+128 MiB search runs at 105.58 M/s from this profile alone. `bench.cmd` now
+includes 8/128/8 MiB and 16/32/64 ms chunk rows for that measurement.
 
 | Paired affine batch | Wall M keys/s | Affine ns/key | Decision |
 | ---: | ---: | ---: | --- |

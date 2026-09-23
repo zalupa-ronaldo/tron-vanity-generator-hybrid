@@ -10,6 +10,7 @@ param(
     [switch]$CompareShaRing,
     [switch]$CompareGroupSizes,
     [switch]$CompareMetaRead,
+    [switch]$CompareRuntimeSizing,
     [switch]$All
 )
 $ErrorActionPreference = "Stop"
@@ -20,6 +21,7 @@ if ($All) {
     $CompareShaRing = $true
     $CompareGroupSizes = $true
     $CompareMetaRead = $true
+    $CompareRuntimeSizing = $true
 }
 if ($CompareStages -and $Pipeline -ne "staged") { throw "-CompareStages requires -Pipeline staged." }
 if ($CompareAffineBatches -and $Pipeline -ne "staged") { throw "-CompareAffineBatches requires -Pipeline staged." }
@@ -27,6 +29,7 @@ if ($CompareCurveBatches -and $Pipeline -ne "staged") { throw "-CompareCurveBatc
 if ($CompareShaRing -and $Pipeline -ne "staged") { throw "-CompareShaRing requires -Pipeline staged." }
 if ($CompareGroupSizes -and $Pipeline -ne "staged") { throw "-CompareGroupSizes requires -Pipeline staged." }
 if ($CompareMetaRead -and $Pipeline -ne "staged") { throw "-CompareMetaRead requires -Pipeline staged." }
+if ($CompareRuntimeSizing -and $Pipeline -ne "staged") { throw "-CompareRuntimeSizing requires -Pipeline staged." }
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
 if (-not (Test-Path $exe)) { throw "Extract the release ZIP before running this script." }
 
@@ -128,9 +131,12 @@ function Write-Summary {
 }
 
 function Invoke-Variant([string]$Name, [string[]]$VariantArguments, [string[]]$BaseArguments,
-                        [string]$CheckStage = "scan") {
+                        [string]$CheckStage = "scan", [int]$BufferMiB = 8,
+                        [int]$ChunkMs = 32) {
     if (-not $BaseArguments) { $BaseArguments = $selectedArgs }
-    $variant = $BaseArguments + $VariantArguments
+    # Keep the correctness gate and timed profile on the same ring/chunk
+    # settings. The packaged RX config uses 128 MiB; earlier profiles used 8.
+    $variant = @($BaseArguments) + @($VariantArguments) + @("--gpu-buffer-mb", "$BufferMiB", "--gpu-chunk-ms", "$ChunkMs")
     if ($All) {
         # Do not profile a configuration that cannot reproduce CPU-verified
         # GPU addresses/scalars. Each check is a separate bounded process.
@@ -139,7 +145,7 @@ function Invoke-Variant([string]$Name, [string[]]$VariantArguments, [string[]]$B
         }
     }
     $profileArgs = $variant + @("--opencl-profile", "--words", "words.txt",
-                               "--gpu-buffer-mb", "8", "--bench-seconds", "5")
+                               "--bench-seconds", "5")
     return Invoke-BoundedTest $Name $profileArgs $true
 }
 
@@ -298,6 +304,25 @@ if (Test-Path (Join-Path $PSScriptRoot "words.txt")) {
                 }
             }
         } else { Write-Report "GPU RNG variants skipped: combined GPU RNG self-test did not pass." }
+    }
+    if ($CompareRuntimeSizing) {
+        # The 8/128/8 sequence isolates the release config's 128 MiB ring
+        # from drift. Chunk comparisons then use that same release ring size.
+        foreach ($case in @(
+            @{ Name = "15-buffer-8-A"; Buffer = 8; Chunk = 32 },
+            @{ Name = "15-buffer-128"; Buffer = 128; Chunk = 32 },
+            @{ Name = "15-buffer-8-B"; Buffer = 8; Chunk = 32 },
+            @{ Name = "16-chunk-16"; Buffer = 128; Chunk = 16 },
+            @{ Name = "16-chunk-32"; Buffer = 128; Chunk = 32 },
+            @{ Name = "16-chunk-64"; Buffer = 128; Chunk = 64 }
+        )) {
+            $parameters = @{ Name = $case.Name; VariantArguments = @();
+                             BaseArguments = $selectedArgs; BufferMiB = $case.Buffer;
+                             ChunkMs = $case.Chunk }
+            if (-not (Invoke-Variant @parameters)) {
+                if (-not $All) { Write-Summary; exit 1 }
+            }
+        }
     }
 } else { Write-Report "words.txt not found: profile skipped, self-tests did not need a dictionary." }
 Write-Report ("Base self-test passed; check the table for any failed optional variant. Optional search command (NOT executed):`ntron_vanity_generator.exe " + (($selectedArgs + @("--gpu-resident", "--words", "words.txt", "--seconds", "60")) -join " "))

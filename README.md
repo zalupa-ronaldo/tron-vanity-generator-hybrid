@@ -43,6 +43,9 @@ config and searches on the RX 9070 XT until Ctrl+C. The bundled config uses
 the validated staged OpenCL settings (GPU only, paired inversion, affine
 batch 4, group 64); it does not enable unmeasured experiments. If the selected
 GPU is unavailable, it fails instead of silently running on CPU.
+The reported ~105 M/s RX profile used an 8 MiB result ring; the bundled
+search config uses 128 MiB for match capacity. Their wall-rate difference
+has not yet been measured on the RX.
 
 From a terminal in the extracted folder, the short commands are:
 
@@ -60,6 +63,9 @@ folder, never upload it, and move funds only after independently verifying an
 address. `tron_vanity_generator.exe bench` also runs an in-process OpenCL
 tuning matrix and writes a no-wallet JSON report, but `bench.cmd` is preferred
 on Windows because every compiler attempt is separately time-bounded.
+The full `bench.cmd` matrix includes an 8/128/8 MiB ring comparison and
+16/32/64 ms chunk comparison on the 128 MiB release ring; use its *wall*
+rates to decide whether to change those two config values.
 
 See the measured [M4 Metal profile](docs/apple-m4-metal-hardware-profile.md),
 [RX 9070 XT OpenCL profile](docs/rx9070xt-opencl-research.md), and

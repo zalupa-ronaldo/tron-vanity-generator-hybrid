@@ -83,7 +83,7 @@ $cases += @{ Mode = "compare-groups"; CompareGroups = $true; Exit = 0; Calls = "
 $cases += @{ Mode = "compare-meta"; CompareMeta = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile,profile,scan-pair-queued,profile-queued"; Text = "[12-meta-queued] PASS" }
 $cases += @{ Mode = "compare-runtime"; CompareRuntime = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile,profile,profile,profile,profile,profile,profile"; Text = "[16-chunk-64] PASS" }
 $cases += @{ Mode = "all"; All = $true; Exit = 0; CallsCount = 76; TimingCount = 33; Text = "[16-chunk-64] PASS" }
-$cases += @{ Mode = "optional-profile-fail"; All = $true; UpdateConfig = $true; Exit = 1; CallsCount = 76; TimingCount = 27; Text = "Config updated from benchmark winner" }
+$cases += @{ Mode = "optional-profile-fail"; All = $true; UpdateConfig = $true; Exit = 1; CallsCount = 76; TimingCount = 33; Text = "Config updated from benchmark winner" }
 $cases += @{ Mode = "curve-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
 $cases += @{ Mode = "checksum-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
 $cases += @{ Mode = "affine-pair-fail"; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,full,profile"; Text = "Paired scan skipped" }

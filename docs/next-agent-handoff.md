@@ -69,12 +69,13 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    `vulkan/vulkan_keccak.cpp` chain three native address stages and compare
    intermediate bytes plus full Base58Check text with CPU vectors. They
    are built only with `-DTRON_ENABLE_VULKAN=ON`. Linux CI uses Mesa's
-   software Vulkan driver; it does not prove RX 9070 XT performance. The
-   Windows release uses the stub and cannot run these tests. A production
-   integration still needs the curve, dictionary and result
-   ring stages, descriptor and
-   scratch layout, barriers, bounded dispatch, result-ring semantics and
-   GPU/CPU correctness. OpenCL running on `clvk` would be a compatibility
+   software Vulkan driver; Windows SDK CI compiles the optional stages but
+   has no RX 9070 XT to execute them. The Windows release uses the stub;
+   the separate CI artifact is only for stage testing. A production
+   integration still needs the curve, dictionary, result ring and bounded
+   dispatch, along with GPU/CPU verification of each stage and overflow
+   behavior. It also needs a reusable descriptor and scratch layout;
+   OpenCL running on `clvk` would be a compatibility
    experiment, not evidence of a native Vulkan backend. Khronos's
    [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
    and the [clspv OpenCL-C mapping](https://github.com/google/clspv/blob/main/docs/OpenCLCOnVulkan.md)

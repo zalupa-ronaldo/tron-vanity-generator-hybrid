@@ -9,7 +9,7 @@ int vulkanComputeSelfTest() {
 }
 
 int vulkanKeccakSelfTest() {
-    std::cerr << "Vulkan Keccak stage was not built. Reconfigure with -DTRON_ENABLE_VULKAN=ON and a Vulkan SDK.\n";
+    std::cerr << "Vulkan address stages were not built. Reconfigure with -DTRON_ENABLE_VULKAN=ON and a Vulkan SDK.\n";
     return 77;
 }
 

@@ -48,8 +48,10 @@ CPU/GPU vectors covering each input/output word and the final partial word.
 4. Integrate dispatch with the existing `Backend` interface, CLI/config,
    OS CSPRNG base generation, output verification and error handling. Never
    fall back to CPU silently when a strict GPU backend is requested.
-5. Add Windows Vulkan SDK CI build, then test on the actual RX 9070 XT. Mesa
-   software Vulkan verifies logic/API only. Compare full wall keys/s against
+5. Windows Vulkan SDK CI now compiles the optional stages, but runtime has
+   only been verified with Mesa software Vulkan on Linux. Test the stage
+   executable on the actual RX 9070 XT before enabling any production use.
+   Once the full backend exists, compare full wall keys/s against
    the same dictionary and GPU workload under staged OpenCL; also measure
    stage ns/key and transfer overhead. Do not recommend Vulkan on performance
    grounds until correctness and matched A/B/A runs pass.

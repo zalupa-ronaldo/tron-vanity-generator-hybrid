@@ -74,6 +74,9 @@ checks the 21-byte payload, 25-byte checksum-bearing result and full
 34-character TRON address against the CPU. It requires Vulkan `shaderInt64`.
 The Windows ZIP does not include this optional probe, and there is no Vulkan
 wallet backend yet.
+An opt-in `vulkan-stage-test-windows-x64` executable is also saved as a
+short-lived artifact of successful GitHub Actions builds; on an RX 9070 XT it
+can run `tron_vanity_generator.exe test-vulkan` without writing wallets.
 
 For a source build on Windows with the [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
 installed, use `powershell -ExecutionPolicy Bypass -File .\build.ps1 -EnableVulkan`.

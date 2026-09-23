@@ -90,7 +90,7 @@ void usage() {
     std::cout <<
         "TRON vanity generator - CPU + OpenCL + CUDA + Apple Metal\n"
         "  (no arguments)   run with tron-vanity.conf next to the executable\n"
-        "  run|test|devices|bench  short commands; --config FILE overrides config\n"
+        "  run|test|devices|bench|test-vulkan  short commands; --config FILE overrides config\n"
         "  --no-config      ignore the adjacent config file\n"
         "  --seconds N       run duration; 0 = until Ctrl+C\n"
         "  --threads N       CPU threads; default = logical cores\n"
@@ -133,7 +133,7 @@ void usage() {
         "  --case-sensitive  exact case matching\n"
         "  --list            list CPU/OpenCL/CUDA devices and exit\n"
         "  --vulkan-test     native Vulkan compute API smoke test (not wallet search)\n"
-        "  --vulkan-keccak-test  verify native Vulkan Keccak address stage against CPU\n"
+        "  --vulkan-keccak-test  verify native Vulkan address stages against CPU\n"
         "  --verbose         more frequent progress updates\n"
         "  --selftest | --hashtest | --matchtest | --gputest | --bench\n";
 }
@@ -534,11 +534,12 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--config") { ++i; continue; }
         if (a == "--no-config") continue;
-        if (!commandSeen && (a == "run" || a == "test" || a == "devices" || a == "bench")) {
+        if (!commandSeen && (a == "run" || a == "test" || a == "devices" || a == "bench" || a == "test-vulkan")) {
             commandSeen = true;
             if (a == "test") effective.push_back("--gputest");
             else if (a == "devices") effective.push_back("--list");
             else if (a == "bench") effective.push_back("--tune");
+            else if (a == "test-vulkan") effective.push_back("--vulkan-keccak-test");
             continue;
         }
         effective.push_back(a);

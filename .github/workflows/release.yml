@@ -12,6 +12,35 @@ permissions:
   contents: write
 
 jobs:
+  windows-vulkan-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install pinned Vulkan SDK
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk --version 1.4.350 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK install failed: $LASTEXITCODE" }
+          $env:VULKAN_SDK = 'C:\VulkanSDK\1.4.350.0'
+          if (-not (Test-Path "$env:VULKAN_SDK\Bin\glslangValidator.exe")) {
+            throw 'Vulkan SDK shader compiler missing'
+          }
+          "VULKAN_SDK=$env:VULKAN_SDK" >> $env:GITHUB_ENV
+          "$env:VULKAN_SDK\Bin" >> $env:GITHUB_PATH
+      - name: Compile native Vulkan address stages on Windows
+        shell: pwsh
+        run: |
+          cmake -S . -B build-vulkan -G "Visual Studio 17 2022" -A x64 -DTRON_ENABLE_VULKAN=ON
+          if ($LASTEXITCODE -ne 0) { throw 'Vulkan CMake configure failed' }
+          cmake --build build-vulkan --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw 'Vulkan Windows build failed' }
+          ctest --test-dir build-vulkan -C Release -E '^vulkan_' --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Non-Vulkan tests failed' }
+          # GitHub's Windows runner has no RX 9070 XT; it cannot validate the
+          # GPU dispatch. Linux Mesa does runtime correctness, RX needs user A/B.
+
   linux-cuda:
     runs-on: ubuntu-latest
     steps:

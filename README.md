@@ -68,12 +68,18 @@ Vulkan compute probe for source builds (`-DTRON_ENABLE_VULKAN=ON`, then
 `tron_vanity_generator --vulkan-test`). It compiles a small SPIR-V shader,
 dispatches it and verifies 256 results against the CPU. This is an API and
 compiler check only: **it does not generate wallets or search addresses**.
-`--vulkan-keccak-test` separately exercises two chained real address stages:
-Keccak-256 and double SHA-256 of 256 secp256k1 public keys, checking both
-the 21-byte TRON payloads and 25-byte checksum-bearing results against the
-CPU. It requires Vulkan `shaderInt64`.
+`--vulkan-keccak-test` separately exercises three chained real address stages:
+Keccak-256, double SHA-256 and Base58Check of 256 secp256k1 public keys. It
+checks the 21-byte payload, 25-byte checksum-bearing result and full
+34-character TRON address against the CPU. It requires Vulkan `shaderInt64`.
 The Windows ZIP does not include this optional probe, and there is no Vulkan
 wallet backend yet.
+
+For a source build on Windows with the [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home)
+installed, use `powershell -ExecutionPolicy Bypass -File .\build.ps1 -EnableVulkan`.
+The build runs the Vulkan stage tests locally; it still does not add
+`--backend vulkan` for wallet generation. The SDK is a build dependency, not
+needed by the current Windows ZIP users.
 
 ## Build on Windows
 

@@ -6,7 +6,8 @@
 # The resulting exe statically links the runtime and can be copied to another x64 Windows PC.
 param(
     [string]$Config = "Release",
-    [switch]$EnableCuda
+    [switch]$EnableCuda,
+    [switch]$EnableVulkan
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -59,7 +60,11 @@ if (Test-Path $ninja) {
 }
 
 $cudaOption = if ($EnableCuda) { "ON" } else { "OFF" }
-& $cmake -B build $gen "-DCMAKE_BUILD_TYPE=$Config" "-DTRON_ENABLE_CUDA=$cudaOption"
+$vulkanOption = if ($EnableVulkan) { "ON" } else { "OFF" }
+if ($EnableVulkan -and -not $env:VULKAN_SDK) {
+    throw "-EnableVulkan requires the LunarG Vulkan SDK and VULKAN_SDK environment variable"
+}
+& $cmake -B build $gen "-DCMAKE_BUILD_TYPE=$Config" "-DTRON_ENABLE_CUDA=$cudaOption" "-DTRON_ENABLE_VULKAN=$vulkanOption"
 if ($LASTEXITCODE) { throw "cmake configure failed" }
 & $cmake --build build --config $Config
 if ($LASTEXITCODE) { throw "build failed" }

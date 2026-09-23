@@ -58,10 +58,12 @@ bench.cmd                           bounded OpenCL matrix + Vulkan A/B benchmark
 
 `bench.cmd` runs the complete OpenCL configuration matrix and then the
 Vulkan/OpenCL A/B suite, each with independent correctness gates and timeouts.
-After every required and optional OpenCL case succeeds, it updates the adjacent
-`tron-vanity.conf` to the fastest measured OpenCL variant and saves the
-previous file as a timestamped `.bak-YYYYMMDD-HHmmss` copy. Failed or
-incomplete runs leave the existing config unchanged. It writes `summary.txt` and `benchmark.csv` in separate
+After a valid profile has passed its own correctness gate, it updates the
+adjacent `tron-vanity.conf` to the fastest measured OpenCL variant and saves
+the previous file as a timestamped `.bak-YYYYMMDD-HHmmss` copy. Optional
+comparison cases that time out on a particular driver no longer block this
+update; if there is no successful timed profile, the existing config is left
+unchanged. It writes `summary.txt` and `benchmark.csv` in separate
 `opencl-diagnostic-*` and `vulkan-benchmark-*` folders. Send both pairs of
 reports. It ignores the adjacent search config and records
 the exe and dictionary SHA-256 hashes, so A/B results can be checked against

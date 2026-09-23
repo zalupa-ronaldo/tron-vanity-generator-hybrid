@@ -204,11 +204,13 @@ function Write-Summary {
         Write-Report "Ranked wall throughput (same dictionary and five-second workload):"
         Write-Report ($ranked | Select-Object Test, MKeysPerSecond | Format-Table -AutoSize | Out-String)
         Write-Report ("Fastest measured: " + $ranked[0].Test + " (" + $ranked[0].MKeysPerSecond + " M/s)")
-        $failed = @($results | Where-Object { $_.Result -ne "PASS" })
-        if ($UpdateConfig -and (-not $All -or $failed.Count -eq 0)) {
+        # Optional comparison cases are allowed to fail or time out on a
+        # particular driver.  They must not prevent a separately verified
+        # passing profile from becoming the default.  Every row in $ranked
+        # already passed its own GPU/CPU correctness gate when -All is used,
+        # and only rows with a parsed positive wall rate can enter it.
+        if ($UpdateConfig) {
             [void](Update-SearchConfig $ranked[0])
-        } elseif ($UpdateConfig) {
-            Write-Report "Config update skipped: the full benchmark had failed or timed-out cases."
         }
     } elseif ($UpdateConfig) {
         Write-Report "Config update skipped: no successful timed profile was available."

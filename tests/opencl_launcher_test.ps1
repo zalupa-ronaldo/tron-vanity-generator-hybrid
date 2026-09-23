@@ -40,6 +40,7 @@ public class Fixture {
         if (stage == "profile") {
             Console.WriteLine("wall 5.000 s, wall speed 100.000 M/s");
             Console.WriteLine("host timing: enqueue 0.001 s, finish wait 0.002 s, event query 0.003 s, metadata read 0.004 s, records 0.000 s, metadata update 0.000 s");
+            if (mode == "optional-profile-fail" && Array.IndexOf(args, "--opencl-opt-mask") >= 0) return 2;
         }
         Console.Error.WriteLine("OpenCL API: fixture BEGIN");
         Console.Error.Flush();
@@ -82,6 +83,7 @@ $cases += @{ Mode = "compare-groups"; CompareGroups = $true; Exit = 0; Calls = "
 $cases += @{ Mode = "compare-meta"; CompareMeta = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile,profile,scan-pair-queued,profile-queued"; Text = "[12-meta-queued] PASS" }
 $cases += @{ Mode = "compare-runtime"; CompareRuntime = $true; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,scan-pair,full,profile,profile,profile,profile,profile,profile,profile"; Text = "[16-chunk-64] PASS" }
 $cases += @{ Mode = "all"; All = $true; Exit = 0; CallsCount = 76; TimingCount = 33; Text = "[16-chunk-64] PASS" }
+$cases += @{ Mode = "optional-profile-fail"; All = $true; UpdateConfig = $true; Exit = 1; CallsCount = 76; TimingCount = 27; Text = "Config updated from benchmark winner" }
 $cases += @{ Mode = "curve-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
 $cases += @{ Mode = "checksum-build-fail"; Exit = 1; Calls = "smoke,rng" + $builds; Text = "At least one staged program did not build" }
 $cases += @{ Mode = "affine-pair-fail"; Exit = 0; Calls = "smoke,rng" + $builds + ",scan-single,full,profile"; Text = "Paired scan skipped" }
@@ -95,6 +97,12 @@ try {
         Copy-Item -LiteralPath $fixture -Destination (Join-Path $dir "tron_vanity_generator.exe")
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../test-opencl.ps1") -Destination $dir
         Set-Content -LiteralPath (Join-Path $dir "words.txt") -Value "energy" -Encoding ASCII
+        if ($case.UpdateConfig) {
+            Set-Content -LiteralPath (Join-Path $dir "tron-vanity.conf") -Value @(
+                "backend=opencl", "gpu-rng=chacha12", "gpu-buffer-mb=128",
+                "gpu-group-size=256", "opencl-pipeline=staged"
+            ) -Encoding ASCII
+        }
         $env:TRON_LAUNCHER_FIXTURE = $case.Mode
         $pipeline = if ($case.Pipeline) { $case.Pipeline } else { "staged" }
         $launcherArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $dir "test-opencl.ps1"), "-TimeoutSeconds", "30", "-Pipeline", $pipeline)
@@ -130,6 +138,13 @@ try {
         if ($case.All -and (-not $report.Contains("Fastest measured:") -or
                             -not (Test-Path -LiteralPath (Join-Path $reports[0].DirectoryName "benchmark.csv")))) {
             throw "Full benchmark did not rank or export profiles"
+        }
+        if ($case.UpdateConfig) {
+            if (-not $report.Contains("Config updated from benchmark winner") -or
+                (Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf") -Raw) -notmatch "gpu-group-size=64" -or
+                -not @(Get-ChildItem -LiteralPath $dir -Filter "tron-vanity.conf.bak-*" ).Count) {
+                throw "A valid profile did not update the config after an optional failure"
+            }
         }
         if ($case.All -or $case.CompareRuntime) {
             $rows = Import-Csv -LiteralPath (Join-Path $reports[0].DirectoryName "benchmark.csv")

@@ -19,7 +19,8 @@ backend selection.
 production projective variant, mode 1 reads the one affine base point from
 push constants and computes `P0 + offset·G`, where the offset is a
 push-constant base plus the invocation ID; it writes 30 words per Jacobian
-point `(X,Y,Z)` to binding 5. Deterministic test mode 0 uses the per-key
+point `(X,Y,Z)` to binding 5 in field-plane (struct-of-arrays) order.
+Deterministic test mode 0 uses the per-key
 affine points at binding 6 and retains the direct affine output contract for
 the stage-test pipeline. The host derives every expected point independently
 with `libsecp256k1`; tested offsets cross 255/256, 65535/65536 and end at

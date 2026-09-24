@@ -455,16 +455,18 @@ void writePoint(uint gid, Gej point, Fe zi) {
 }
 
 void writeProjective(uint gid, Gej point) {
-    uint base = gid * 30u;
-    for (uint i = 0u; i < 10u; ++i) projectives.words[base + i] = point.x.n[i];
-    for (uint i = 0u; i < 10u; ++i) projectives.words[base + 10u + i] = point.y.n[i];
-    for (uint i = 0u; i < 10u; ++i) projectives.words[base + 20u + i] = point.z.n[i];
+    // Struct-of-arrays layout: neighbouring affine work-items read the same
+    // limb from neighbouring keys, instead of striding by all 30 limbs of a
+    // Jacobian point.  The current dispatch count is the plane stride.
+    for (uint i = 0u; i < 10u; ++i) projectives.words[i * params.count + gid] = point.x.n[i];
+    for (uint i = 0u; i < 10u; ++i) projectives.words[(10u + i) * params.count + gid] = point.y.n[i];
+    for (uint i = 0u; i < 10u; ++i) projectives.words[(20u + i) * params.count + gid] = point.z.n[i];
 }
 
 Fe loadProjective(uint gid, uint field) {
     Fe value;
-    uint base = gid * 30u + field * 10u;
-    for (uint i = 0u; i < 10u; ++i) value.n[i] = projectives.words[base + i];
+    for (uint i = 0u; i < 10u; ++i)
+        value.n[i] = projectives.words[(field * 10u + i) * params.count + gid];
     return value;
 }
 

@@ -90,7 +90,7 @@ function Invoke-Bounded([string]$Name, [string[]]$Arguments) {
             }
         }
         foreach ($line in ($output -split '\r?\n')) {
-            if ($status -ne "PASS" -or $line -match '^(Vulkan resident|Vulkan full-address|OpenCL resident profile|curve batch:|affine batch:|submit batch:|memory:|wall[: ]|GPU stages|GPU stage time|Host wall intervals|candidate records|  (curve|affine|keccak|checksum|base58|match|setup|record|submit|fence wait|collect)[: ])') {
+            if ($status -ne "PASS" -or $line -match '^(Vulkan resident|Vulkan full-address|OpenCL resident profile|curve batch:|affine batch:|submit batch:|resident group:|memory:|GPU stage buffers:|wall[: ]|queue submits:|GPU stages|GPU stage time|Host wall intervals|candidate records|  (curve|affine|keccak|checksum|base58|match|setup|record|submit|fence wait|collect)[: ])') {
                 if ($line) { Write-Report $line }
             }
         }

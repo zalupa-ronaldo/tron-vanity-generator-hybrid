@@ -990,6 +990,7 @@ public:
             if (!scanChunks(batchKeys_, dispatches, nullptr)) break;
             result.keys += uint64_t(batchKeys_) * dispatches;
             result.dispatches += dispatches;
+            ++result.queueSubmits;
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds);
         result.wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         engine_.endProfile();

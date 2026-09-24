@@ -41,9 +41,300 @@ layout(push_constant) uniform Params {
     uint baseWords[16];
 } params;
 
+#ifdef VULKAN_FIELD8_MODE
+struct Fe { uint n[8]; };
+#else
 struct Fe { uint n[10]; };
+#endif
 struct Ge { Fe x, y; bool inf; };
 struct Gej { Fe x, y, z; bool inf; };
+#ifdef VULKAN_FIELD8_MODE
+const uint FIELD_LIMBS = 8u;
+#else
+const uint FIELD_LIMBS = 10u;
+#endif
+#ifdef VULKAN_FIELD8_MODE
+
+// Experimental 8x32 field representation.  RDNA exposes fast 32-bit integer
+// lanes, while the reference 10x26 path relies heavily on uint64 arithmetic.
+// Keep this variant compile-time selectable so the RX can decide from the
+// complete wall profile rather than from shader instruction counts alone.
+const uint FE_P_WORDS[8] = uint[8](
+    0xfffffc2fu, 0xfffffffeu, 0xffffffffu, 0xffffffffu,
+    0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu);
+
+Fe fePrime() {
+    Fe p;
+    for (int i = 0; i < 8; ++i) p.n[i] = FE_P_WORDS[i];
+    return p;
+}
+
+bool feLess(Fe a, Fe b) {
+    for (int i = 7; i >= 0; --i) {
+        if (a.n[i] < b.n[i]) return true;
+        if (a.n[i] > b.n[i]) return false;
+    }
+    return false;
+}
+
+uint feAddRaw(Fe a, Fe b, out Fe r) {
+    uint carry = 0u;
+    for (int i = 0; i < 8; ++i) {
+        uint64_t sum = uint64_t(a.n[i]) + uint64_t(b.n[i]) + uint64_t(carry);
+        r.n[i] = uint(sum);
+        carry = uint(sum >> 32);
+    }
+    return carry;
+}
+
+uint feSubRaw(Fe a, Fe b, out Fe r) {
+    uint borrow = 0u;
+    for (int i = 0; i < 8; ++i) {
+        uint64_t rhs = uint64_t(b.n[i]) + uint64_t(borrow);
+        r.n[i] = uint(uint64_t(a.n[i]) - rhs);
+        borrow = uint64_t(a.n[i]) < rhs ? 1u : 0u;
+    }
+    return borrow;
+}
+
+uint addWords16(inout uint words[16], uint dstOffset,
+                uint source[16], uint sourceOffset) {
+    uint carry = 0u;
+    for (uint i = 0u; i < 8u; ++i) {
+        uint64_t sum = uint64_t(words[dstOffset + i]) +
+                       uint64_t(source[sourceOffset + i]) + uint64_t(carry);
+        words[dstOffset + i] = uint(sum);
+        carry = uint(sum >> 32);
+    }
+    return carry;
+}
+
+Fe feMul(Fe a, Fe b) {
+    // Schoolbook 8x32 product.  The carry is propagated in base 2^32, so
+    // every intermediate sum is bounded by 2^64-1.  Then fold the high half
+    // with 2^256 == 0x1000003d1 (mod p).  Keep the complete folded value in a
+    // few extra words: dropping the second fold's high carry is an easy way
+    // to get rare, silent curve corruption.
+    uint product[16];
+    for (uint i = 0u; i < 16u; ++i) product[i] = 0u;
+    for (uint i = 0u; i < 8u; ++i) {
+        uint carry = 0u;
+        for (uint j = 0u; j < 8u; ++j) {
+            uint64_t uv = uint64_t(a.n[i]) * uint64_t(b.n[j]) +
+                          uint64_t(product[i + j]) + uint64_t(carry);
+            product[i + j] = uint(uv);
+            carry = uint(uv >> 32);
+        }
+        for (uint j = i + 8u; j < 16u; ++j) {
+            uint64_t uv = uint64_t(product[j]) + uint64_t(carry);
+            product[j] = uint(uv);
+            carry = uint(uv >> 32);
+        }
+    }
+
+    uint words[20];
+    for (uint i = 0u; i < 20u; ++i) words[i] = 0u;
+    for (uint i = 0u; i < 8u; ++i) words[i] = product[i];
+
+    // H * (0x3d1 + 2^32), with H = product[8..15].
+    uint carry = 0u;
+    for (uint i = 0u; i < 8u; ++i) {
+        uint64_t uv = uint64_t(product[8u + i]) * uint64_t(0x3d1u) +
+                      uint64_t(words[i]) + uint64_t(carry);
+        words[i] = uint(uv);
+        carry = uint(uv >> 32);
+    }
+    for (uint i = 8u; i < 20u; ++i) {
+        uint64_t uv = uint64_t(words[i]) + uint64_t(carry);
+        words[i] = uint(uv);
+        carry = uint(uv >> 32);
+    }
+    carry = 0u;
+    for (uint i = 0u; i < 8u; ++i) {
+        uint64_t uv = uint64_t(product[8u + i]) + uint64_t(words[i + 1u]) +
+                      uint64_t(carry);
+        words[i + 1u] = uint(uv);
+        carry = uint(uv >> 32);
+    }
+    for (uint i = 9u; i < 20u; ++i) {
+        uint64_t uv = uint64_t(words[i]) + uint64_t(carry);
+        words[i] = uint(uv);
+        carry = uint(uv >> 32);
+    }
+
+    // Three fixed rounds are enough for a 512-bit product.  Each round reads
+    // the high words before writing the low words, because the shifted term
+    // overlaps the destination range.
+    for (uint round = 0u; round < 3u; ++round) {
+        uint high[12];
+        for (uint i = 0u; i < 12u; ++i) {
+            high[i] = words[8u + i];
+            words[8u + i] = 0u;
+        }
+        carry = 0u;
+        for (uint i = 0u; i < 12u; ++i) {
+            uint64_t uv = uint64_t(high[i]) * uint64_t(0x3d1u) +
+                          uint64_t(words[i]) + uint64_t(carry);
+            words[i] = uint(uv);
+            carry = uint(uv >> 32);
+        }
+        for (uint i = 12u; i < 20u; ++i) {
+            uint64_t uv = uint64_t(words[i]) + uint64_t(carry);
+            words[i] = uint(uv);
+            carry = uint(uv >> 32);
+        }
+        carry = 0u;
+        for (uint i = 0u; i < 12u; ++i) {
+            uint64_t uv = uint64_t(high[i]) + uint64_t(words[i + 1u]) +
+                          uint64_t(carry);
+            words[i + 1u] = uint(uv);
+            carry = uint(uv >> 32);
+        }
+        for (uint i = 13u; i < 20u; ++i) {
+            uint64_t uv = uint64_t(words[i]) + uint64_t(carry);
+            words[i] = uint(uv);
+            carry = uint(uv >> 32);
+        }
+    }
+
+    Fe result, prime = fePrime();
+    for (int i = 0; i < 8; ++i) result.n[i] = words[i];
+    for (uint i = 0u; i < 3u; ++i) {
+        if (feLess(result, prime)) break;
+        Fe reduced;
+        feSubRaw(result, prime, reduced);
+        result = reduced;
+    }
+    return result;
+}
+
+Fe feSqr(Fe a) { return feMul(a, a); }
+
+Fe feInt(uint x) {
+    Fe r;
+    r.n[0] = x;
+    for (int i = 1; i < 8; ++i) r.n[i] = 0u;
+    return r;
+}
+
+Fe feAdd(Fe a, Fe b) {
+    Fe r, prime = fePrime();
+    uint carry = feAddRaw(a, b, r);
+    if (carry != 0u || !feLess(r, prime)) feSubRaw(r, prime, r);
+    return r;
+}
+
+Fe feMulInt(Fe a, uint x) {
+    Fe r;
+    uint64_t carry = 0ul;
+    for (int i = 0; i < 8; ++i) {
+        uint64_t product = uint64_t(a.n[i]) * uint64_t(x) + carry;
+        r.n[i] = uint(product);
+        carry = product >> 32;
+    }
+    uint64_t fold = carry * uint64_t(0x3d1u);
+    Fe correction = feInt(uint(fold));
+    correction.n[1] = uint(fold >> 32) + uint(carry);
+    Fe sum, prime = fePrime();
+    uint extra = feAddRaw(r, correction, sum);
+    for (uint i = 0u; i < 4u; ++i) {
+        if (extra == 0u && feLess(sum, prime)) break;
+        feSubRaw(sum, prime, sum);
+        extra = 0u;
+    }
+    return sum;
+}
+
+Fe feNegate(Fe a, uint m) {
+    Fe r, prime = fePrime();
+    bool zero = true;
+    for (int i = 0; i < 8; ++i) zero = zero && (a.n[i] == 0u);
+    if (zero) return a;
+    feSubRaw(prime, a, r);
+    return r;
+}
+
+Fe feHalf(Fe a) {
+    Fe prime = fePrime(), t, r;
+    uint high = 0u;
+    if ((a.n[0] & 1u) != 0u) high = feAddRaw(a, prime, t);
+    else t = a;
+    for (int i = 7; i >= 0; --i) {
+        r.n[i] = (t.n[i] >> 1) | (high << 31);
+        high = t.n[i] & 1u;
+    }
+    return r;
+}
+
+Fe feNormalize(Fe r) {
+    Fe prime = fePrime();
+    for (uint i = 0u; i < 2u; ++i) {
+        if (!feLess(r, prime)) feSubRaw(r, prime, r);
+    }
+    return r;
+}
+
+bool feZero(Fe a) {
+    for (int i = 0; i < 8; ++i)
+        if (a.n[i] != 0u) return false;
+    return true;
+}
+
+Fe feSqrN(Fe a, int n) {
+    for (int i = 0; i < n; ++i) a = feSqr(a);
+    return a;
+}
+
+// Fermat inversion addition chain from the existing OpenCL/libsecp256k1 path.
+Fe feInv(Fe a) {
+    Fe x2 = feMul(feSqr(a), a);
+    Fe x3 = feMul(feSqr(x2), a);
+    Fe x6 = feMul(feSqrN(x3, 3), x3);
+    Fe x9 = feMul(feSqrN(x6, 3), x3);
+    Fe x11 = feMul(feSqrN(x9, 2), x2);
+    Fe x22 = feMul(feSqrN(x11, 11), x11);
+    Fe x44 = feMul(feSqrN(x22, 22), x22);
+    Fe x88 = feMul(feSqrN(x44, 44), x44);
+    Fe x176 = feMul(feSqrN(x88, 88), x88);
+    Fe x220 = feMul(feSqrN(x176, 44), x44);
+    Fe x223 = feMul(feSqrN(x220, 3), x3);
+    Fe t = feMul(feSqrN(x223, 23), x22);
+    t = feMul(feSqrN(t, 5), a);
+    t = feMul(feSqrN(t, 3), x2);
+    return feMul(feSqrN(t, 2), a);
+}
+
+uint sourceByte(uint index, uint byteIndex, bool fromTable) {
+    uint address = index * 16u + byteIndex / 4u;
+    uint word = fromTable ? table.words[address] :
+        (params.curveMode == 0u ? inputs.words[address] : params.baseWords[address]);
+    return (word >> (8u * (byteIndex & 3u))) & 255u;
+}
+
+Fe feFromBytes(uint index, uint start, bool fromTable) {
+    uint a[32];
+    for (uint i = 0u; i < 32u; ++i)
+        a[i] = sourceByte(index, start + i, fromTable);
+    Fe r;
+    for (int i = 0; i < 8; ++i) {
+        uint base = uint(31 - i * 4);
+        r.n[i] = a[base] | (a[base - 1u] << 8) |
+                 (a[base - 2u] << 16) | (a[base - 3u] << 24);
+    }
+    return r;
+}
+
+void feToBytes(Fe a, out uint bytes[32]) {
+    for (int i = 0; i < 8; ++i) {
+        uint word = a.n[7 - i];
+        bytes[i * 4] = (word >> 24) & 255u;
+        bytes[i * 4 + 1] = (word >> 16) & 255u;
+        bytes[i * 4 + 2] = (word >> 8) & 255u;
+        bytes[i * 4 + 3] = word & 255u;
+    }
+}
+
+#else
 const uint64_t MASK26 = 0x3fffffful;
 const uint64_t R0 = 0x3d10ul;
 const uint64_t R1 = 0x400ul;
@@ -373,6 +664,8 @@ void feToBytes(Fe a, out uint bytes[32]) {
     }
 }
 
+#endif
+
 // Unified mixed addition from the same libsecp256k1-derived formula as the
 // resident OpenCL curve stage; handles P == G without a separate double path.
 Gej gejAddGe(Gej a, Ge b) {
@@ -458,15 +751,15 @@ void writeProjective(uint gid, Gej point) {
     // Struct-of-arrays layout: neighbouring affine work-items read the same
     // limb from neighbouring keys, instead of striding by all 30 limbs of a
     // Jacobian point.  The current dispatch count is the plane stride.
-    for (uint i = 0u; i < 10u; ++i) projectives.words[i * params.count + gid] = point.x.n[i];
-    for (uint i = 0u; i < 10u; ++i) projectives.words[(10u + i) * params.count + gid] = point.y.n[i];
-    for (uint i = 0u; i < 10u; ++i) projectives.words[(20u + i) * params.count + gid] = point.z.n[i];
+    for (uint i = 0u; i < FIELD_LIMBS; ++i) projectives.words[i * params.count + gid] = point.x.n[i];
+    for (uint i = 0u; i < FIELD_LIMBS; ++i) projectives.words[(FIELD_LIMBS + i) * params.count + gid] = point.y.n[i];
+    for (uint i = 0u; i < FIELD_LIMBS; ++i) projectives.words[(2u * FIELD_LIMBS + i) * params.count + gid] = point.z.n[i];
 }
 
 Fe loadProjective(uint gid, uint field) {
     Fe value;
-    for (uint i = 0u; i < 10u; ++i)
-        value.n[i] = projectives.words[(field * 10u + i) * params.count + gid];
+    for (uint i = 0u; i < FIELD_LIMBS; ++i)
+        value.n[i] = projectives.words[(field * FIELD_LIMBS + i) * params.count + gid];
     return value;
 }
 

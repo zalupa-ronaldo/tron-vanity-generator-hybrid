@@ -2,7 +2,7 @@
 
 The native Vulkan wallet backend is **experimental**. Source builds with
 `-DTRON_ENABLE_VULKAN=ON` have a generic dispatch probe, a native secp256k1
-10x26 field-math point stage, a separate batched-affine stage, Keccak-256,
+10x26 field-math point stage (plus an opt-in 8x32 A/B variant), a separate batched-affine stage, Keccak-256,
 SHA-256d, Base58Check and flattened dictionary matching. The curve stage can
 compute `P + G` or walk from one base point through three 8-bit offset-table
 windows and leaves Jacobian points in GPU-only scratch. The affine stage then
@@ -19,7 +19,8 @@ backend selection.
 production projective variant, mode 1 reads the one affine base point from
 push constants and computes `P0 + offset·G`, where the offset is a
 push-constant base plus the invocation ID; it writes 30 words per Jacobian
-point `(X,Y,Z)` to binding 5 in field-plane (struct-of-arrays) order.
+point `(X,Y,Z)` to binding 5 in field-plane (struct-of-arrays) order for
+10x26, or 24 words for the opt-in 8x32 path.
 Deterministic test mode 0 uses the per-key
 affine points at binding 6 and retains the direct affine output contract for
 the stage-test pipeline. The host derives every expected point independently
@@ -76,6 +77,12 @@ at `vkQueueSubmit` for one bounded production run. The run must report zero
 keys, set its stop flag, and reject a retry; the engine then avoids
 `vkDeviceWaitIdle` on the abandoned device. This is fault-path validation,
 not evidence of an actual driver fault on the RX.
+
+The `--vulkan-field 8x32` path uses eight little-endian 32-bit field limbs
+and the same curve/address contract; `test-vulkan` runs the full no-wallet
+equivalence gate against CPU references for that selected representation.
+It is intentionally opt-in until an RX self-test and matched wall profile
+confirm it.
 
 This is deliberately a simple 32-bit buffer ABI. Before performance work,
 benchmark the unpack/pack cost and consider an aligned packed layout that
@@ -147,7 +154,6 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    10x26 multiply/square schedules and carries the 64-byte public base point
    in push constants; the RX wall-rate effect still needs a matched A/B. A
    long-running funded-wallet run remains unvalidated.
-
 Khronos's [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
 and [shader interface specification](https://docs.vulkan.org/spec/latest/chapters/interfaces.html)
 define dispatch/descriptor requirements. If experimenting with `clspv`, use

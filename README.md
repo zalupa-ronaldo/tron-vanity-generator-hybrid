@@ -177,6 +177,21 @@ large live arrays do not inflate the other variants. Compare curve batch 1/4
 and affine batch 4/8 in A/B/A order with the same dictionary and no competing
 GPU workload; keep OpenCL as the RX default until the split Vulkan path has a
 fresh correctness gate and matched profile.
+The Windows build also contains an opt-in 8x32 field representation for the
+Vulkan curve/affine stages. It uses 32-bit limbs and the secp256k1
+pseudo-Mersenne fold, while the default remains the validated 10x26 path.
+The 8x32 path is an A/B candidate, not a performance claim; run its no-wallet
+gate before profiling it:
+
+```text
+tron_vanity_generator.exe --no-config --backend vulkan --vulkan-field 8x32 test-vulkan
+tron_vanity_generator.exe --no-config --backend vulkan --vulkan-field 8x32 --vulkan-profile --bench-seconds 5
+```
+
+The profile prints `field representation: 8x32`. Compare wall keys/s only
+after the self-test passes, and keep `10x26` if the RX driver rejects or slows
+the candidate. The same choice can be written as `vulkan-field=8x32` in an
+explicit Vulkan config; the bundled search config remains OpenCL.
 An opt-in Vulkan config may use `backend=vulkan` and
 `vulkan-curve-batch=4` plus `vulkan-affine-batch=4|8`; the bundled RX config
 remains on its proven OpenCL settings.
@@ -195,7 +210,8 @@ barrier loop while keeping intermediate data in one GPU-only allocation. Use
 `--vulkan-batch-keys 32768`,
 `65536`, `131072`, `262144`, `524288`, or `1048576` for an A/B run. The larger
 values are opt-in because they reserve more resident GPU memory: the split
-curve/affine path adds a 120-byte-per-key Jacobian scratch buffer, plus up to
+curve/affine path adds a 120-byte-per-key Jacobian scratch buffer for 10x26
+(96 bytes for 8x32), plus up to
 928 MiB for the eight-dispatch match ring at 1,048,576 keys, before the
 dictionary and driver alignment. Curve, affine, Keccak, checksum, Base58 and
 dictionary matching remain GPU stages; the CPU only seeds a large scalar

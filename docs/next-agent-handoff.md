@@ -126,6 +126,13 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    The byte/word contract and remaining stage gates are in
    [`vulkan-stage-contract.md`](vulkan-stage-contract.md).
 
+   The Vulkan build also carries an opt-in `--vulkan-field 8x32` variant. It
+   uses eight 32-bit field limbs, a complete pseudo-Mersenne reduction, and a
+   96-byte-per-key Jacobian scratch layout. The default stays 10x26. The
+   field8 path must pass `--backend vulkan --vulkan-field 8x32 test-vulkan`
+   on the target GPU before its profile can be compared; no RX result is
+   known yet.
+
    The measured Vulkan bottleneck is now concrete: the RX completed only about
    1.3 ms of GPU stages per 32,768-key dispatch, while the wall profile spent
    about 4.2-4.4 s outside those stages across roughly 440-457 dispatches in

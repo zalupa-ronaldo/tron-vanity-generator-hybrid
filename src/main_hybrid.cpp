@@ -91,6 +91,8 @@ struct Options {
     bool vulkanBatchKeysExplicit = false;
     uint32_t vulkanResidentDispatches = 8;
     bool vulkanResidentDispatchesExplicit = false;
+    bool vulkanField8 = false;
+    bool vulkanFieldExplicit = false;
     double benchSeconds = 1.0;
     double tuneSeconds = 5.0;
 };
@@ -123,6 +125,7 @@ void usage() {
         "  --vulkan-profile  time full Vulkan pipeline by stage; no wallets written\n"
         "  --vulkan-curve-batch 1|4  Vulkan field inversions per group (default 1)\n"
         "  --vulkan-affine-batch 4|8  Jacobian points per field inversion (default 4)\n"
+        "  --vulkan-field 10x26|8x32  field limb layout; 8x32 is experimental (default 10x26)\n"
         "  --vulkan-batch-keys N  keys per Vulkan submit: 32768..1048576 powers of two (default 131072)\n"
         "  --vulkan-resident-group 4|8|16  GPU submits grouped per fence (default 8)\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
@@ -192,6 +195,13 @@ bool parse(int argc, char** argv, Options& o) {
                 o.vulkanAffineBatch = std::stoul(next(i, "--vulkan-affine-batch"));
                 if (o.vulkanAffineBatch != 4 && o.vulkanAffineBatch != 8)
                     throw std::runtime_error("--vulkan-affine-batch must be 4 or 8");
+            }
+            else if (a == "--vulkan-field") {
+                o.vulkanFieldExplicit = true;
+                const auto value = next(i, "--vulkan-field");
+                if (value != "10x26" && value != "8x32")
+                    throw std::runtime_error("--vulkan-field must be 10x26 or 8x32");
+                o.vulkanField8 = value == "8x32";
             }
             else if (a == "--vulkan-batch-keys") {
                 o.vulkanBatchKeysExplicit = true;
@@ -289,6 +299,9 @@ bool parse(int argc, char** argv, Options& o) {
     }
     if (o.vulkanAffineBatchExplicit && o.backend != "vulkan") {
         std::cerr << "--vulkan-affine-batch requires --backend vulkan\n"; return false;
+    }
+    if (o.vulkanFieldExplicit && o.backend != "vulkan") {
+        std::cerr << "--vulkan-field requires --backend vulkan\n"; return false;
     }
     if (o.vulkanBatchKeysExplicit && o.backend != "vulkan") {
         std::cerr << "--vulkan-batch-keys requires --backend vulkan\n"; return false;
@@ -610,7 +623,7 @@ int main(int argc, char** argv) {
         return vulkanComputeSelfTest();
     if (std::find(effective.begin(), effective.end(), "--vulkan-keccak-test") != effective.end()) {
         const int stageResult = vulkanKeccakSelfTest();
-        return stageResult == 0 ? vulkanResidentSelfTest() : stageResult;
+        return stageResult == 0 ? vulkanResidentSelfTest(opt.vulkanField8) : stageResult;
     }
     HardwareReport hw = detectHardware();
     if (opt.list) { printDevices(hw); return 0; }
@@ -628,7 +641,7 @@ int main(int argc, char** argv) {
     }
     for (size_t i = 1; i < effective.size(); ++i) {
         if (effective[i] == "--gputest") {
-            if (opt.backend == "vulkan") return vulkanResidentSelfTest();
+            if (opt.backend == "vulkan") return vulkanResidentSelfTest(opt.vulkanField8);
             if (opt.backend == "cuda") {
                 if (hw.cudaGpus.empty()) { std::cerr << "CUDA unavailable: " << hw.cudaNote << "\n"; return 1; }
                 for (const auto& device : hw.cudaGpus) if (cudaSelfTest(device)) return 1;
@@ -654,12 +667,13 @@ int main(int argc, char** argv) {
         }
         const auto p = profileVulkanResident(dictionary, opt.benchSeconds, opt.vulkanCurveBatch,
                                              opt.vulkanBatchKeys, opt.vulkanAffineBatch,
-                                             opt.vulkanResidentDispatches);
+                                             opt.vulkanResidentDispatches, opt.vulkanField8);
         if (!p.error.empty()) { std::cerr << "Vulkan profile failed: " << p.error << "\n"; return 1; }
         const double wallRate = p.wallSeconds > 0 ? double(p.keys) / p.wallSeconds : 0.0;
         std::cout << "Vulkan full-address profile (no wallets): " << p.device << "\n"
                   << "curve batch: " << p.curveBatch << "\n"
                   << "affine batch: " << p.affineBatch << " points / inversion\n"
+                  << "field representation: " << p.fieldRepresentation << "\n"
                   << "submit batch: " << p.batchKeys << " keys\n"
                   << "resident group: " << p.residentDispatches << " GPU dispatches / fence\n"
                   << "memory: " << (p.deviceLocalHostVisible ? "host-visible device-local" :
@@ -900,7 +914,7 @@ int main(int argc, char** argv) {
             if (wantVulkan) {
                 auto vulkan = makeVulkanResidentBackend(dictionary, opt.vulkanCurveBatch,
                                                         opt.vulkanBatchKeys, opt.vulkanAffineBatch,
-                                                        opt.vulkanResidentDispatches);
+                                                        opt.vulkanResidentDispatches, opt.vulkanField8);
                 if (!vulkan || !vulkan->available()) {
                     std::cerr << "Vulkan unavailable: " << (vulkan ? vulkan->note() : "not built") << "\n";
                     return 1;
@@ -936,7 +950,7 @@ int main(int argc, char** argv) {
     if (opt.backend == "vulkan")
         backends.push_back(makeVulkanResidentBackend(dictionary, opt.vulkanCurveBatch,
                                                      opt.vulkanBatchKeys, opt.vulkanAffineBatch,
-                                                     opt.vulkanResidentDispatches));
+                                                     opt.vulkanResidentDispatches, opt.vulkanField8));
     if (opt.backend == "cuda") {
         if (hw.cudaGpus.empty()) { std::cerr << "CUDA unavailable: " << hw.cudaNote << "\n"; return 1; }
         for (const auto& device : hw.cudaGpus)

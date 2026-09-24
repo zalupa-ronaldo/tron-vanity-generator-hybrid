@@ -11,6 +11,7 @@ layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 6) readonly buffer InputPoints { uint words[]; } inputs;
 layout(std430, set = 0, binding = 0) writeonly buffer PublicKeys { uint words[]; } publics;
 layout(std430, set = 0, binding = 7) readonly buffer OffsetTable { uint words[]; } table;
+layout(std430, set = 0, binding = 10) readonly buffer RuntimeParams { uint words[]; } runtime;
 layout(push_constant) uniform Params {
     uint count;
     uint dfaOffset;
@@ -255,7 +256,7 @@ Gej computePoint(uint gid, uint mode) {
         generator.inf = false;
         point = gejAddGe(point, generator);
     } else {
-        uint offset = params.offsetBase + gid;
+        uint offset = runtime.words[1] + gid;
         for (uint w = 0u; w < 3u; ++w) {
             uint digit = (offset >> (w * 8u)) & 255u;
             if (digit != 0u) {
@@ -293,8 +294,8 @@ void main() {
 #if VULKAN_BATCH4
     if (params.curveMode == 2u) {
         uint first = invocation * 4u;
-        if (first >= params.count) return;
-        uint batchCount = min(4u, params.count - first);
+        if (first >= runtime.words[0]) return;
+        uint batchCount = min(4u, runtime.words[0] - first);
         Gej points[4];
         Fe prefix[4];
         // The four scalars are consecutive. Build the first point from the
@@ -327,7 +328,7 @@ void main() {
         return;
     }
 #endif
-    if (invocation >= params.count) return;
+    if (invocation >= runtime.words[0]) return;
     Gej point = computePoint(invocation, params.curveMode);
     writePoint(invocation, point, feInv(point.z));
 }

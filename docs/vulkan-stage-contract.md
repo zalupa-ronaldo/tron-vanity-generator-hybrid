@@ -36,12 +36,16 @@ of 1, 3 and 5 keys, table-window boundaries and the last valid offset are
 checked against CPU addresses. The host dispatches only `ceil(count/4)`
 invocations for the curve stage; later address stages still dispatch `count`.
 
-`vulkan/keccak.comp` takes 16 little-endian `uint32_t` words per 64-byte
-uncompressed public key (`X||Y`, no `0x04` prefix) at storage binding 0. It
+All production stages read the active key count from runtime storage binding
+10 (`words[0]`); the curve stage reads the current offset base from
+`words[1]`. These values are updated between submissions, so the command
+buffer and push-constant state remain static. `vulkan/keccak.comp` takes 16
+little-endian `uint32_t` words per 64-byte uncompressed public key (`X||Y`,
+no `0x04` prefix) at storage binding 0. It
 outputs six little-endian words at binding 1: byte `0x41`, the last 20 bytes
 of Keccak-256, and three zero padding bytes. The first push-constant word is
-the key count. The test uses up to 257 deterministic, test-only secp256k1
-scalars. It dispatches counts 1, 8, 63, 64, 65 and 257, comparing every active
+reserved for compatibility; the active count comes from binding 10. The test
+uses up to 257 deterministic, test-only secp256k1 scalars. It dispatches counts 1, 8, 63, 64, 65 and 257, comparing every active
 output word with CPU references and checking that inactive workgroup lanes
 leave canary-filled output records untouched. `vulkan/checksum.comp` then
 reads binding 1 and writes seven little-endian words at binding 2: the 25-byte address plus three zero
@@ -102,7 +106,10 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    into that separate test folder first; do not use the starter file for an
    RX-versus-OpenCL claim.
 2. `vulkan/vulkan_backend.cpp` now reuses descriptors, pipelines, buffers and
-   command objects across bounded batches. The default submit batch is 131,072
+   one pre-recorded command buffer across bounded batches. The per-batch count
+   and offset are 16 bytes in a small runtime-parameter storage binding, so the
+   CPU no longer resets, begins, records or ends a command buffer for every
+   dispatch. The default submit batch is 131,072
    keys (configurable to 32,768/65,536/131,072/262,144); this reduces fixed
    `vkQueueSubmit`/fence work without changing the GPU math or result ABI. The
    profile also reports host setup/record/submit/fence/collection intervals so

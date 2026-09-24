@@ -11,6 +11,9 @@ layout(std430, set = 0, binding = 0) readonly buffer PublicKeys {
 layout(std430, set = 0, binding = 1) writeonly buffer Payloads {
     uint words[];
 } payloads;
+layout(std430, set = 0, binding = 10) readonly buffer RuntimeParams {
+    uint words[];
+} runtime;
 layout(push_constant) uniform Params {
     uint count;
 } params;
@@ -36,7 +39,7 @@ uint64_t rotl64(uint64_t x, int bits) {
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= params.count) return;
+    if (gid >= runtime.words[0]) return;
 
     uint64_t s[25];
     for (int i = 0; i < 8; ++i) {

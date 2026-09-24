@@ -18,6 +18,9 @@ layout(std430, set = 0, binding = 8) buffer RingMeta {
 layout(std430, set = 0, binding = 9) writeonly buffer RingRecords {
     uint words[]; // 20 words: gid, count, flags, reserved, 16 IDs
 } ringRecords;
+layout(std430, set = 0, binding = 10) readonly buffer RuntimeParams {
+    uint words[];
+} runtime;
 layout(push_constant) uniform Params {
     uint count;
     uint dfaOffset;
@@ -40,7 +43,7 @@ const uint ALPHABET[58] = uint[58](
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= params.count) return;
+    if (gid >= runtime.words[0]) return;
     uint state = 0u, count = 0u, flags = 0u;
     uint ids[16];
     for (int i = 0; i < 16; ++i) ids[i] = 0u;

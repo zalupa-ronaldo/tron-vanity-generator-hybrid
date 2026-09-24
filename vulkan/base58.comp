@@ -10,6 +10,9 @@ layout(std430, set = 0, binding = 2) readonly buffer FullAddresses {
 layout(std430, set = 0, binding = 3) writeonly buffer TextAddresses {
     uint words[];
 } addresses;
+layout(std430, set = 0, binding = 10) readonly buffer RuntimeParams {
+    uint words[];
+} runtime;
 layout(push_constant) uniform Params {
     uint count;
 } params;
@@ -24,7 +27,7 @@ const uint ALPHABET[58] = uint[58](
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= params.count) return;
+    if (gid >= runtime.words[0]) return;
     uint bytes[25];
     for (int i = 0; i < 25; ++i) {
         uint word = fulls.words[gid * 7u + uint(i / 4)];

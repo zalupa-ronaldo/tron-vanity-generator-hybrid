@@ -37,13 +37,18 @@ int main() {
             (affineBatch == args.end() || std::next(affineBatch) == args.end() ||
              *std::next(affineBatch) != "4"))
             return false;
+        const auto residentGroup = std::find(args.begin(), args.end(), "--vulkan-resident-group");
+        if (content.find("vulkan-resident-group") != std::string::npos &&
+            (residentGroup == args.end() || std::next(residentGroup) == args.end() ||
+             *std::next(residentGroup) != "8"))
+            return false;
         return std::find(args.begin(), args.end(), (dir / "words.txt").string()) != args.end() &&
                std::find(args.begin(), args.end(), "--strict-backend") != args.end() &&
                std::find(args.begin(), args.end(), "--opencl-sha-ring") == args.end();
     };
     const bool okay =
         check("\xEF\xBB\xBF# config\nwords=words.txt\nstrict-backend=true\nopencl-sha-ring=false\n", true) &&
-        check("backend=vulkan\nvulkan-curve-batch=4\nvulkan-affine-batch=4\nvulkan-batch-keys=131072\nwords=words.txt\nstrict-backend=true\n", true) &&
+        check("backend=vulkan\nvulkan-curve-batch=4\nvulkan-affine-batch=4\nvulkan-batch-keys=131072\nvulkan-resident-group=8\nwords=words.txt\nstrict-backend=true\n", true) &&
         check("words=words.txt\nwords=other.txt\n", false) &&
         check("words=words.txt\nsecret-key=oops\n", false) &&
         check("strict-backend=perhaps\n", false);

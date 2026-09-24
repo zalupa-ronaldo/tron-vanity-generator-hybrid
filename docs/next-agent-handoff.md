@@ -130,7 +130,8 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    1.3 ms of GPU stages per 32,768-key dispatch, while the wall profile spent
    about 4.2-4.4 s outside those stages across roughly 440-457 dispatches in
    five seconds. The resident command-buffer group is now eight logical
-   dispatches, so the next RX benchmark must measure whether the reduced fence
+   dispatches by default; `--vulkan-resident-group 4|8|16` makes this A/B
+   tunable, so the next RX benchmark must measure whether the reduced fence
    count moves wall rate toward the GPU-stage rate. All per-key Vulkan stage
    buffers are now in a separate GPU-only allocation; verify the profile
    reports it as device-local on the RX. If it does not, prototype a larger bounded batch

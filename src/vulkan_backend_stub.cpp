@@ -3,7 +3,7 @@
 #include <iostream>
 
 std::unique_ptr<Backend> makeVulkanResidentBackend(
-    std::shared_ptr<const Dictionary>, uint32_t, uint32_t, uint32_t) {
+    std::shared_ptr<const Dictionary>, uint32_t, uint32_t, uint32_t, uint32_t) {
     return nullptr;
 }
 
@@ -13,7 +13,7 @@ int vulkanResidentSelfTest() {
 }
 
 VulkanProfileResult profileVulkanResident(std::shared_ptr<const Dictionary>, double,
-                                          uint32_t, uint32_t, uint32_t) {
+                                          uint32_t, uint32_t, uint32_t, uint32_t) {
     VulkanProfileResult result;
     result.error = "native Vulkan backend is not enabled in this build";
     return result;

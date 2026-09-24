@@ -40,7 +40,7 @@ constexpr uint32_t kRingWords = 29;
 // intermediates are still reused between passes; only the append-only match
 // ring grows with this value. Four passes left the RX 9070 XT spending most
 // of wall time in queue/fence/driver work rather than shader execution.
-constexpr uint32_t kResidentDispatches = 8;
+constexpr uint32_t kDefaultResidentDispatches = 8;
 constexpr uint32_t kStageCount = 6;
 constexpr uint32_t kQueryStride = kStageCount + 1;
 constexpr std::array<uint32_t, kBindings> kWordsPerKey = {
@@ -98,9 +98,11 @@ class VulkanEngine {
 public:
     explicit VulkanEngine(std::shared_ptr<const Dictionary> dictionary,
                           bool allowSoftware, uint32_t curveBatch, uint32_t batchKeys,
-                          uint32_t affineBatch = 4)
+                          uint32_t affineBatch = 4,
+                          uint32_t residentDispatches = kDefaultResidentDispatches)
         : dictionary_(std::move(dictionary)), allowSoftware_(allowSoftware),
-          curveBatch_(curveBatch), batchKeys_(batchKeys), affineBatch_(affineBatch) {}
+          curveBatch_(curveBatch), batchKeys_(batchKeys), affineBatch_(affineBatch),
+          residentDispatches_(residentDispatches) {}
     VulkanEngine(const VulkanEngine&) = delete;
     VulkanEngine& operator=(const VulkanEngine&) = delete;
     ~VulkanEngine() {
@@ -202,6 +204,7 @@ private:
     uint32_t curveBatch_ = 1;
     uint32_t batchKeys_ = kDefaultBatchKeys;
     uint32_t affineBatch_ = 4;
+    uint32_t residentDispatches_ = kDefaultResidentDispatches;
     std::array<double, kStageCount> stageSeconds_{};
     std::array<double, 5> hostSeconds_{};
     uint64_t candidateRecords_ = 0;
@@ -342,7 +345,7 @@ bool VulkanEngine::init(std::string& error) {
     }
     std::vector<uint32_t> table;
     if (!createTable(table, error)) return false;
-    ringCapacity_ = batchKeys_ * kResidentDispatches;
+    ringCapacity_ = batchKeys_ * residentDispatches_;
     for (uint32_t i = 0; i < kBindings; ++i) {
         sizes_[i] = i == 4 ? automaton.size() * sizeof(uint32_t) :
                     i == 6 ? 64 : i == 7 ? table.size() * sizeof(uint32_t) :
@@ -579,7 +582,7 @@ bool VulkanEngine::init(std::string& error) {
         timestampPeriod_ > 0.0) {
         VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        queryInfo.queryCount = kResidentDispatches * kQueryStride;
+        queryInfo.queryCount = residentDispatches_ * kQueryStride;
         // Timestamp queries are optional instrumentation, not required for
         // correctness or normal wallet generation.
         if (vkCreateQueryPool(device_, &queryInfo, nullptr, &queryPool_) != VK_SUCCESS)
@@ -626,7 +629,7 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
     if (abandoned_) { error = "Vulkan device was abandoned after a GPU failure"; return false; }
     const uint64_t totalKeys64 = uint64_t(count) * dispatches;
     if (!mapped_ || count == 0 || count > batchKeys_ || dispatches == 0 ||
-        dispatches > kResidentDispatches || totalKeys64 > ringCapacity_ ||
+        dispatches > residentDispatches_ || totalKeys64 > ringCapacity_ ||
         totalKeys64 > kBaseWindowKeys || offsetBase > kBaseWindowKeys - totalKeys64 ||
         (allAddresses && dispatches != 1)) {
         error = "invalid Vulkan scan range"; return false;
@@ -909,10 +912,13 @@ class VulkanResidentBackend final : public Backend {
 public:
     explicit VulkanResidentBackend(std::shared_ptr<const Dictionary> dictionary,
                                    bool allowSoftware, uint32_t curveBatch, uint32_t batchKeys,
-                                   uint32_t affineBatch)
+                                   uint32_t affineBatch,
+                                   uint32_t residentDispatches = kDefaultResidentDispatches)
         : dictionary_(std::move(dictionary)),
-          engine_(dictionary_, allowSoftware, curveBatch, batchKeys, affineBatch),
-          curveBatch_(curveBatch), batchKeys_(batchKeys), affineBatch_(affineBatch) {
+          engine_(dictionary_, allowSoftware, curveBatch, batchKeys, affineBatch,
+                  residentDispatches),
+          curveBatch_(curveBatch), batchKeys_(batchKeys), affineBatch_(affineBatch),
+          residentDispatches_(residentDispatches) {
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     }
     ~VulkanResidentBackend() override {
@@ -938,7 +944,7 @@ public:
         out.lines.push_back("Curve batch: " + std::to_string(curveBatch_));
         out.lines.push_back("Affine inversion batch: " + std::to_string(affineBatch_));
         out.lines.push_back("Submit batch: " + std::to_string(batchKeys_) + " keys");
-        out.lines.push_back("Resident queue group: " + std::to_string(kResidentDispatches) +
+        out.lines.push_back("Resident queue group: " + std::to_string(residentDispatches_) +
                             " batches per fence");
         return out;
     }
@@ -948,8 +954,10 @@ public:
         uint64_t total = 0;
         do {
             uint32_t count = batchKeys_;
-            if (!scanChunks(count, kResidentDispatches, nullptr)) break;
-            total += uint64_t(count) * kResidentDispatches;
+            const uint32_t dispatches = std::min<uint32_t>(
+                residentDispatches_, std::max<uint32_t>(1, kBaseWindowKeys / count));
+            if (!scanChunks(count, dispatches, nullptr)) break;
+            total += uint64_t(count) * dispatches;
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds);
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         return elapsed > 0 ? double(total) / elapsed : 0.0;
@@ -964,16 +972,18 @@ public:
         result.deviceLocalHostVisible = engine_.deviceLocalHostVisible();
         result.gpuScratchDeviceLocal = engine_.gpuScratchDeviceLocal();
         result.timestampsSupported = engine_.timestampsSupported();
-        result.residentDispatches = kResidentDispatches;
+        result.residentDispatches = residentDispatches_;
         // One unmeasured full-size batch primes JIT compilation, caches and
         // the fixed-base table before the bounded wall-clock measurement.
         if (!scanChunk(batchKeys_, nullptr)) { result.error = error_; return result; }
         engine_.beginProfile();
         const auto start = std::chrono::steady_clock::now();
         do {
-            if (!scanChunks(batchKeys_, kResidentDispatches, nullptr)) break;
-            result.keys += uint64_t(batchKeys_) * kResidentDispatches;
-            result.dispatches += kResidentDispatches;
+            const uint32_t dispatches = std::min<uint32_t>(
+                residentDispatches_, std::max<uint32_t>(1, kBaseWindowKeys / batchKeys_));
+            if (!scanChunks(batchKeys_, dispatches, nullptr)) break;
+            result.keys += uint64_t(batchKeys_) * dispatches;
+            result.dispatches += dispatches;
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds);
         result.wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         engine_.endProfile();
@@ -996,9 +1006,12 @@ public:
             const uint32_t count = cfg.maxAttempts ?
                 static_cast<uint32_t>(std::min<uint64_t>(batchKeys_, cfg.maxAttempts - done)) : batchKeys_;
             const uint64_t remaining = cfg.maxAttempts ? cfg.maxAttempts - done :
-                                        uint64_t(batchKeys_) * kResidentDispatches;
+                                        uint64_t(batchKeys_) * residentDispatches_;
+            const uint32_t windowDispatches = std::max<uint32_t>(
+                1, kBaseWindowKeys / count);
             const uint32_t dispatches = static_cast<uint32_t>(std::min<uint64_t>(
-                kResidentDispatches, std::max<uint64_t>(1, remaining / count)));
+                std::min<uint32_t>(residentDispatches_, windowDispatches),
+                std::max<uint64_t>(1, remaining / count)));
             const uint32_t scanOffset = offsetBase_;
             std::vector<Candidate> candidates;
             if (!scanChunks(count, dispatches, &candidates)) {
@@ -1131,6 +1144,10 @@ private:
             error_ = "Vulkan affine batch must be 4 or 8";
             return false;
         }
+        if (residentDispatches_ != 4 && residentDispatches_ != 8 && residentDispatches_ != 16) {
+            error_ = "Vulkan resident group must be 4, 8 or 16";
+            return false;
+        }
         if (batchKeys_ != 32768 && batchKeys_ != 65536 &&
             batchKeys_ != 131072 && batchKeys_ != 262144 &&
             batchKeys_ != 524288 && batchKeys_ != 1048576) {
@@ -1186,6 +1203,7 @@ private:
     uint32_t curveBatch_ = 1;
     uint32_t batchKeys_ = kDefaultBatchKeys;
     uint32_t affineBatch_ = 4;
+    uint32_t residentDispatches_ = kDefaultResidentDispatches;
     secp256k1_context* context_ = nullptr;
     SecretScalar base_;
     std::array<unsigned char, 64> basePub_{};
@@ -1197,21 +1215,22 @@ private:
 
 std::unique_ptr<Backend> makeVulkanResidentBackend(
     std::shared_ptr<const Dictionary> dictionary, uint32_t curveBatch, uint32_t batchKeys,
-    uint32_t affineBatch) {
+    uint32_t affineBatch, uint32_t residentDispatches) {
     // Software Vulkan is for reproducible tests only; production selection
     // must not silently replace the requested GPU with CPU llvmpipe.
     const char* allow = std::getenv("TRON_VULKAN_ALLOW_SOFTWARE");
     return std::make_unique<VulkanResidentBackend>(std::move(dictionary),
                                                    allow && std::strcmp(allow, "1") == 0,
-                                                   curveBatch, batchKeys, affineBatch);
+                                                   curveBatch, batchKeys, affineBatch,
+                                                   residentDispatches);
 }
 
 VulkanProfileResult profileVulkanResident(std::shared_ptr<const Dictionary> dictionary,
                                           double seconds, uint32_t curveBatch, uint32_t batchKeys,
-                                          uint32_t affineBatch) {
+                                          uint32_t affineBatch, uint32_t residentDispatches) {
     const char* allow = std::getenv("TRON_VULKAN_ALLOW_SOFTWARE");
     VulkanResidentBackend backend(std::move(dictionary), allow && std::strcmp(allow, "1") == 0,
-                                  curveBatch, batchKeys, affineBatch);
+                                  curveBatch, batchKeys, affineBatch, residentDispatches);
     return backend.profile(seconds);
 }
 
@@ -1255,7 +1274,7 @@ int vulkanResidentSelfTest() {
             }
         }
         if (passed && !verifyGroupedScan(engine, context, *dictionary, base.data(),
-                                         255, 17, kResidentDispatches, error)) {
+                                         255, 17, kDefaultResidentDispatches, error)) {
             error = "curve batch " + std::to_string(batch) +
                     ", grouped resident submit: " + error;
             passed = false;
@@ -1267,7 +1286,7 @@ int vulkanResidentSelfTest() {
         if (!affine8.init(error) ||
             !verifyScan(affine8, context, *dictionary, base.data(), 255, 65, error) ||
             !verifyGroupedScan(affine8, context, *dictionary, base.data(),
-                               65535, 17, kResidentDispatches, error)) {
+                               65535, 17, kDefaultResidentDispatches, error)) {
             if (error.empty()) error = "Vulkan affine batch-8 equivalence failed";
             passed = false;
         }

@@ -181,6 +181,12 @@ An opt-in Vulkan config may use `backend=vulkan` and
 `vulkan-curve-batch=4` plus `vulkan-affine-batch=4|8`; the bundled RX config
 remains on its proven OpenCL settings.
 
+The resident group can be compared without rebuilding: use
+`--vulkan-resident-group 4|8|16` (or `vulkan-resident-group=4|8|16` in an
+explicit Vulkan config). It controls how many GPU batches are recorded before
+one fence; it does not move any per-key work to the CPU. The supplied
+`bench-vulkan.ps1` exposes the same choice as `-VulkanResidentGroup`.
+
 The native Vulkan path submits 131,072 keys per GPU dispatch by default instead
 of 32,768, and records eight such dispatches in one command buffer before one
 fence wait. That makes the default resident group 1,048,576 keys while keeping

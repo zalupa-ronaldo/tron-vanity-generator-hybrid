@@ -104,7 +104,8 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    bounded batches while recording the exact dispatch count and push constants
    per submission. The default GPU batch is 131,072 keys (configurable to
    32,768/65,536/131,072/262,144/524,288/1,048,576), and the default resident
-   command group records eight batches before one fence wait. This reduces fixed
+   command group records eight batches by default before one fence wait; the
+   `--vulkan-resident-group 4|8|16` option makes that A/B tunable. This reduces fixed
    `vkQueueSubmit`/fence work without duplicating the intermediate buffers. The
    all per-key public/hash/address stage buffers, including the projective
    Jacobian scratch, are in a separate GPU-only storage buffer and are not

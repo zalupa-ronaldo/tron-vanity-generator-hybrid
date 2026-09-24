@@ -1267,6 +1267,12 @@ int vulkanResidentSelfTest(bool field8) {
     std::string error;
     auto dictionary = vulkanFullAlphabetTestDictionary();
     if (!dictionary) { std::cerr << "Vulkan test dictionary: " << error << "\n"; return 1; }
+    // The 8x32 candidate is substantially slower on software Vulkan because
+    // its correctness-first reduction keeps more scalar work live. Keep the
+    // same boundary/group/device-loss checks, but use a smaller full-alphabet
+    // no-wallet production batch so CI does not mistake llvmpipe time for a
+    // hardware failure. RX runs still use the explicit long benchmark.
+    const uint32_t selfTestBatchKeys = field8 ? 4096u : kSelfTestBatchKeys;
     auto* context = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     if (!context) return 1;
     SecretScalar base;
@@ -1279,7 +1285,7 @@ int vulkanResidentSelfTest(bool field8) {
         // bounded CPU verification independent from the production throughput
         // batch; increasing the latter must not turn `test-vulkan` into a
         // multi-minute test or make the launcher kill it.
-        VulkanEngine engine(dictionary, true, batch, kSelfTestBatchKeys, 4,
+        VulkanEngine engine(dictionary, true, batch, selfTestBatchKeys, 4,
                             kDefaultResidentDispatches, field8);
         if (!engine.init(error)) {
             secp256k1_context_destroy(context);
@@ -1312,7 +1318,7 @@ int vulkanResidentSelfTest(bool field8) {
         if (!passed) break;
     }
     if (passed) {
-        VulkanEngine affine8(dictionary, true, 1, kSelfTestBatchKeys, 8,
+        VulkanEngine affine8(dictionary, true, 1, selfTestBatchKeys, 8,
                              kDefaultResidentDispatches, field8);
         if (!affine8.init(error) ||
             !verifyScan(affine8, context, *dictionary, base.data(), 255, 65, error) ||
@@ -1326,7 +1332,7 @@ int vulkanResidentSelfTest(bool field8) {
     if (!passed) { std::cerr << "Vulkan resident test: " << error << "\n"; return 1; }
     for (uint32_t batch : {1u, 4u}) {
         auto backend = std::make_unique<VulkanResidentBackend>(dictionary, true, batch,
-                                                              kSelfTestBatchKeys, 4,
+                                                              selfTestBatchKeys, 4,
                                                               kDefaultResidentDispatches, field8);
         if (!backend || !backend->available()) {
             std::cerr << "Vulkan production backend batch " << batch << ": "

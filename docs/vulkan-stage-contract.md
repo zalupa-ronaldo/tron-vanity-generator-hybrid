@@ -106,7 +106,8 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    32,768/65,536/131,072/262,144/524,288/1,048,576), and the default resident
    command group records eight batches before one fence wait. This reduces fixed
    `vkQueueSubmit`/fence work without duplicating the intermediate buffers. The
-   projective Jacobian scratch is a separate GPU-only storage buffer and is not
+   all per-key public/hash/address stage buffers, including the projective
+   Jacobian scratch, are in a separate GPU-only storage buffer and are not
    mapped by the host; the profile reports whether its memory type is
    device-local. The ring records also carry the GPU-generated address, so collection does not
    read the full address buffer for every pass. The profile reports host

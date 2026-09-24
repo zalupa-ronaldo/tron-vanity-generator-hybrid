@@ -195,11 +195,12 @@ window, records eight offsets, waits once, and validates reported matches
 before output. Intermediate points, hashes and addresses are never read by
 the CPU in the normal profile/search path. Matching records now carry the
 GPU-produced address, so the host reads only compact records after the fence.
-The Jacobian scratch used between the curve and affine stages is allocated in
-a separate GPU-only Vulkan buffer and is never mapped by the host; the profile
-reports whether that allocation is device-local. The remaining mapped buffer
-still contains the result path plus the address-stage and static lookup
-buffers; normal search does not read those per-key stage buffers on the CPU.
+All per-key stage buffers (public keys, payloads, checksums, Base58 text and
+Jacobian scratch) are allocated in one separate GPU-only Vulkan buffer and are
+never mapped by the host; the profile reports whether that allocation is
+device-local. The mapped buffer contains the result path and static
+dictionary/table data. A small host-visible readback exists only for the
+no-wallet address self-test; normal search never copies stage data to it.
 The
 64-byte public base point is passed through push constants rather than read
 from a host-visible storage buffer for every key. On the RX 9070 XT the

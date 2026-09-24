@@ -110,6 +110,7 @@ public:
         if (abandoned_) return;
         if (device_) vkDeviceWaitIdle(device_);
         if (device_ && mapped_) vkUnmapMemory(device_, memory_);
+        if (device_ && readbackMapped_) vkUnmapMemory(device_, readbackMemory_);
         if (device_ && fence_) vkDestroyFence(device_, fence_, nullptr);
         if (device_ && queryPool_) vkDestroyQueryPool(device_, queryPool_, nullptr);
         if (device_ && commandPool_) vkDestroyCommandPool(device_, commandPool_, nullptr);
@@ -120,8 +121,10 @@ public:
         if (device_ && pipelineLayout_) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
         if (device_ && descriptorPool_) vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
         if (device_ && descriptorLayout_) vkDestroyDescriptorSetLayout(device_, descriptorLayout_, nullptr);
+        if (device_ && readbackBuffer_) vkDestroyBuffer(device_, readbackBuffer_, nullptr);
         if (device_ && scratchBuffer_) vkDestroyBuffer(device_, scratchBuffer_, nullptr);
         if (device_ && buffer_) vkDestroyBuffer(device_, buffer_, nullptr);
+        if (device_ && readbackMemory_) vkFreeMemory(device_, readbackMemory_, nullptr);
         if (device_ && scratchMemory_) vkFreeMemory(device_, scratchMemory_, nullptr);
         if (device_ && memory_) vkFreeMemory(device_, memory_, nullptr);
         if (device_) vkDestroyDevice(device_, nullptr);
@@ -176,7 +179,10 @@ private:
     VkDeviceMemory memory_ = VK_NULL_HANDLE;
     VkBuffer scratchBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory scratchMemory_ = VK_NULL_HANDLE;
+    VkBuffer readbackBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory readbackMemory_ = VK_NULL_HANDLE;
     void* mapped_ = nullptr;
+    void* readbackMapped_ = nullptr;
     VkDescriptorSetLayout descriptorLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet_ = VK_NULL_HANDLE;
@@ -188,6 +194,8 @@ private:
     VkFence fence_ = VK_NULL_HANDLE;
     VkQueryPool queryPool_ = VK_NULL_HANDLE;
     std::array<VkDeviceSize, kBindings> offsets_{};
+    std::array<VkDeviceSize, kBindings> stageOffsets_{};
+    VkDeviceSize stageTotal_ = 0;
     std::array<VkDeviceSize, kBindings> sizes_{};
     PushConstants constants_{};
     uint32_t ringCapacity_ = 0;
@@ -349,11 +357,16 @@ bool VulkanEngine::init(std::string& error) {
     }
     const VkDeviceSize alignment = std::max<VkDeviceSize>(4, selected.limits.minStorageBufferOffsetAlignment);
     VkDeviceSize total = 0;
+    stageTotal_ = 0;
     for (uint32_t i = 0; i < kBindings; ++i) {
-        if (i == 5) {
-            // Jacobian scratch is never touched by the host. Keep it out of
-            // the mapped result/allocation buffer so field math cannot land
-            // in a host-visible heap on discrete drivers.
+        if (i < 4 || i == 5) {
+            // Per-key stage data is never touched by the host during a normal
+            // search. Keep all of it out of the mapped result/static-data
+            // allocation so address math cannot land in a host-visible heap
+            // on discrete drivers.
+            stageTotal_ = aligned(stageTotal_, alignment);
+            stageOffsets_[i] = stageTotal_;
+            stageTotal_ += sizes_[i];
             offsets_[i] = 0;
             continue;
         }
@@ -370,15 +383,25 @@ bool VulkanEngine::init(std::string& error) {
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(device_, &bufferInfo, nullptr, &buffer_), "vkCreateBuffer")) return false;
     VkBufferCreateInfo scratchInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    scratchInfo.size = sizes_[5];
-    scratchInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    scratchInfo.size = stageTotal_;
+    scratchInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                        VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     scratchInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(device_, &scratchInfo, nullptr, &scratchBuffer_),
-               "vkCreateBuffer(Jacobian scratch)")) return false;
+               "vkCreateBuffer(GPU stages)")) return false;
     VkMemoryRequirements requirements{};
     vkGetBufferMemoryRequirements(device_, buffer_, &requirements);
     VkMemoryRequirements scratchRequirements{};
     vkGetBufferMemoryRequirements(device_, scratchBuffer_, &scratchRequirements);
+    VkBufferCreateInfo readbackInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    readbackInfo.size = sizes_[3];
+    readbackInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    readbackInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (!check(vkCreateBuffer(device_, &readbackInfo, nullptr, &readbackBuffer_),
+               "vkCreateBuffer(test readback)")) return false;
+    VkMemoryRequirements readbackRequirements{};
+    vkGetBufferMemoryRequirements(device_, readbackBuffer_, &readbackRequirements);
     VkPhysicalDeviceMemoryProperties memoryProps{};
     vkGetPhysicalDeviceMemoryProperties(physical_, &memoryProps);
     uint32_t memoryType = memoryProps.memoryTypeCount;
@@ -420,7 +443,21 @@ bool VulkanEngine::init(std::string& error) {
         }
     }
     if (scratchMemoryType == memoryProps.memoryTypeCount) {
-        error = "no Vulkan memory for GPU Jacobian scratch"; return false;
+        error = "no Vulkan memory for GPU stage buffers"; return false;
+    }
+    uint32_t readbackMemoryType = memoryProps.memoryTypeCount;
+    for (uint32_t i = 0; i < memoryProps.memoryTypeCount; ++i) {
+        if (!(readbackRequirements.memoryTypeBits & (1u << i))) continue;
+        const VkMemoryPropertyFlags flags = memoryProps.memoryTypes[i].propertyFlags;
+        if ((flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+            (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            readbackMemoryType = i;
+            break;
+        }
+    }
+    if (readbackMemoryType == memoryProps.memoryTypeCount) {
+        error = "no coherent host-visible Vulkan test readback memory"; return false;
     }
     VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocation.allocationSize = requirements.size;
@@ -432,9 +469,18 @@ bool VulkanEngine::init(std::string& error) {
     scratchAllocation.allocationSize = scratchRequirements.size;
     scratchAllocation.memoryTypeIndex = scratchMemoryType;
     if (!check(vkAllocateMemory(device_, &scratchAllocation, nullptr, &scratchMemory_),
-               "vkAllocateMemory(Jacobian scratch)") ||
+               "vkAllocateMemory(GPU stages)") ||
         !check(vkBindBufferMemory(device_, scratchBuffer_, scratchMemory_, 0),
-               "vkBindBufferMemory(Jacobian scratch)")) return false;
+               "vkBindBufferMemory(GPU stages)")) return false;
+    VkMemoryAllocateInfo readbackAllocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    readbackAllocation.allocationSize = readbackRequirements.size;
+    readbackAllocation.memoryTypeIndex = readbackMemoryType;
+    if (!check(vkAllocateMemory(device_, &readbackAllocation, nullptr, &readbackMemory_),
+               "vkAllocateMemory(test readback)") ||
+        !check(vkBindBufferMemory(device_, readbackBuffer_, readbackMemory_, 0),
+               "vkBindBufferMemory(test readback)") ||
+        !check(vkMapMemory(device_, readbackMemory_, 0, sizes_[3], 0, &readbackMapped_),
+               "vkMapMemory(test readback)")) return false;
     auto* bytes = static_cast<unsigned char*>(mapped_);
     std::memset(bytes, 0, static_cast<size_t>(total));
     std::memcpy(bytes + offsets_[4], automaton.data(), sizes_[4]);
@@ -469,7 +515,8 @@ bool VulkanEngine::init(std::string& error) {
     std::array<VkDescriptorBufferInfo, kBindings> ranges{};
     std::array<VkWriteDescriptorSet, kBindings> writes{};
     for (uint32_t i = 0; i < kBindings; ++i) {
-        ranges[i] = i == 5 ? VkDescriptorBufferInfo{scratchBuffer_, 0, sizes_[i]} :
+        ranges[i] = (i < 4 || i == 5) ?
+                              VkDescriptorBufferInfo{scratchBuffer_, stageOffsets_[i], sizes_[i]} :
                               VkDescriptorBufferInfo{buffer_, offsets_[i], sizes_[i]};
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = descriptorSet_;
@@ -550,7 +597,7 @@ std::string VulkanEngine::decodeAddress(const uint32_t* words) {
 
 std::string VulkanEngine::readAddress(uint32_t gid) const {
     const auto* words = reinterpret_cast<const uint32_t*>(
-        static_cast<const unsigned char*>(mapped_) + offsets_[3]) + size_t(gid) * 9;
+        static_cast<const unsigned char*>(readbackMapped_)) + size_t(gid) * 9;
     return decodeAddress(words);
 }
 
@@ -592,12 +639,6 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
     // constant path instead of issuing one storage-buffer load per key.
     std::memcpy(constants_.baseWords.data(), basePub,
                 constants_.baseWords.size() * sizeof(uint32_t));
-    if (allAddresses) {
-        // Deterministic no-wallet tests must not pass because an earlier
-        // dispatch left the expected addresses in the same mapped buffer.
-        for (uint32_t binding = 0; binding < 4; ++binding)
-            std::memset(bytes + offsets_[binding], 0xa5, sizes_[binding]);
-    }
     constants_.count = count;
     const auto setupDone = std::chrono::steady_clock::now();
     // There is only one primary command buffer. Resetting the buffer directly
@@ -611,6 +652,15 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
     const bool queryThisBatch = profiling_ && queryPool_ != VK_NULL_HANDLE;
     if (queryThisBatch) {
         vkCmdResetQueryPool(command_, queryPool_, 0, dispatches * kQueryStride);
+    }
+    if (allAddresses) {
+        // Deterministic no-wallet tests must not pass because an earlier
+        // dispatch left the expected addresses in the same GPU-only stage
+        // buffers. The canaries are written by the transfer engine, not CPU
+        // stores into a mapped allocation.
+        for (uint32_t binding = 0; binding < 4; ++binding)
+            vkCmdFillBuffer(command_, scratchBuffer_, stageOffsets_[binding],
+                            sizes_[binding], 0xa5a5a5a5u);
     }
     // The result counter is device-owned state. Clearing it on the command
     // stream avoids a host write to the mapped result buffer for every batch.
@@ -660,10 +710,28 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
                                  0, 1, &reuseBarrier, 0, nullptr, 0, nullptr);
         }
     }
-    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    if (allAddresses) {
+        VkMemoryBarrier copyBarrier = barrier;
+        copyBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 1, &copyBarrier, 0, nullptr, 0, nullptr);
+        VkBufferCopy copy{};
+        copy.srcOffset = stageOffsets_[3];
+        copy.dstOffset = 0;
+        copy.size = VkDeviceSize(count) * 9 * sizeof(uint32_t);
+        vkCmdCopyBuffer(command_, scratchBuffer_, readbackBuffer_, 1, &copy);
+    }
+    VkMemoryBarrier hostBarrier = barrier;
+    hostBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
+                                (allAddresses ? VK_ACCESS_TRANSFER_WRITE_BIT : 0);
+    hostBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(command_,
+                         allAddresses ? (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT) :
+                                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_HOST_BIT,
-                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+                         0, 1, &hostBarrier, 0, nullptr, 0, nullptr);
     if (!check(vkEndCommandBuffer(command_), "vkEndCommandBuffer")) return false;
     const auto recordDone = std::chrono::steady_clock::now();
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -865,8 +933,8 @@ public:
                             "Host-visible device-local memory" :
                             "Host-visible non-device-local memory; PCIe staging may be faster");
         out.lines.push_back(engine_.gpuScratchDeviceLocal() ?
-                            "Jacobian scratch: GPU-only device-local memory" :
-                            "Jacobian scratch: GPU-only allocation is not device-local");
+                            "GPU stage buffers: device-local, not host-mapped" :
+                            "GPU stage buffers: not device-local, not host-mapped");
         out.lines.push_back("Curve batch: " + std::to_string(curveBatch_));
         out.lines.push_back("Affine inversion batch: " + std::to_string(affineBatch_));
         out.lines.push_back("Submit batch: " + std::to_string(batchKeys_) + " keys");

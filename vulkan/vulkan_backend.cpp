@@ -143,6 +143,7 @@ public:
     const std::string& deviceName() const { return deviceName_; }
     bool deviceLocalHostVisible() const { return deviceLocalHostVisible_; }
     bool gpuScratchDeviceLocal() const { return gpuScratchDeviceLocal_; }
+    uint32_t residentDispatches() const { return residentDispatches_; }
     bool timestampsSupported() const { return queryPool_ != VK_NULL_HANDLE; }
     void beginProfile() {
         profiling_ = true;
@@ -345,6 +346,8 @@ bool VulkanEngine::init(std::string& error) {
     }
     std::vector<uint32_t> table;
     if (!createTable(table, error)) return false;
+    residentDispatches_ = std::min<uint32_t>(
+        residentDispatches_, std::max<uint32_t>(1, kBaseWindowKeys / batchKeys_));
     ringCapacity_ = batchKeys_ * residentDispatches_;
     for (uint32_t i = 0; i < kBindings; ++i) {
         sizes_[i] = i == 4 ? automaton.size() * sizeof(uint32_t) :
@@ -929,6 +932,10 @@ public:
         return const_cast<VulkanResidentBackend*>(this)->ensureReady();
     }
     std::string note() const override { return error_; }
+    uint32_t effectiveResidentDispatches() const {
+        return std::min<uint32_t>(residentDispatches_,
+                                  std::max<uint32_t>(1, kBaseWindowKeys / batchKeys_));
+    }
     BackendInfo info() const override {
         BackendInfo out;
         out.kind = "GPU-resident";
@@ -944,7 +951,7 @@ public:
         out.lines.push_back("Curve batch: " + std::to_string(curveBatch_));
         out.lines.push_back("Affine inversion batch: " + std::to_string(affineBatch_));
         out.lines.push_back("Submit batch: " + std::to_string(batchKeys_) + " keys");
-        out.lines.push_back("Resident queue group: " + std::to_string(residentDispatches_) +
+        out.lines.push_back("Resident queue group: " + std::to_string(effectiveResidentDispatches()) +
                             " batches per fence");
         return out;
     }
@@ -955,7 +962,7 @@ public:
         do {
             uint32_t count = batchKeys_;
             const uint32_t dispatches = std::min<uint32_t>(
-                residentDispatches_, std::max<uint32_t>(1, kBaseWindowKeys / count));
+                effectiveResidentDispatches(), std::max<uint32_t>(1, kBaseWindowKeys / count));
             if (!scanChunks(count, dispatches, nullptr)) break;
             total += uint64_t(count) * dispatches;
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds);
@@ -972,15 +979,14 @@ public:
         result.deviceLocalHostVisible = engine_.deviceLocalHostVisible();
         result.gpuScratchDeviceLocal = engine_.gpuScratchDeviceLocal();
         result.timestampsSupported = engine_.timestampsSupported();
-        result.residentDispatches = residentDispatches_;
+        result.residentDispatches = effectiveResidentDispatches();
         // One unmeasured full-size batch primes JIT compilation, caches and
         // the fixed-base table before the bounded wall-clock measurement.
         if (!scanChunk(batchKeys_, nullptr)) { result.error = error_; return result; }
         engine_.beginProfile();
         const auto start = std::chrono::steady_clock::now();
         do {
-            const uint32_t dispatches = std::min<uint32_t>(
-                residentDispatches_, std::max<uint32_t>(1, kBaseWindowKeys / batchKeys_));
+            const uint32_t dispatches = effectiveResidentDispatches();
             if (!scanChunks(batchKeys_, dispatches, nullptr)) break;
             result.keys += uint64_t(batchKeys_) * dispatches;
             result.dispatches += dispatches;
@@ -1006,11 +1012,11 @@ public:
             const uint32_t count = cfg.maxAttempts ?
                 static_cast<uint32_t>(std::min<uint64_t>(batchKeys_, cfg.maxAttempts - done)) : batchKeys_;
             const uint64_t remaining = cfg.maxAttempts ? cfg.maxAttempts - done :
-                                        uint64_t(batchKeys_) * residentDispatches_;
+                                        uint64_t(batchKeys_) * effectiveResidentDispatches();
             const uint32_t windowDispatches = std::max<uint32_t>(
                 1, kBaseWindowKeys / count);
             const uint32_t dispatches = static_cast<uint32_t>(std::min<uint64_t>(
-                std::min<uint32_t>(residentDispatches_, windowDispatches),
+                std::min<uint32_t>(effectiveResidentDispatches(), windowDispatches),
                 std::max<uint64_t>(1, remaining / count)));
             const uint32_t scanOffset = offsetBase_;
             std::vector<Candidate> candidates;

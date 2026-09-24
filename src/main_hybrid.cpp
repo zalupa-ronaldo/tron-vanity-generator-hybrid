@@ -84,12 +84,13 @@ struct Options {
     uint32_t gpuPollMs = 50;
     uint32_t gpuGroupSize = 256;
     uint32_t metalKeysPerLane = 32;
-    uint32_t vulkanCurveBatch = 1;
-    uint32_t vulkanAffineBatch = 4;
+    uint32_t vulkanCurveBatch = 4;
+    bool vulkanCurveBatchExplicit = false;
+    uint32_t vulkanAffineBatch = 8;
     bool vulkanAffineBatchExplicit = false;
     uint32_t vulkanBatchKeys = 131072;
     bool vulkanBatchKeysExplicit = false;
-    uint32_t vulkanResidentDispatches = 8;
+    uint32_t vulkanResidentDispatches = 16;
     bool vulkanResidentDispatchesExplicit = false;
     bool vulkanField8 = false;
     bool vulkanFieldExplicit = false;
@@ -123,11 +124,11 @@ void usage() {
         "  --bench-resident  benchmark resident GPU backends only (skip legacy tuning)\n"
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --vulkan-profile  time full Vulkan pipeline by stage; no wallets written\n"
-        "  --vulkan-curve-batch 1|4  Vulkan field inversions per group (default 1)\n"
-        "  --vulkan-affine-batch 4|8  Jacobian points per field inversion (default 4)\n"
+        "  --vulkan-curve-batch 1|4  points per projective curve batch (default 4)\n"
+        "  --vulkan-affine-batch 4|8  Jacobian points per field inversion (default 8)\n"
         "  --vulkan-field 10x26|8x32  field limb layout; 8x32 is experimental (default 10x26)\n"
         "  --vulkan-batch-keys N  keys per Vulkan submit: 4096..1048576 powers of two (default 131072)\n"
-        "  --vulkan-resident-group 4|8|16  GPU submits grouped per fence (default 8)\n"
+        "  --vulkan-resident-group 4|8|16  GPU submits grouped per fence (default 16)\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-affine-batch 2|4|8  staged paired inversion points per work-item (default 4)\n"
         "  --opencl-curve-batch 2|4|8  staged consecutive public points per work-item (default 2)\n"
@@ -186,6 +187,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--gpu-group-size") o.gpuGroupSize = std::stoul(next(i, "--gpu-group-size"));
             else if (a == "--metal-keys-per-lane") o.metalKeysPerLane = std::stoul(next(i, "--metal-keys-per-lane"));
             else if (a == "--vulkan-curve-batch") {
+                o.vulkanCurveBatchExplicit = true;
                 o.vulkanCurveBatch = std::stoul(next(i, "--vulkan-curve-batch"));
                 if (o.vulkanCurveBatch != 1 && o.vulkanCurveBatch != 4)
                     throw std::runtime_error("--vulkan-curve-batch must be 1 or 4");
@@ -296,7 +298,7 @@ bool parse(int argc, char** argv, Options& o) {
     if (o.openclOptions.staged && o.backend != "opencl") {
         std::cerr << "--opencl-pipeline staged requires --backend opencl\n"; return false;
     }
-    if (o.vulkanCurveBatch != 1 && o.backend != "vulkan") {
+    if (o.vulkanCurveBatchExplicit && o.backend != "vulkan") {
         std::cerr << "--vulkan-curve-batch requires --backend vulkan\n"; return false;
     }
     if (o.vulkanAffineBatchExplicit && o.backend != "vulkan") {

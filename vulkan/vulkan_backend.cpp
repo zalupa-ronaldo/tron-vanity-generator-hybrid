@@ -40,11 +40,12 @@ constexpr uint32_t kBaseWindowKeys = 1u << 22;
 constexpr uint32_t kGroupSize = 64;
 constexpr uint32_t kBindings = 10;
 constexpr uint32_t kRingWords = 29;
-// Keep more logical scans in one command buffer/fence cycle. The GPU
-// intermediates are still reused between passes; only the append-only match
-// ring grows with this value. Four passes left the RX 9070 XT spending most
-// of wall time in queue/fence/driver work rather than shader execution.
-constexpr uint32_t kDefaultResidentDispatches = 8;
+// Keep more logical scans in one command buffer/fence cycle. The per-key
+// workspace and append-only match ring both scale with this value. The RX
+// 9070 XT benchmark selected sixteen logical passes as the best stable fence
+// amortization point. A larger key batch can exceed the device allocation
+// limit, so keep that tuning separate.
+constexpr uint32_t kDefaultResidentDispatches = 16;
 constexpr uint32_t kStageCount = 6;
 constexpr uint32_t kQueryStride = kStageCount + 1;
 constexpr std::array<uint32_t, kBindings> kWordsPerKey = {
@@ -102,7 +103,7 @@ class VulkanEngine {
 public:
     explicit VulkanEngine(std::shared_ptr<const Dictionary> dictionary,
                           bool allowSoftware, uint32_t curveBatch, uint32_t batchKeys,
-                          uint32_t affineBatch = 4,
+                          uint32_t affineBatch = 8,
                           uint32_t residentDispatches = kDefaultResidentDispatches,
                           bool field8 = false)
         : dictionary_(std::move(dictionary)), allowSoftware_(allowSoftware),
@@ -208,9 +209,9 @@ private:
     std::array<VkDeviceSize, kBindings> sizes_{};
     PushConstants constants_{};
     uint32_t ringCapacity_ = 0;
-    uint32_t curveBatch_ = 1;
+    uint32_t curveBatch_ = 4;
     uint32_t batchKeys_ = kDefaultBatchKeys;
-    uint32_t affineBatch_ = 4;
+    uint32_t affineBatch_ = 8;
     uint32_t residentDispatches_ = kDefaultResidentDispatches;
     bool field8_ = false;
     std::array<double, kStageCount> stageSeconds_{};
@@ -1247,9 +1248,9 @@ private:
     }
     std::shared_ptr<const Dictionary> dictionary_;
     VulkanEngine engine_;
-    uint32_t curveBatch_ = 1;
+    uint32_t curveBatch_ = 4;
     uint32_t batchKeys_ = kDefaultBatchKeys;
-    uint32_t affineBatch_ = 4;
+    uint32_t affineBatch_ = 8;
     uint32_t residentDispatches_ = kDefaultResidentDispatches;
     bool field8_ = false;
     secp256k1_context* context_ = nullptr;

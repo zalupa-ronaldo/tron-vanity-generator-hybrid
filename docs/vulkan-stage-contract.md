@@ -8,10 +8,11 @@ compute `P + G` or walk from one base point through three 8-bit offset-table
 windows and leaves Jacobian points in GPU-only scratch. The affine stage then
 shares one Fermat inversion across 4 or 8 points (`--vulkan-affine-batch`).
 The earlier RX profile (2.9-3.0 M keys/s) predates this split and is not a
-measurement of the new pipeline. A new RX correctness gate and matched
-profile are required before making a performance claim. The generic and
-deterministic stage tests do not save wallets. Vulkan requires an explicit
-backend selection.
+measurement of the new pipeline. The RX 9070 XT then passed the no-wallet
+correctness gate and measured 157.14 M keys/s with curve batch 4, affine batch
+8, batch 131072 and resident group 16. This is a user-provided single-run
+benchmark, not a wallet-output throughput claim. The generic and deterministic
+stage tests do not save wallets. Vulkan requires an explicit backend selection.
 
 ## Verified interface to preserve
 
@@ -111,7 +112,7 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    bounded batches while recording the exact dispatch count and push constants
    per submission. The default GPU batch is 131,072 keys (configurable to
    32,768/65,536/131,072/262,144/524,288/1,048,576), and the default resident
-   command group records eight batches by default before one fence wait; the
+   command group records sixteen batches by default before one fence wait; the
    `--vulkan-resident-group 4|8|16` option makes that A/B tunable. This reduces fixed
    `vkQueueSubmit`/fence work without duplicating the intermediate buffers. The
    all per-key public/hash/address stage buffers, including the projective
@@ -141,18 +142,15 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    and artificial word mix differ from the target workload.
    A synthetic `VK_ERROR_DEVICE_LOST` at submit is covered; varied production
    batch sizes, actual driver faults and long-running rollover tests remain.
-3. Windows Vulkan SDK CI compiles the optional backend, and a no-wallet
-   full-address profile now also passes on the actual RX 9070 XT. The profile
-   reports host-visible device-local memory; GPU stages reached 24.73 M/s for
-   batch 4 on average, but roughly 4.4 s of each five-second run remained
-   host/queue/transfer overhead. The grouped-submit implementation now records
-   four logical batches in one command buffer and reads only the GPU result
-   ring after the single fence; it still needs a matched RX A/B measurement.
-   `bench-vulkan.ps1 -VulkanBatchKeys
-   32768` reproduces the old baseline; `-VulkanBatchKeys 131072` exercises the
-   larger submit. The current curve shader uses explicit libsecp256k1-style
-   10x26 multiply/square schedules and carries the 64-byte public base point
-   in push constants; the RX wall-rate effect still needs a matched A/B. A
+3. Windows Vulkan SDK CI compiles the optional backend, and the no-wallet
+   full-address pipeline passes on the actual RX 9070 XT. The matched resident
+   runs measured 123.18 M/s for curve 1 / affine 4 / group 8, 126.09 M/s for
+   the same math with group 16, 141.79 M/s for curve 4 / affine 4 / group 16,
+   and 157.14 M/s for curve 4 / affine 8 / group 16. The run uses host-visible
+   device-local memory and batch 131072. A 262144-key probe with group 16
+   failed at `vkAllocateMemory -2`, so it is not a stable default. The current
+   curve shader uses explicit libsecp256k1-style 10x26 multiply/square
+   schedules and carries the 64-byte public base point in push constants. A
    long-running funded-wallet run remains unvalidated.
    The experimental 8x32 field profile uses a bounded 4096/8192/16384-key
    submit (`--vulkan-batch-keys 4096` is the CI and first-run choice); larger

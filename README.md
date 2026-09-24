@@ -125,17 +125,21 @@ OS CSPRNG chooses a base scalar, GPU computes all address stages and dictionary
 matches, and CPU independently verifies every reported key/address/match.
 It fails closed on a driver timeout or result-ring overflow. The backend now
 passes the no-wallet correctness gate and full-address profile on the RX 9070
-XT. The published 2.9-3.0 M keys/s wall result is the pre-resident-group
-baseline; the new grouped-submit path still needs a matched RX measurement.
-Do not use it for funds until wallet output is independently checked.
+XT. A matched user-provided RX run measured 123.18 M keys/s with curve batch 1
+/ affine batch 4 / resident group 8, 126.09 M/s with the same math and group
+16, 141.79 M/s with curve batch 4 / affine batch 4 / group 16, and 157.14 M/s
+with curve batch 4 / affine batch 8 / group 16. The last configuration is
+about 50% above the earlier 104.8 M/s OpenCL reference on that device. These
+are no-wallet resident benchmark rates from single runs; repeat them after
+driver or workload changes. Do not use it for funds until wallet output is
+independently checked.
 The current source branch uses a split Vulkan curve pipeline: the curve stage
 leaves Jacobian `(X,Y,Z)` points in GPU-only scratch, and a separate affine
 stage performs one field inversion across 4 or 8 points before writing public
-keys. `--vulkan-affine-batch 4` is the default because the same RX 9070 XT's
-measured OpenCL path favored batch 4; use `8` for an A/B run.
-The earlier 2.9-3.0 M keys/s numbers were measured before this split and must
-not be presented as its performance. A new RX correctness gate and matched
-wall profile are still required.
+keys. The measured RX winner is `--vulkan-curve-batch 4` with
+`--vulkan-affine-batch 8` and `--vulkan-resident-group 16`; these are now the
+defaults for explicit Vulkan runs. The older 2.9-3.0 M keys/s numbers were
+measured before this split and must not be presented as current performance.
 The regular Windows ZIP includes `bench-vulkan.cmd` and `bench-vulkan.ps1` for
 a bounded, no-wallet Vulkan/OpenCL comparison. GitHub Actions also keeps a
 short-lived, standalone `vulkan-stage-test-windows-x64` artifact; it is not
@@ -155,11 +159,11 @@ bench-vulkan.cmd
 ```
 
 It first runs `test-vulkan`, then measures the matched OpenCL reference and
-Vulkan batches 1/4 twice in interleaved order. Every child has a timeout;
-`summary.txt` and `benchmark.csv` contain the wall rates and dictionary hash,
-without wallet files. On the RX run, batch 4 averaged 2.985 M/s and OpenCL
-averaged 104.635 M/s; about 4.2-4.4 seconds of each five-second Vulkan run
-was outside GPU stages. Send only these two reports, not `results` or wallets.
+Vulkan curve batches 1/4 twice in interleaved order. Every child has a
+timeout; `summary.txt` and `benchmark.csv` contain the wall rates and
+dictionary hash, without wallet files. The historical 2.985 M/s result was
+from the pre-resident split and is not comparable to the current raw resident
+benchmark. Send only these two reports, not `results` or wallets.
 The script passes `--no-config` because the bundled config intentionally
 selects OpenCL and includes OpenCL-only options. `--backend vulkan` never silently
 falls back to CPU: software Vulkan devices are rejected for normal runs.
@@ -173,10 +177,12 @@ must not be presented as wallet-search throughput. The backend prefers
 host-visible device-local memory when exposed; if the only coherent mapping
 is system memory, a future device-local buffer plus staging path may win.
 The projective curve and affine batch-4/8 shaders are compiled separately, so
-large live arrays do not inflate the other variants. Compare curve batch 1/4
-and affine batch 4/8 in A/B/A order with the same dictionary and no competing
-GPU workload; keep OpenCL as the RX default until the split Vulkan path has a
-fresh correctness gate and matched profile.
+large live arrays do not inflate the other variants. On the RX 9070 XT, curve
+4 / affine 8 / resident group 16 reached 157.14 M/s wall in the no-wallet
+resident benchmark; curve 1 / affine 4 / group 8 reached 123.18 M/s under
+the same style of run. The bundled config intentionally remains OpenCL for
+compatibility; explicit Vulkan uses the measured winner. Repeat the A/B/A
+comparison with the same dictionary after driver changes.
 The Windows build also contains an opt-in 8x32 field representation for the
 Vulkan curve/affine stages. It uses 32-bit limbs and the secp256k1
 pseudo-Mersenne fold, while the default remains the validated 10x26 path.
@@ -204,15 +210,21 @@ The resident group can be compared without rebuilding: use
 `--vulkan-resident-group 4|8|16` (or `vulkan-resident-group=4|8|16` in an
 explicit Vulkan config). It controls how many GPU batches are recorded before
 one fence; it does not move any per-key work to the CPU. The supplied
-`bench-vulkan.ps1` exposes the same choice as `-VulkanResidentGroup`.
+`bench-vulkan.ps1` exposes the same choice as `-VulkanResidentGroup`. The
+explicit Vulkan default is 16; on the measured RX this beat group 8 after the
+curve and affine batches were also tuned.
 
-The native Vulkan path submits 131,072 keys per logical batch by default instead
-of 32,768. It combines eight logical batches into one contiguous resident
-group (1,048,576 keys), records six GPU stage dispatches for that whole group,
+The native Vulkan path submits 131,072 keys per logical batch by default
+instead of 32,768. It combines sixteen logical batches into one contiguous
+resident group (2,097,152 keys), records six GPU stage dispatches for that whole group,
 and waits on one fence. This removes the per-batch command-recording and
 barrier loop while keeping intermediate data in one GPU-only allocation. Use
 `--vulkan-batch-keys 4096`, `8192`, `16384`, `32768`, `65536`, `131072`,
-`262144`, `524288`, or `1048576` for an A/B run. The smaller values are useful
+`262144`, `524288`, or `1048576` for an A/B run. On the tested RX, a
+262,144-key submit with group 16 failed at `vkAllocateMemory` with error `-2`;
+131,072 is therefore the selected stable default. Resident-group size scales
+both the per-key workspace and the result ring, so increasing batch and group
+together can multiply the device allocation quickly. The smaller values are useful
 for the experimental 8x32 profile; the larger
 values are opt-in because they reserve more resident GPU memory: the split
 curve/affine path adds a 120-byte-per-key Jacobian scratch buffer for 10x26

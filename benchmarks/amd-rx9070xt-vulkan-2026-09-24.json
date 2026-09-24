@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "provenance": "User-provided no-wallet resident benchmark screenshot",
+  "date": "2026-09-24",
+  "device": "AMD Radeon RX 9070 XT",
+  "field_representation": "10x26",
+  "batch_keys": 131072,
+  "profiles": [
+    {
+      "seconds": 5,
+      "curve_batch": 1,
+      "affine_batch": 4,
+      "resident_group": 8,
+      "wall_mkeys_per_s": 123.18
+    },
+    {
+      "seconds": 5,
+      "curve_batch": 1,
+      "affine_batch": 4,
+      "resident_group": 16,
+      "wall_mkeys_per_s": 126.09
+    },
+    {
+      "seconds": 5,
+      "curve_batch": 4,
+      "affine_batch": 4,
+      "resident_group": 16,
+      "wall_mkeys_per_s": 141.79
+    },
+    {
+      "seconds": 10,
+      "curve_batch": 4,
+      "affine_batch": 8,
+      "resident_group": 16,
+      "wall_mkeys_per_s": 157.14
+    }
+  ],
+  "allocation_limit_probe": {
+    "batch_keys": 262144,
+    "curve_batch": 4,
+    "affine_batch": 4,
+    "resident_group": 16,
+    "error": "vkAllocateMemory failed: -2"
+  },
+  "decision": "Use curve batch 4, affine batch 8, batch 131072 and resident group 16 as explicit Vulkan defaults; keep the bundled search config on OpenCL."
+}

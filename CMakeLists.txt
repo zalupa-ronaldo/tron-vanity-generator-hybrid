@@ -348,12 +348,14 @@ if(BUILD_TESTING)
     set_tests_properties(vulkan_address_pipeline_field8 PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
     add_test(NAME vulkan_profile COMMAND tron_vanity_generator --no-config --backend vulkan
       --words ${CMAKE_CURRENT_SOURCE_DIR}/tests/vulkan_words.txt
+      --vulkan-curve-batch 1 --vulkan-affine-batch 4 --vulkan-resident-group 8
       --vulkan-profile --bench-seconds 0.1)
     set_tests_properties(vulkan_profile PROPERTIES
       ENVIRONMENT "TRON_VULKAN_ALLOW_SOFTWARE=1" TIMEOUT 60)
     add_test(NAME vulkan_profile_batch4 COMMAND tron_vanity_generator --no-config --backend vulkan
       --words ${CMAKE_CURRENT_SOURCE_DIR}/tests/vulkan_words.txt
-      --vulkan-curve-batch 4 --vulkan-profile --bench-seconds 0.1)
+      --vulkan-curve-batch 4 --vulkan-affine-batch 4 --vulkan-resident-group 8
+      --vulkan-profile --bench-seconds 0.1)
     set_tests_properties(vulkan_profile_batch4 PROPERTIES
       ENVIRONMENT "TRON_VULKAN_ALLOW_SOFTWARE=1" TIMEOUT 60)
     add_test(NAME vulkan_profile_field8 COMMAND tron_vanity_generator --no-config --backend vulkan

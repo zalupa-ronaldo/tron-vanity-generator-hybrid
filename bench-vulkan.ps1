@@ -3,8 +3,8 @@ param(
     [ValidateRange(30, 600)][int]$TimeoutSeconds = 120,
     [ValidateRange(1, 60)][int]$Seconds = 5,
     [ValidateSet(32768, 65536, 131072, 262144, 524288, 1048576)][int]$VulkanBatchKeys = 131072,
-    [ValidateSet(4, 8)][int]$VulkanAffineBatch = 4,
-    [ValidateSet(4, 8, 16)][int]$VulkanResidentGroup = 8
+    [ValidateSet(4, 8)][int]$VulkanAffineBatch = 8,
+    [ValidateSet(4, 8, 16)][int]$VulkanResidentGroup = 16
 )
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"

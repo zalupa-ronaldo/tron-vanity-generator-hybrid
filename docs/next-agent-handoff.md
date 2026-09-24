@@ -61,6 +61,21 @@ measured bottleneck. The private point arrays spill substantially, but the
 larger batch still wins by amortizing field inversion. Do not replace 10x26,
 reduce the batch blindly, or infer VGPR occupancy from logical array size.
 
+## Verified Vulkan decision, 2026-09-24
+
+The RX 9070 XT passed the no-wallet Vulkan correctness gate and measured
+123.18 M keys/s at curve 1 / affine 4 / resident group 8, 126.09 M/s at the
+same math with group 16, 141.79 M/s at curve 4 / affine 4 / group 16, and
+157.14 M/s at curve 4 / affine 8 / group 16. These are user-provided resident
+benchmark rates using the 10x26 field and 131072-key submits. The latter is
+the selected explicit-Vulkan default and is about 50% above the earlier
+104.8 M/s OpenCL reference. A 262144-key submit with group 16 failed at
+`vkAllocateMemory -2`, so it is an allocation limit, not evidence that the
+curve or address math is incorrect. The redacted measurements are in
+[`amd-rx9070xt-vulkan-2026-09-24.json`](../benchmarks/amd-rx9070xt-vulkan-2026-09-24.json).
+The bundled `tron-vanity.conf` deliberately remains OpenCL; Vulkan is still
+explicit opt-in and wallet-output validation remains a separate gate.
+
 ## Highest-value next experiments
 
 1. RX: obtain `bench.cmd` report, then remeasure top variants in A/B/A order.
@@ -75,84 +90,41 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    measure complete wall and GPU-command times in forward/reverse order after
    stopping only a *test* worker under explicit user control. Never trace or
    publish working secret buffers.
-4. Vulkan: `vulkan/probe.comp`, `vulkan/vulkan_probe.cpp` and
-   `src/vulkan_probe.h` implement a deterministic native compute dispatch.
-   `vulkan/curve.comp`, `vulkan/keccak.comp`, `vulkan/checksum.comp`,
-   `vulkan/base58.comp`, `vulkan/match.comp` and `vulkan/vulkan_keccak.cpp`
-   chain a native 10x26 secp256k1 offset walk, full-address encoding and a
-   bounded atomic match ring. The test compares every stage and ring record
-   with CPU/libsecp256k1, including offset-window and capacity boundaries. They
-   are built only with `-DTRON_ENABLE_VULKAN=ON`. Linux CI uses Mesa's
-   software Vulkan driver; Windows SDK CI compiles the optional stages but
-   has no RX 9070 XT to execute them. The Windows release compiles the Vulkan
-   backend, but its adjacent config selects OpenCL; Vulkan is explicit opt-in.
-   `vulkan/vulkan_backend.cpp` now adds
-   reusable bounded dispatch, CSPRNG base rollover, ring drain and CPU
-   verification of candidate private keys. `--backend vulkan` is explicit and
-   fails closed; `test-vulkan` also exercises the production backend without
-   writing wallets, including a full 32,768-slot ring and CSPRNG base
-   rollover. The embedded 58-word Base58 alphabet guarantees one match per
-   address in that test. The current prototype separates projective curve
-   output from a GPU-only affine stage; `--vulkan-affine-batch 4|8` selects
-   one inversion per four or eight points, while `--vulkan-curve-batch 1|4`
-   selects the projective curve walk. The new variants compile and validate
-   as SPIR-V locally, but need the RX correctness gate and a matched profile.
-   The earlier RX profile (OpenCL 104.635 M/s, Vulkan 2.885/2.985 M/s) predates
-   the split and must not be used as its performance result. The RX reports
-   host-visible device-local memory, while about 4.2-4.4 seconds of each
-   five-second pre-split Vulkan run was outside GPU stages. The native backend
-   is therefore still not performance-ready;
-   do not recommend it for funds until a long-running wallet-output test is
-   independently verified. The normal Windows ZIP and opt-in CI
-   artifact both package `bench-vulkan.cmd`, which first
-   runs `test-vulkan` and then measures OpenCL / Vulkan batch 1 / batch 4 /
-   batch 1 / batch 4 / OpenCL with bounded child processes and the same
-   adjacent `words.txt`. Its `summary.txt` and `benchmark.csv` are safe to
-   share; wallets are not produced. The underlying `--vulkan-profile
-   --vulkan-curve-batch 1|4 --vulkan-affine-batch 4|8 --bench-seconds 5`
-   reports wall rate and per-stage
-   GPU timestamps (when supported), plus host-visible memory locality.
-   Compare wall rate first. A non-device-local mapping may be limited by PCIe;
-   test device-local scratch plus staging before optimizing shader math.
-   Synthetic `VK_ERROR_DEVICE_LOST` at queue submit is now tested fail-closed;
-   real driver loss/timeouts and long-running RX wallet-output validation still
-   need testing. OpenCL running on `clvk` would be a compatibility experiment,
-   not evidence of a native Vulkan backend. Khronos's
-   [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
-   and the [clspv OpenCL-C mapping](https://github.com/google/clspv/blob/main/docs/OpenCLCOnVulkan.md)
-   identify API and compiler constraints. Start with deterministic seed/curve
-   and address stages, then integrate one stage at a time; do not report a
-   Vulkan speed until full-address/dictionary processing is verified.
+4. Vulkan: `vulkan/curve.comp`, `vulkan/keccak.comp`, `vulkan/checksum.comp`,
+   `vulkan/base58.comp`, `vulkan/match.comp` and the native backend chain a
+   10x26 secp256k1 offset walk, full-address encoding and a bounded atomic
+   match ring. The tests compare every stage and ring record with
+   CPU/libsecp256k1, including offset-window and capacity boundaries. The
+   Windows release compiles this backend, but its adjacent config selects
+   OpenCL; Vulkan is explicit opt-in. `--backend vulkan` fails closed and
+   `test-vulkan` exercises the production backend without writing wallets,
+   including ring, rollover and synthetic device-loss checks.
+   The current source separates projective curve output from a GPU-only affine
+   stage. `--vulkan-affine-batch 4|8` selects one inversion per four or eight
+   points, and `--vulkan-curve-batch 1|4` selects the projective walk. The RX
+   correctness gate and matched full-address benchmark now pass. The explicit
+   Vulkan defaults are curve 4, affine 8, batch 131072 and resident group 16.
+   The normal Windows ZIP and CI artifact package `bench-vulkan.cmd`; its
+   reports contain rates and dictionary hashes, not wallets. Compare wall rate
+   first and retain CPU verification. A long-running wallet-output run and
+   driver-loss recovery still need validation before recommending funds use.
    The byte/word contract and remaining stage gates are in
    [`vulkan-stage-contract.md`](vulkan-stage-contract.md).
 
-   The Vulkan build also carries an opt-in `--vulkan-field 8x32` variant. It
-   uses eight 32-bit field limbs, a complete pseudo-Mersenne reduction, and a
-   96-byte-per-key Jacobian scratch layout. The default stays 10x26. The
-   field8 path must pass `--backend vulkan --vulkan-field 8x32 test-vulkan`
-   on the target GPU before its profile can be compared; no RX result is
-   known yet.
+   The Vulkan build also carries an opt-in `--vulkan-field 8x32` variant.
+   It uses eight 32-bit field limbs and a 96-byte-per-key Jacobian scratch
+   layout. The RX field8 self-test passed, but its measured no-wallet profile
+   was only 17.77 M/s wall (21.97 M/s GPU-stage rate), so the validated 10x26
+   path remains the default.
 
-   The measured Vulkan bottleneck is now concrete: the RX completed only about
-   1.3 ms of GPU stages per 32,768-key dispatch, while the wall profile spent
-   about 4.2-4.4 s outside those stages across roughly 440-457 dispatches in
-   five seconds. The resident command-buffer group is now eight logical
-   batches by default; `--vulkan-resident-group 4|8|16` makes this A/B
-   tunable. The current implementation concatenates the group and records six
-   GPU stage dispatches (curve, affine, Keccak, checksum, Base58 and match)
-   before one fence, rather than recording six dispatches plus barriers per
-   logical batch. The next RX benchmark must measure whether this moves wall
-   rate toward the GPU-stage rate. All per-key Vulkan stage buffers are now in
-   a separate GPU-only allocation; verify the profile reports it as device-local
-   on the RX. If it does not, prototype a larger bounded batch
-   (for example 64K, 128K and 256K keys) with a
-   correspondingly sized ring, and separately
-   measure fence wait, mapped-buffer/ring drain, address reconstruction and
-   command-recording time. Keep the same full-address CPU verification and
-   compare wall rate in A/B/A; do not infer a win from GPU timestamps alone.
-   The RX already reports host-visible device-local memory, so a staging-buffer
-   rewrite is lower priority until a larger-batch test shows that memory
-   traffic, rather than per-dispatch synchronization, dominates.
+   All per-key Vulkan stage buffers are in a separate GPU-only allocation;
+   the RX profile reports host-visible device-local memory. Resident grouping
+   records six GPU stage dispatches (curve, affine, Keccak, checksum, Base58
+   and match) before one fence, rather than fencing every logical batch. A
+   262144-key submit with group 16 failed at `vkAllocateMemory -2`; do not
+   promote that size without a memory-layout change. If future profiles show
+   another limiter, measure fence wait, ring collection and command recording
+   separately, preserve the same CPU verification, and compare full wall rate.
 
 ## Reproducibility and rollout
 

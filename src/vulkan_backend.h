@@ -9,9 +9,9 @@
 
 // Explicit native Vulkan backend. Never silently substitutes a CPU path.
 std::unique_ptr<Backend> makeVulkanResidentBackend(
-    std::shared_ptr<const Dictionary> dictionary, uint32_t curveBatch = 1,
-    uint32_t batchKeys = 131072, uint32_t affineBatch = 4,
-    uint32_t residentDispatches = 8, bool field8 = false);
+    std::shared_ptr<const Dictionary> dictionary, uint32_t curveBatch = 4,
+    uint32_t batchKeys = 131072, uint32_t affineBatch = 8,
+    uint32_t residentDispatches = 16, bool field8 = false);
 
 // Bounded, no-wallet runtime verification on the selected Vulkan device.
 int vulkanResidentSelfTest(bool field8 = false);
@@ -33,16 +33,16 @@ struct VulkanProfileResult {
     bool timestampsSupported = false;
     bool deviceLocalHostVisible = false;
     bool gpuScratchDeviceLocal = false;
-    uint32_t curveBatch = 1;
+    uint32_t curveBatch = 4;
     uint32_t batchKeys = 131072;
-    uint32_t residentDispatches = 8;
-    uint32_t affineBatch = 4;
+    uint32_t residentDispatches = 16;
+    uint32_t affineBatch = 8;
     std::string fieldRepresentation = "10x26";
 };
 
 // Full-address, no-wallet wall/GPU-stage profile. No CPU or software fallback.
 VulkanProfileResult profileVulkanResident(std::shared_ptr<const Dictionary> dictionary,
-                                          double seconds, uint32_t curveBatch = 1,
-                                          uint32_t batchKeys = 131072, uint32_t affineBatch = 4,
-                                          uint32_t residentDispatches = 8,
+                                          double seconds, uint32_t curveBatch = 4,
+                                          uint32_t batchKeys = 131072, uint32_t affineBatch = 8,
+                                          uint32_t residentDispatches = 16,
                                           bool field8 = false);

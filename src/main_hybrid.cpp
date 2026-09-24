@@ -126,7 +126,7 @@ void usage() {
         "  --vulkan-curve-batch 1|4  Vulkan field inversions per group (default 1)\n"
         "  --vulkan-affine-batch 4|8  Jacobian points per field inversion (default 4)\n"
         "  --vulkan-field 10x26|8x32  field limb layout; 8x32 is experimental (default 10x26)\n"
-        "  --vulkan-batch-keys N  keys per Vulkan submit: 32768..1048576 powers of two (default 131072)\n"
+        "  --vulkan-batch-keys N  keys per Vulkan submit: 4096..1048576 powers of two (default 131072)\n"
         "  --vulkan-resident-group 4|8|16  GPU submits grouped per fence (default 8)\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-affine-batch 2|4|8  staged paired inversion points per work-item (default 4)\n"
@@ -206,10 +206,12 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--vulkan-batch-keys") {
                 o.vulkanBatchKeysExplicit = true;
                 o.vulkanBatchKeys = std::stoul(next(i, "--vulkan-batch-keys"));
-                if (o.vulkanBatchKeys != 32768 && o.vulkanBatchKeys != 65536 &&
+                if (o.vulkanBatchKeys != 4096 && o.vulkanBatchKeys != 8192 &&
+                    o.vulkanBatchKeys != 16384 && o.vulkanBatchKeys != 32768 &&
+                    o.vulkanBatchKeys != 65536 &&
                     o.vulkanBatchKeys != 131072 && o.vulkanBatchKeys != 262144 &&
                     o.vulkanBatchKeys != 524288 && o.vulkanBatchKeys != 1048576)
-                    throw std::runtime_error("--vulkan-batch-keys must be 32768, 65536, 131072, 262144, 524288 or 1048576");
+                    throw std::runtime_error("--vulkan-batch-keys must be 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288 or 1048576");
             }
             else if (a == "--vulkan-resident-group") {
                 o.vulkanResidentDispatchesExplicit = true;

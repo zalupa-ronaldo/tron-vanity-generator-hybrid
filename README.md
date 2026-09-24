@@ -185,13 +185,17 @@ gate before profiling it:
 
 ```text
 tron_vanity_generator.exe --no-config --backend vulkan --vulkan-field 8x32 test-vulkan
-tron_vanity_generator.exe --no-config --backend vulkan --vulkan-field 8x32 --vulkan-profile --bench-seconds 5
+tron_vanity_generator.exe --no-config --backend vulkan --vulkan-field 8x32 --vulkan-batch-keys 4096 --vulkan-resident-group 4 --vulkan-profile --bench-seconds 5
 ```
 
 The profile prints `field representation: 8x32`. Compare wall keys/s only
 after the self-test passes, and keep `10x26` if the RX driver rejects or slows
-the candidate. The same choice can be written as `vulkan-field=8x32` in an
-explicit Vulkan config; the bundled search config remains OpenCL.
+the candidate. The 8x32 profile accepts 4096, 8192 and 16384-key submits;
+larger 8x32 submits are rejected by the bounded profile because some Windows
+AMD driver configurations can hold the first dispatch behind the watchdog.
+That limit applies to the diagnostic profile only, not to production search.
+The same choice can be written as `vulkan-field=8x32` in an explicit Vulkan
+config; the bundled search config remains OpenCL.
 An opt-in Vulkan config may use `backend=vulkan` and
 `vulkan-curve-batch=4` plus `vulkan-affine-batch=4|8`; the bundled RX config
 remains on its proven OpenCL settings.
@@ -207,8 +211,9 @@ of 32,768. It combines eight logical batches into one contiguous resident
 group (1,048,576 keys), records six GPU stage dispatches for that whole group,
 and waits on one fence. This removes the per-batch command-recording and
 barrier loop while keeping intermediate data in one GPU-only allocation. Use
-`--vulkan-batch-keys 32768`,
-`65536`, `131072`, `262144`, `524288`, or `1048576` for an A/B run. The larger
+`--vulkan-batch-keys 4096`, `8192`, `16384`, `32768`, `65536`, `131072`,
+`262144`, `524288`, or `1048576` for an A/B run. The smaller values are useful
+for the experimental 8x32 profile; the larger
 values are opt-in because they reserve more resident GPU memory: the split
 curve/affine path adds a 120-byte-per-key Jacobian scratch buffer for 10x26
 (96 bytes for 8x32), plus up to

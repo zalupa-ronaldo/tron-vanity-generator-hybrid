@@ -989,6 +989,19 @@ public:
     }
     VulkanProfileResult profile(double seconds) {
         VulkanProfileResult result;
+        // The 8x32 candidate deliberately favors a simple, auditable field
+        // reduction over the tuned 10x26 schedule. On Windows AMD drivers a
+        // large first dispatch can therefore sit behind the driver watchdog
+        // long enough to look like a hung process. Keep large batches
+        // available for production search, but make the profile boundary
+        // explicit and fail fast instead of waiting with no output.
+        if (field8_ && batchKeys_ >= 32768) {
+            result.error = "Vulkan 8x32 profile batch is too large for a bounded A/B run; "
+                           "use --vulkan-batch-keys 4096, 8192 or 16384";
+            return result;
+        }
+        std::cerr << "Vulkan profile: initializing " << (field8_ ? "8x32" : "10x26")
+                  << " pipeline...\n";
         if (!ensureReady()) { result.error = error_; return result; }
         result.device = engine_.deviceName();
         result.curveBatch = curveBatch_;
@@ -1000,10 +1013,13 @@ public:
         result.gpuScratchDeviceLocal = engine_.gpuScratchDeviceLocal();
         result.timestampsSupported = engine_.timestampsSupported();
         result.residentDispatches = effectiveResidentDispatches();
+        std::cerr << "Vulkan profile: warm-up BEGIN (" << batchKeys_ << " keys)\n";
         // One unmeasured full-size batch primes JIT compilation, caches and
         // the fixed-base table before the bounded wall-clock measurement.
         if (!scanChunk(batchKeys_, nullptr)) { result.error = error_; return result; }
+        std::cerr << "Vulkan profile: warm-up PASS\n";
         engine_.beginProfile();
+        std::cerr << "Vulkan profile: measurement BEGIN (" << seconds << " s)\n";
         const auto start = std::chrono::steady_clock::now();
         do {
             const uint32_t dispatches = effectiveResidentDispatches();
@@ -1019,6 +1035,8 @@ public:
         result.stageSeconds = engine_.stageSeconds();
         result.hostSeconds = engine_.hostSeconds();
         result.candidateRecords = engine_.candidateRecords();
+        std::cerr << "Vulkan profile: measurement "
+                  << (result.error.empty() ? "PASS" : "FAILED") << "\n";
         return result;
     }
     void run(const RunConfig& cfg, RunState& state, const ReportFn& report) override {
@@ -1175,10 +1193,12 @@ private:
             error_ = "Vulkan resident group must be 4, 8 or 16";
             return false;
         }
-        if (batchKeys_ != 32768 && batchKeys_ != 65536 &&
+        if (batchKeys_ != 4096 && batchKeys_ != 8192 &&
+            batchKeys_ != 16384 && batchKeys_ != 32768 &&
+            batchKeys_ != 65536 &&
             batchKeys_ != 131072 && batchKeys_ != 262144 &&
             batchKeys_ != 524288 && batchKeys_ != 1048576) {
-            error_ = "Vulkan submit batch must be 32768, 65536, 131072, 262144, 524288 or 1048576";
+            error_ = "Vulkan submit batch must be 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288 or 1048576";
             return false;
         }
         if (!context_) { error_ = "secp256k1 context creation failed"; return false; }

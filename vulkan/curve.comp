@@ -9,6 +9,9 @@
 // one Montgomery batch inversion for their four Jacobian Z coordinates.
 layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 0) writeonly buffer PublicKeys { uint words[]; } publics;
+// Kept for the deterministic P+G stage test. Production mode 1 uses the
+// push-constant base point below, so it does not read this buffer per key.
+layout(std430, set = 0, binding = 6) readonly buffer InputPoints { uint words[]; } inputs;
 layout(std430, set = 0, binding = 7) readonly buffer OffsetTable { uint words[]; } table;
 layout(push_constant) uniform Params {
     uint count;
@@ -20,6 +23,7 @@ layout(push_constant) uniform Params {
     uint offsetBase;
     uint ringMode;
     uint ringCapacity;
+    uint recordBase;
     uint baseWords[16];
 } params;
 
@@ -316,7 +320,8 @@ Fe feInv(Fe a) {
 
 uint sourceByte(uint index, uint byteIndex, bool fromTable) {
     uint address = index * 16u + byteIndex / 4u;
-    uint word = fromTable ? table.words[address] : params.baseWords[address];
+    uint word = fromTable ? table.words[address] :
+        (params.curveMode == 0u ? inputs.words[address] : params.baseWords[address]);
     return (word >> (8u * (byteIndex & 3u))) & 255u;
 }
 Fe feFromBytes(uint index, uint start, bool fromTable) {

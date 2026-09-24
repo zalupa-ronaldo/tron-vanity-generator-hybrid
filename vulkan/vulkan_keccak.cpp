@@ -32,7 +32,7 @@ constexpr size_t kMatchWords = 18;
 constexpr size_t kOffsetWindows = 3;
 constexpr size_t kOffsetDigits = 256;
 constexpr uint32_t kRingCapacity = 8;
-constexpr size_t kRingWords = 20;
+constexpr size_t kRingWords = 29;
 constexpr size_t kRingGuardSlots = 2;
 constexpr uint32_t kWalkBaseScalar = 0x123456u;
 using PublicBatch = std::array<uint32_t, kItems * kPublicWords>;
@@ -239,12 +239,17 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     std::vector<uint32_t> automaton;
     struct PushConstants {
         uint32_t count, dfaOffset, outStartOffset, outLenOffset, outIdsOffset;
-        uint32_t curveMode, offsetBase, ringMode, ringCapacity;
+        uint32_t curveMode, offsetBase, ringMode, ringCapacity, recordBase;
+        std::array<uint32_t, 16> baseWords{};
     } constants{};
+    static_assert(sizeof(PushConstants) == 104, "Vulkan test push-constant ABI changed");
     constants.count = activeItems;
     constants.curveMode = curveMode;
     constants.offsetBase = offsetBase;
     constants.ringCapacity = kRingCapacity;
+    constants.recordBase = 0;
+    std::memcpy(constants.baseWords.data(), basePubs.data(),
+                constants.baseWords.size() * sizeof(uint32_t));
     constants.dfaOffset = 0;
     automaton.insert(automaton.end(), dictionary->dfa.begin(), dictionary->dfa.end());
     constants.outStartOffset = static_cast<uint32_t>(automaton.size());
@@ -569,7 +574,9 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
             record[1] != expectedMatches[index] ||
             record[2] != expectedMatches[index + 1] || record[3] != 0u ||
             std::memcmp(record + 4, expectedMatches.data() + index + 2,
-                        16 * sizeof(uint32_t)) != 0) validRing = false;
+                        16 * sizeof(uint32_t)) != 0 ||
+            std::memcmp(record + 20, expectedAddresses.data() + size_t(gid) * kAddressWords,
+                        kAddressWords * sizeof(uint32_t)) != 0) validRing = false;
     }
     const auto* ringBytesPtr = static_cast<const unsigned char*>(mapped) + ringOffset;
     for (size_t i = size_t(retained) * kRingWords * sizeof(uint32_t); i < ringBytes; ++i)

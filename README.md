@@ -125,8 +125,9 @@ OS CSPRNG chooses a base scalar, GPU computes all address stages and dictionary
 matches, and CPU independently verifies every reported key/address/match.
 It fails closed on a driver timeout or result-ring overflow. The backend now
 passes the no-wallet correctness gate and full-address profile on the RX 9070
-XT, but measured only 2.9-3.0 M keys/s wall versus about 104.6 M/s for staged
-OpenCL. Do not use it for funds until wallet output is independently checked.
+XT. The published 2.9-3.0 M keys/s wall result is the pre-resident-group
+baseline; the new grouped-submit path still needs a matched RX measurement.
+Do not use it for funds until wallet output is independently checked.
 The conservative Vulkan curve mode inverts each point separately;
 experimental `--vulkan-curve-batch 4` shares one field inversion across four
 points and was about 3.5% faster than batch 1 on wall time, but remains far
@@ -175,17 +176,23 @@ An opt-in Vulkan config may use `backend=vulkan` and
 `vulkan-curve-batch=4`; the bundled RX config remains on its proven OpenCL
 settings.
 
-The native Vulkan path submits 131,072 keys per dispatch by default instead of
-32,768, reducing CPU queue/fence churn. Use `--vulkan-batch-keys 32768`,
+The native Vulkan path submits 131,072 keys per GPU dispatch by default instead
+of 32,768, and records four such dispatches in one command buffer before one
+fence wait. That makes the default resident group 524,288 keys while keeping
+the intermediate buffers single-copy. Use `--vulkan-batch-keys 32768`,
 `65536`, `131072`, `262144`, `524288`, or `1048576` for an A/B run. The larger
 values are opt-in because they reserve more resident GPU memory (about 224 MiB
-of intermediate buffers plus up to 80 MiB of match-ring space at 1,048,576
-keys, before the dictionary and driver alignment). Curve, Keccak, checksum,
-Base58 and dictionary matching remain GPU stages; the CPU only seeds a large
-scalar window, waits for completion, and validates reported matches before
-output. The current curve shader also keeps
-the 64-byte public base point in push constants; it is uploaded once per
-submit rather than read from a host-visible storage buffer for every key.
+of intermediate buffers plus up to 464 MiB for the four-dispatch match ring at
+1,048,576 keys, before the dictionary and driver alignment). Curve, Keccak,
+checksum, Base58 and dictionary matching remain GPU stages; the CPU only seeds
+a large scalar window, records four offsets, waits once, and validates reported
+matches before output. Matching records now carry the GPU-produced address, so
+the host does not read the full address buffer after every dispatch. The
+64-byte public base point is passed through push constants rather than read
+from a host-visible storage buffer for every key. On the RX 9070 XT the
+selected allocation is host-visible device-local memory; if another Vulkan
+driver exposes only system-memory mappings, its profile must be measured
+separately.
 
 ## Build on Windows
 

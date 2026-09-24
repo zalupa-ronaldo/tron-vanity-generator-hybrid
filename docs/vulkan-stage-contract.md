@@ -20,13 +20,14 @@ OpenCL by default. Vulkan requires an explicit backend selection.
 
 ## Verified interface to preserve
 
-`vulkan/curve.comp` reads 16 little-endian words per affine base point at
-binding 6 and a `3 × 256 × 16`-word table at binding 7. Mode 1 computes
+`vulkan/curve.comp` reads a `3 × 256 × 16`-word table at binding 7. Production
+mode 1 reads the one affine base point from push constants and computes
 `P0 + offset·G`, where the offset is a push-constant base plus the invocation
-ID, and writes 16 words per public key at binding 0. Mode 0 tests `P + G`,
-including doubling at `P = G`. The host derives every expected point
-independently with `libsecp256k1`; tested offsets cross 255/256, 65535/65536
-and end at `2^22 - 1`. A compute barrier separates curve from Keccak.
+ID; it writes 16 words per public key at binding 0. Deterministic test mode 0
+uses the per-key affine points at binding 6 and tests `P + G`, including
+doubling at `P = G`. The host derives every expected point independently with
+`libsecp256k1`; tested offsets cross 255/256, 65535/65536 and end at
+`2^22 - 1`. A compute barrier separates curve from Keccak.
 Mode 2 maps each invocation to up to four consecutive offsets. It now builds
 the first point from the offset table and walks `+G` for the remaining three
 points, avoiding redundant table lookups and mixed additions. It stores the
@@ -55,10 +56,11 @@ same two-digit (base 58²) long division as the OpenCL resident kernel.
 `vulkan/match.comp` reads text at binding 3 and packed DFA/output tables at
 binding 4. In test mode it writes one 18-word record per address at binding 5
 (count, overflow, 16 distinct word IDs). In ring mode it atomically reserves
-a slot in metadata binding 8 and writes a 20-word record at binding 9 (key
-index, count, flags, reserved, 16 IDs). Tests use capacity 8 plus two canary
-guard slots, compare concurrent records without assuming write order, cover
-exact-capacity and over-capacity cases, and check both overflow flags. The
+a slot in metadata binding 8 and writes a 29-word record at binding 9 (key
+index, count, flags, reserved, 16 IDs and nine packed words of the GPU
+Base58 address). Tests use capacity 8 plus two canary guard slots, compare
+concurrent records without assuming write order, cover exact-capacity and
+over-capacity cases, and check both overflow flags. The
 host constructs the 30 embedded one-letter stage-test words through the production
 Dictionary builder (the same list is in `tests/vulkan_words.txt`)
 and compares records with `Dictionary::matchIds()`. This is still a *test*
@@ -103,12 +105,15 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    RX-versus-OpenCL claim.
 2. `vulkan/vulkan_backend.cpp` reuses descriptors, pipelines and buffers across
    bounded batches while recording the exact dispatch count and push constants
-   per submission. The default submit batch is 131,072
-   keys (configurable to 32,768/65,536/131,072/262,144); this reduces fixed
-   `vkQueueSubmit`/fence work without changing the GPU math or result ABI. The
-   profile also reports host setup/record/submit/fence/collection intervals so
-   wall-rate loss can be separated from shader time. It resets and drains the atomic
-   ring every dispatch. The OS CSPRNG base expands into a 22-bit offset
+   per submission. The default GPU batch is 131,072 keys (configurable to
+   32,768/65,536/131,072/262,144/524,288/1,048,576), and the default resident
+   command group records four batches before one fence wait. This reduces fixed
+   `vkQueueSubmit`/fence work without duplicating the intermediate buffers. The
+   ring records also carry the GPU-generated address, so collection does not
+   read the full address buffer for every pass. The profile reports host
+   setup/record/submit/fence/collection intervals so wall-rate loss can be
+   separated from shader time. It resets and drains the atomic ring once per
+   resident group. The OS CSPRNG base expands into a 22-bit offset
    window; every candidate scalar, address and full dictionary match is
    rechecked on CPU before output. Metadata overflow and driver timeouts stop
    the search. The `Backend` interface and explicit `--backend vulkan` CLI
@@ -132,10 +137,10 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    full-address profile now also passes on the actual RX 9070 XT. The profile
    reports host-visible device-local memory; GPU stages reached 24.73 M/s for
    batch 4 on average, but roughly 4.4 s of each five-second run remained
-   host/queue/transfer overhead. Do not recommend Vulkan on performance
-   grounds until the larger-submit A/B is measured: the next target is
-   reducing per-dispatch synchronization and host work, not changing the
-   curve batch or staging memory blindly. `bench-vulkan.ps1 -VulkanBatchKeys
+   host/queue/transfer overhead. The grouped-submit implementation now records
+   four logical batches in one command buffer and reads only the GPU result
+   ring after the single fence; it still needs a matched RX A/B measurement.
+   `bench-vulkan.ps1 -VulkanBatchKeys
    32768` reproduces the old baseline; `-VulkanBatchKeys 131072` exercises the
    larger submit. The current curve shader uses explicit libsecp256k1-style
    10x26 multiply/square schedules and carries the 64-byte public base point

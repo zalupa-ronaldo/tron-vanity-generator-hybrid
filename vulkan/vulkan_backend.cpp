@@ -33,8 +33,10 @@ constexpr uint32_t kSelfTestBatchKeys = 1u << 15;
 constexpr uint32_t kBaseWindowKeys = 1u << 22;
 constexpr uint32_t kGroupSize = 64;
 constexpr uint32_t kBindings = 10;
-constexpr uint32_t kRingWords = 20;
+constexpr uint32_t kRingWords = 29;
+constexpr uint32_t kResidentDispatches = 4;
 constexpr uint32_t kStageCount = 5;
+constexpr uint32_t kQueryStride = kStageCount + 1;
 constexpr std::array<uint32_t, kBindings> kWordsPerKey = {
     16, 6, 7, 9, 0, 18, 0, 0, 0, kRingWords
 };
@@ -81,10 +83,10 @@ struct Candidate {
 
 struct PushConstants {
     uint32_t count, dfaOffset, outStartOffset, outLenOffset, outIdsOffset;
-    uint32_t curveMode, offsetBase, ringMode, ringCapacity;
+    uint32_t curveMode, offsetBase, ringMode, ringCapacity, recordBase;
     std::array<uint32_t, 16> baseWords{};
 };
-static_assert(sizeof(PushConstants) == 100, "Vulkan push-constant ABI changed");
+static_assert(sizeof(PushConstants) == 104, "Vulkan push-constant ABI changed");
 
 class VulkanEngine {
 public:
@@ -121,6 +123,9 @@ public:
     bool scan(const unsigned char basePub[64], uint32_t offsetBase, uint32_t count,
               std::vector<Candidate>& candidates, std::vector<std::string>* allAddresses,
               std::string& error);
+    bool scanMany(const unsigned char basePub[64], uint32_t offsetBase, uint32_t count,
+                  uint32_t dispatches, std::vector<Candidate>* candidates,
+                  std::string& error);
     const std::string& deviceName() const { return deviceName_; }
     bool deviceLocalHostVisible() const { return deviceLocalHostVisible_; }
     bool timestampsSupported() const { return queryPool_ != VK_NULL_HANDLE; }
@@ -144,6 +149,10 @@ private:
     }
     bool createTable(std::vector<uint32_t>& table, std::string& error);
     std::string readAddress(uint32_t gid) const;
+    static std::string decodeAddress(const uint32_t* words);
+    bool scanInternal(const unsigned char basePub[64], uint32_t offsetBase, uint32_t count,
+                      uint32_t dispatches, std::vector<Candidate>& candidates,
+                      std::vector<std::string>* allAddresses, std::string& error);
 
     std::shared_ptr<const Dictionary> dictionary_;
     bool allowSoftware_ = false;
@@ -169,6 +178,7 @@ private:
     std::array<VkDeviceSize, kBindings> offsets_{};
     std::array<VkDeviceSize, kBindings> sizes_{};
     PushConstants constants_{};
+    uint32_t ringCapacity_ = 0;
     uint32_t curveBatch_ = 1;
     uint32_t batchKeys_ = kDefaultBatchKeys;
     std::array<double, kStageCount> stageSeconds_{};
@@ -310,11 +320,13 @@ bool VulkanEngine::init(std::string& error) {
     }
     std::vector<uint32_t> table;
     if (!createTable(table, error)) return false;
+    ringCapacity_ = batchKeys_ * kResidentDispatches;
     for (uint32_t i = 0; i < kBindings; ++i) {
         sizes_[i] = i == 4 ? automaton.size() * sizeof(uint32_t) :
                     i == 6 ? 64 : i == 7 ? table.size() * sizeof(uint32_t) :
                     i == 8 ? 2 * sizeof(uint32_t) :
                     i == 5 ? 18 * sizeof(uint32_t) :
+                    i == 9 ? VkDeviceSize(ringCapacity_) * kRingWords * sizeof(uint32_t) :
                     VkDeviceSize(batchKeys_) * kWordsPerKey[i] * sizeof(uint32_t);
     }
     const VkDeviceSize alignment = std::max<VkDeviceSize>(4, selected.limits.minStorageBufferOffsetAlignment);
@@ -371,7 +383,7 @@ bool VulkanEngine::init(std::string& error) {
     std::memcpy(bytes + offsets_[7], table.data(), sizes_[7]);
     constants_.curveMode = curveBatch_ == 4 ? 2u : 1u;
     constants_.ringMode = 1;
-    constants_.ringCapacity = batchKeys_;
+    constants_.ringCapacity = ringCapacity_;
     std::array<VkDescriptorSetLayoutBinding, kBindings> bindings{};
     for (uint32_t i = 0; i < kBindings; ++i) {
         bindings[i].binding = i;
@@ -458,7 +470,7 @@ bool VulkanEngine::init(std::string& error) {
         timestampPeriod_ > 0.0) {
         VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        queryInfo.queryCount = kStageCount + 1;
+        queryInfo.queryCount = kResidentDispatches * kQueryStride;
         // Timestamp queries are optional instrumentation, not required for
         // correctness or normal wallet generation.
         if (vkCreateQueryPool(device_, &queryInfo, nullptr, &queryPool_) != VK_SUCCESS)
@@ -467,18 +479,35 @@ bool VulkanEngine::init(std::string& error) {
     return true;
 }
 
-std::string VulkanEngine::readAddress(uint32_t gid) const {
-    const auto* words = reinterpret_cast<const uint32_t*>(
-        static_cast<const unsigned char*>(mapped_) + offsets_[3]) + size_t(gid) * 9;
+std::string VulkanEngine::decodeAddress(const uint32_t* words) {
     std::string address(34, '\0');
     for (uint32_t i = 0; i < 34; ++i)
         address[i] = static_cast<char>((words[i / 4] >> (8 * (i % 4))) & 255u);
     return address;
 }
 
+std::string VulkanEngine::readAddress(uint32_t gid) const {
+    const auto* words = reinterpret_cast<const uint32_t*>(
+        static_cast<const unsigned char*>(mapped_) + offsets_[3]) + size_t(gid) * 9;
+    return decodeAddress(words);
+}
+
 bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, uint32_t count,
                         std::vector<Candidate>& candidates,
                         std::vector<std::string>* allAddresses, std::string& error) {
+    return scanInternal(basePub, offsetBase, count, 1, &candidates, allAddresses, error);
+}
+
+bool VulkanEngine::scanMany(const unsigned char basePub[64], uint32_t offsetBase, uint32_t count,
+                            uint32_t dispatches, std::vector<Candidate>* candidates,
+                            std::string& error) {
+    return scanInternal(basePub, offsetBase, count, dispatches, candidates, nullptr, error);
+}
+
+bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offsetBase,
+                                uint32_t count, uint32_t dispatches,
+                                std::vector<Candidate>* candidates,
+                                std::vector<std::string>* allAddresses, std::string& error) {
     auto check = [&](VkResult result, const char* call) {
         if (result == VK_SUCCESS) return true;
         if (result == VK_ERROR_DEVICE_LOST) abandoned_ = true;
@@ -486,10 +515,14 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
         return false;
     };
     if (abandoned_) { error = "Vulkan device was abandoned after a GPU failure"; return false; }
-    if (!mapped_ || count == 0 || count > batchKeys_ ||
-        offsetBase > kBaseWindowKeys - count) {
+    const uint64_t totalKeys64 = uint64_t(count) * dispatches;
+    if (!mapped_ || count == 0 || count > batchKeys_ || dispatches == 0 ||
+        dispatches > kResidentDispatches || totalKeys64 > ringCapacity_ ||
+        totalKeys64 > kBaseWindowKeys || offsetBase > kBaseWindowKeys - totalKeys64 ||
+        (allAddresses && dispatches != 1)) {
         error = "invalid Vulkan scan range"; return false;
     }
+    const uint32_t totalKeys = static_cast<uint32_t>(totalKeys64);
     const auto profileStart = std::chrono::steady_clock::now();
     auto* bytes = static_cast<unsigned char*>(mapped_);
     // The base point is immutable for every invocation in this submit. Keep
@@ -504,7 +537,6 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
             std::memset(bytes + offsets_[binding], 0xa5, sizes_[binding]);
     }
     constants_.count = count;
-    constants_.offsetBase = offsetBase;
     const auto setupDone = std::chrono::steady_clock::now();
     // There is only one primary command buffer. Resetting the buffer directly
     // avoids invalidating the whole pool on every bounded scan and lets the
@@ -516,8 +548,7 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     if (!check(vkBeginCommandBuffer(command_, &begin), "vkBeginCommandBuffer")) return false;
     const bool queryThisBatch = profiling_ && queryPool_ != VK_NULL_HANDLE;
     if (queryThisBatch) {
-        vkCmdResetQueryPool(command_, queryPool_, 0, kStageCount + 1);
-        vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, 0);
+        vkCmdResetQueryPool(command_, queryPool_, 0, dispatches * kQueryStride);
     }
     // The result counter is device-owned state. Clearing it on the command
     // stream avoids a host write to the mapped result buffer for every batch.
@@ -530,22 +561,41 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
                          0, nullptr, 0, nullptr);
     vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_,
                             0, 1, &descriptorSet_, 0, nullptr);
-    vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(constants_), &constants_);
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    for (uint32_t stage = 0; stage < kStageCount; ++stage) {
-        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_[stage]);
-        const uint32_t invocations = stage == 0 ? (count + curveBatch_ - 1) / curveBatch_ : count;
-        vkCmdDispatch(command_, (invocations + kGroupSize - 1) / kGroupSize, 1, 1);
+    for (uint32_t pass = 0; pass < dispatches; ++pass) {
+        constants_.offsetBase = offsetBase + pass * count;
+        constants_.recordBase = pass * count;
+        vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(constants_), &constants_);
+        const uint32_t queryBase = pass * kQueryStride;
         if (queryThisBatch)
             vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                queryPool_, stage + 1);
-        if (stage + 1 < kStageCount)
+                                queryPool_, queryBase);
+        for (uint32_t stage = 0; stage < kStageCount; ++stage) {
+            vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_[stage]);
+            const uint32_t invocations = stage == 0 ? (count + curveBatch_ - 1) / curveBatch_ : count;
+            vkCmdDispatch(command_, (invocations + kGroupSize - 1) / kGroupSize, 1, 1);
+            if (queryThisBatch)
+                vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                    queryPool_, queryBase + stage + 1);
+            if (stage + 1 < kStageCount)
+                vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                     0, 1, &barrier, 0, nullptr, 0, nullptr);
+        }
+        if (pass + 1 < dispatches) {
+            // The next curve pass overwrites the same intermediate buffers,
+            // while the ring remains append-only. Make this an explicit
+            // shader write -> shader read/write dependency and keep all of it
+            // on the GPU.
+            VkMemoryBarrier reuseBarrier = barrier;
+            reuseBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
             vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 0, 1, &barrier, 0, nullptr, 0, nullptr);
+                                 0, 1, &reuseBarrier, 0, nullptr, 0, nullptr);
+        }
     }
     barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
     vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -573,42 +623,52 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     }
     const auto fenceDone = std::chrono::steady_clock::now();
     if (queryThisBatch) {
-        std::array<uint64_t, kStageCount + 1> ticks{};
-        if (!check(vkGetQueryPoolResults(device_, queryPool_, 0, kStageCount + 1,
-                                         sizeof(ticks), ticks.data(), sizeof(uint64_t),
+        std::vector<uint64_t> ticks(size_t(dispatches) * kQueryStride);
+        if (!check(vkGetQueryPoolResults(device_, queryPool_, 0,
+                                         static_cast<uint32_t>(ticks.size()),
+                                         ticks.size() * sizeof(uint64_t), ticks.data(),
+                                         sizeof(uint64_t),
                                          VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
                    "vkGetQueryPoolResults")) return false;
         const uint64_t mask = timestampValidBits_ == 64 ? ~uint64_t(0) :
                               ((uint64_t(1) << timestampValidBits_) - 1);
-        for (uint32_t stage = 0; stage < kStageCount; ++stage) {
-            const uint64_t elapsed = (ticks[stage + 1] - ticks[stage]) & mask;
-            stageSeconds_[stage] += double(elapsed) * timestampPeriod_ * 1e-9;
+        for (uint32_t pass = 0; pass < dispatches; ++pass) {
+            const uint32_t queryBase = pass * kQueryStride;
+            for (uint32_t stage = 0; stage < kStageCount; ++stage) {
+                const uint64_t elapsed = (ticks[queryBase + stage + 1] -
+                                          ticks[queryBase + stage]) & mask;
+                stageSeconds_[stage] += double(elapsed) * timestampPeriod_ * 1e-9;
+            }
+            const uint64_t elapsed = (ticks[queryBase + kStageCount] -
+                                      ticks[queryBase]) & mask;
+            gpuSeconds_ += double(elapsed) * timestampPeriod_ * 1e-9;
         }
-        const uint64_t elapsed = (ticks[kStageCount] - ticks[0]) & mask;
-        gpuSeconds_ += double(elapsed) * timestampPeriod_ * 1e-9;
     }
     const auto* meta = reinterpret_cast<const uint32_t*>(bytes + offsets_[8]);
-    if (meta[0] > batchKeys_ || (meta[1] & 1u)) {
+    if (meta[0] > totalKeys || (meta[1] & 1u)) {
         error = "Vulkan result ring overflow; stopping to avoid dropped matches"; return false;
     }
-    candidates.clear();
-    candidates.reserve(meta[0]);
-    const auto* records = reinterpret_cast<const uint32_t*>(bytes + offsets_[9]);
-    std::unordered_set<uint32_t> seen;
-    for (uint32_t slot = 0; slot < meta[0]; ++slot) {
-        const uint32_t* record = records + size_t(slot) * kRingWords;
-        if (record[0] >= count || !seen.insert(record[0]).second ||
-            record[1] > 16 || (record[1] == 0 && record[2] == 0) ||
-            record[3] != 0 || (record[2] & ~1u)) {
-            error = "Vulkan result record invalid"; return false;
+    if (candidates) {
+        candidates->clear();
+        candidates->reserve(meta[0]);
+        const auto* records = reinterpret_cast<const uint32_t*>(bytes + offsets_[9]);
+        std::unordered_set<uint32_t> seen;
+        seen.reserve(meta[0]);
+        for (uint32_t slot = 0; slot < meta[0]; ++slot) {
+            const uint32_t* record = records + size_t(slot) * kRingWords;
+            if (record[0] >= totalKeys || !seen.insert(record[0]).second ||
+                record[1] > 16 || (record[1] == 0 && record[2] == 0) ||
+                record[3] != 0 || (record[2] & ~1u)) {
+                error = "Vulkan result record invalid"; return false;
+            }
+            Candidate candidate;
+            candidate.gid = record[0];
+            candidate.count = record[1];
+            candidate.flags = record[2];
+            std::copy_n(record + 4, 16, candidate.ids.begin());
+            candidate.address = decodeAddress(record + 20);
+            candidates->push_back(std::move(candidate));
         }
-        Candidate candidate;
-        candidate.gid = record[0];
-        candidate.count = record[1];
-        candidate.flags = record[2];
-        std::copy_n(record + 4, 16, candidate.ids.begin());
-        candidate.address = readAddress(candidate.gid);
-        candidates.push_back(std::move(candidate));
     }
     if (allAddresses) {
         allAddresses->clear();
@@ -702,6 +762,8 @@ public:
                             "Host-visible non-device-local memory; PCIe staging may be faster");
         out.lines.push_back("Curve batch: " + std::to_string(curveBatch_));
         out.lines.push_back("Submit batch: " + std::to_string(batchKeys_) + " keys");
+        out.lines.push_back("Resident queue group: " + std::to_string(kResidentDispatches) +
+                            " batches per fence");
         return out;
     }
     double benchmark(double seconds) override {
@@ -710,8 +772,8 @@ public:
         uint64_t total = 0;
         do {
             uint32_t count = batchKeys_;
-            if (!scanChunk(count, nullptr)) break;
-            total += count;
+            if (!scanChunks(count, kResidentDispatches, nullptr)) break;
+            total += uint64_t(count) * kResidentDispatches;
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds);
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         return elapsed > 0 ? double(total) / elapsed : 0.0;
@@ -730,9 +792,9 @@ public:
         engine_.beginProfile();
         const auto start = std::chrono::steady_clock::now();
         do {
-            if (!scanChunk(batchKeys_, nullptr)) break;
-            result.keys += batchKeys_;
-            ++result.dispatches;
+            if (!scanChunks(batchKeys_, kResidentDispatches, nullptr)) break;
+            result.keys += uint64_t(batchKeys_) * kResidentDispatches;
+            result.dispatches += kResidentDispatches;
         } while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds);
         result.wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         engine_.endProfile();
@@ -754,8 +816,13 @@ public:
             if (cfg.maxAttempts && done >= cfg.maxAttempts) break;
             const uint32_t count = cfg.maxAttempts ?
                 static_cast<uint32_t>(std::min<uint64_t>(batchKeys_, cfg.maxAttempts - done)) : batchKeys_;
+            const uint64_t remaining = cfg.maxAttempts ? cfg.maxAttempts - done :
+                                        uint64_t(batchKeys_) * kResidentDispatches;
+            const uint32_t dispatches = static_cast<uint32_t>(std::min<uint64_t>(
+                kResidentDispatches, std::max<uint64_t>(1, remaining / count)));
+            const uint32_t scanOffset = offsetBase_;
             std::vector<Candidate> candidates;
-            if (!scanChunk(count, &candidates)) {
+            if (!scanChunks(count, dispatches, &candidates)) {
                 std::cerr << "Vulkan scan stopped: " << error_ << "\n";
                 state.stop.store(true);
                 return;
@@ -763,7 +830,7 @@ public:
             for (const Candidate& candidate : candidates) {
                 SecretScalar scalar;
                 unsigned char xy[64]{};
-                if (!addOffset(base_.data(), offsetBase_ - count + candidate.gid, scalar.data()) ||
+                if (!addOffset(base_.data(), scanOffset + candidate.gid, scalar.data()) ||
                     !publicXY(context_, scalar.data(), xy) ||
                     tronAddressFromPubXY(xy) != candidate.address) {
                     error_ = "Vulkan candidate key/address verification failed";
@@ -793,8 +860,9 @@ public:
                 state.found.fetch_add(1, std::memory_order_relaxed);
                 report(key);
             }
-            state.checked.fetch_add(count, std::memory_order_relaxed);
-            state.gpuChecked.fetch_add(count, std::memory_order_relaxed);
+            const uint64_t submitted = uint64_t(count) * dispatches;
+            state.checked.fetch_add(submitted, std::memory_order_relaxed);
+            state.gpuChecked.fetch_add(submitted, std::memory_order_relaxed);
             if (state.stop.load() && !error_.empty())
                 std::cerr << "Vulkan verification stopped: " << error_ << "\n";
         }
@@ -911,11 +979,22 @@ private:
         return false;
     }
     bool scanChunk(uint32_t count, std::vector<Candidate>* out) {
-        if (!baseReady_ || offsetBase_ > kBaseWindowKeys - count)
+        return scanChunks(count, 1, out);
+    }
+    bool scanChunks(uint32_t count, uint32_t dispatches, std::vector<Candidate>* out) {
+        const uint64_t total = uint64_t(count) * dispatches;
+        if (!count || !dispatches || total > kBaseWindowKeys) {
+            error_ = "invalid Vulkan resident dispatch group";
+            return false;
+        }
+        if (!baseReady_ || offsetBase_ > kBaseWindowKeys - total)
             if (!prepareBase()) return false;
+        const uint32_t scanOffset = offsetBase_;
         std::vector<Candidate> local;
-        if (!engine_.scan(basePub_.data(), offsetBase_, count, local, nullptr, error_)) return false;
-        offsetBase_ += count;
+        if (!engine_.scanMany(basePub_.data(), scanOffset, count, dispatches,
+                              out ? &local : nullptr, error_))
+            return false;
+        offsetBase_ += static_cast<uint32_t>(total);
         if (out) *out = std::move(local);
         return true;
     }

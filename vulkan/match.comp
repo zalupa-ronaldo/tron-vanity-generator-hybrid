@@ -16,7 +16,7 @@ layout(std430, set = 0, binding = 8) buffer RingMeta {
     uint words[]; // produced count, overflow bits (1=capacity, 2=word IDs)
 } ringMeta;
 layout(std430, set = 0, binding = 9) writeonly buffer RingRecords {
-    uint words[]; // 20 words: gid, count, flags, reserved, 16 IDs
+    uint words[]; // 29 words: gid, count, flags, reserved, 16 IDs, 9 address words
 } ringRecords;
 layout(push_constant) uniform Params {
     uint count;
@@ -28,6 +28,7 @@ layout(push_constant) uniform Params {
     uint offsetBase;
     uint ringMode;
     uint ringCapacity;
+    uint recordBase;
 } params;
 
 const uint ALPHABET[58] = uint[58](
@@ -78,12 +79,14 @@ void main() {
             atomicOr(ringMeta.words[1], 1u);
             return;
         }
-        uint base = slot * 20u;
-        ringRecords.words[base] = gid;
+        uint base = slot * 29u;
+        ringRecords.words[base] = params.recordBase + gid;
         ringRecords.words[base + 1u] = count;
         ringRecords.words[base + 2u] = flags;
         ringRecords.words[base + 3u] = 0u;
         for (int i = 0; i < 16; ++i)
             ringRecords.words[base + 4u + uint(i)] = ids[i];
+        for (int i = 0; i < 9; ++i)
+            ringRecords.words[base + 20u + uint(i)] = addresses.words[gid * 9u + uint(i)];
     }
 }

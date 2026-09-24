@@ -120,7 +120,9 @@ public:
         if (device_ && pipelineLayout_) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
         if (device_ && descriptorPool_) vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
         if (device_ && descriptorLayout_) vkDestroyDescriptorSetLayout(device_, descriptorLayout_, nullptr);
+        if (device_ && scratchBuffer_) vkDestroyBuffer(device_, scratchBuffer_, nullptr);
         if (device_ && buffer_) vkDestroyBuffer(device_, buffer_, nullptr);
+        if (device_ && scratchMemory_) vkFreeMemory(device_, scratchMemory_, nullptr);
         if (device_ && memory_) vkFreeMemory(device_, memory_, nullptr);
         if (device_) vkDestroyDevice(device_, nullptr);
         if (instance_) vkDestroyInstance(instance_, nullptr);
@@ -135,6 +137,7 @@ public:
                   std::string& error);
     const std::string& deviceName() const { return deviceName_; }
     bool deviceLocalHostVisible() const { return deviceLocalHostVisible_; }
+    bool gpuScratchDeviceLocal() const { return gpuScratchDeviceLocal_; }
     bool timestampsSupported() const { return queryPool_ != VK_NULL_HANDLE; }
     void beginProfile() {
         profiling_ = true;
@@ -171,6 +174,8 @@ private:
     uint32_t queueFamily_ = 0;
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VkDeviceMemory memory_ = VK_NULL_HANDLE;
+    VkBuffer scratchBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory scratchMemory_ = VK_NULL_HANDLE;
     void* mapped_ = nullptr;
     VkDescriptorSetLayout descriptorLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
@@ -197,6 +202,7 @@ private:
     uint32_t timestampValidBits_ = 0;
     bool profiling_ = false;
     bool deviceLocalHostVisible_ = false;
+    bool gpuScratchDeviceLocal_ = false;
     bool abandoned_ = false;
     bool injectDeviceLossOnceForTest_ = false;
 };
@@ -344,6 +350,13 @@ bool VulkanEngine::init(std::string& error) {
     const VkDeviceSize alignment = std::max<VkDeviceSize>(4, selected.limits.minStorageBufferOffsetAlignment);
     VkDeviceSize total = 0;
     for (uint32_t i = 0; i < kBindings; ++i) {
+        if (i == 5) {
+            // Jacobian scratch is never touched by the host. Keep it out of
+            // the mapped result/allocation buffer so field math cannot land
+            // in a host-visible heap on discrete drivers.
+            offsets_[i] = 0;
+            continue;
+        }
         total = aligned(total, alignment);
         offsets_[i] = total;
         total += sizes_[i];
@@ -356,8 +369,16 @@ bool VulkanEngine::init(std::string& error) {
     bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(device_, &bufferInfo, nullptr, &buffer_), "vkCreateBuffer")) return false;
+    VkBufferCreateInfo scratchInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    scratchInfo.size = sizes_[5];
+    scratchInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    scratchInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (!check(vkCreateBuffer(device_, &scratchInfo, nullptr, &scratchBuffer_),
+               "vkCreateBuffer(Jacobian scratch)")) return false;
     VkMemoryRequirements requirements{};
     vkGetBufferMemoryRequirements(device_, buffer_, &requirements);
+    VkMemoryRequirements scratchRequirements{};
+    vkGetBufferMemoryRequirements(device_, scratchBuffer_, &scratchRequirements);
     VkPhysicalDeviceMemoryProperties memoryProps{};
     vkGetPhysicalDeviceMemoryProperties(physical_, &memoryProps);
     uint32_t memoryType = memoryProps.memoryTypeCount;
@@ -383,12 +404,37 @@ bool VulkanEngine::init(std::string& error) {
     if (memoryType == memoryProps.memoryTypeCount) {
         error = "no coherent host-visible Vulkan memory"; return false;
     }
+    uint32_t scratchMemoryType = memoryProps.memoryTypeCount;
+    int scratchScore = -1;
+    for (uint32_t i = 0; i < memoryProps.memoryTypeCount; ++i) {
+        if (!(scratchRequirements.memoryTypeBits & (1u << i))) continue;
+        const VkMemoryPropertyFlags flags = memoryProps.memoryTypes[i].propertyFlags;
+        // Prefer VRAM, but do not require HOST_VISIBLE: this allocation is
+        // deliberately never mapped or read by the CPU.
+        const int score = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? 4 : 0) +
+                          (flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ? 1 : 0);
+        if (score > scratchScore) {
+            scratchScore = score;
+            scratchMemoryType = i;
+            gpuScratchDeviceLocal_ = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+        }
+    }
+    if (scratchMemoryType == memoryProps.memoryTypeCount) {
+        error = "no Vulkan memory for GPU Jacobian scratch"; return false;
+    }
     VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocation.allocationSize = requirements.size;
     allocation.memoryTypeIndex = memoryType;
     if (!check(vkAllocateMemory(device_, &allocation, nullptr, &memory_), "vkAllocateMemory") ||
         !check(vkBindBufferMemory(device_, buffer_, memory_, 0), "vkBindBufferMemory") ||
         !check(vkMapMemory(device_, memory_, 0, total, 0, &mapped_), "vkMapMemory")) return false;
+    VkMemoryAllocateInfo scratchAllocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    scratchAllocation.allocationSize = scratchRequirements.size;
+    scratchAllocation.memoryTypeIndex = scratchMemoryType;
+    if (!check(vkAllocateMemory(device_, &scratchAllocation, nullptr, &scratchMemory_),
+               "vkAllocateMemory(Jacobian scratch)") ||
+        !check(vkBindBufferMemory(device_, scratchBuffer_, scratchMemory_, 0),
+               "vkBindBufferMemory(Jacobian scratch)")) return false;
     auto* bytes = static_cast<unsigned char*>(mapped_);
     std::memset(bytes, 0, static_cast<size_t>(total));
     std::memcpy(bytes + offsets_[4], automaton.data(), sizes_[4]);
@@ -423,7 +469,8 @@ bool VulkanEngine::init(std::string& error) {
     std::array<VkDescriptorBufferInfo, kBindings> ranges{};
     std::array<VkWriteDescriptorSet, kBindings> writes{};
     for (uint32_t i = 0; i < kBindings; ++i) {
-        ranges[i] = {buffer_, offsets_[i], sizes_[i]};
+        ranges[i] = i == 5 ? VkDescriptorBufferInfo{scratchBuffer_, 0, sizes_[i]} :
+                              VkDescriptorBufferInfo{buffer_, offsets_[i], sizes_[i]};
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = descriptorSet_;
         writes[i].dstBinding = i;
@@ -817,6 +864,9 @@ public:
         out.lines.push_back(engine_.deviceLocalHostVisible() ?
                             "Host-visible device-local memory" :
                             "Host-visible non-device-local memory; PCIe staging may be faster");
+        out.lines.push_back(engine_.gpuScratchDeviceLocal() ?
+                            "Jacobian scratch: GPU-only device-local memory" :
+                            "Jacobian scratch: GPU-only allocation is not device-local");
         out.lines.push_back("Curve batch: " + std::to_string(curveBatch_));
         out.lines.push_back("Affine inversion batch: " + std::to_string(affineBatch_));
         out.lines.push_back("Submit batch: " + std::to_string(batchKeys_) + " keys");
@@ -844,6 +894,7 @@ public:
         result.affineBatch = affineBatch_;
         result.batchKeys = batchKeys_;
         result.deviceLocalHostVisible = engine_.deviceLocalHostVisible();
+        result.gpuScratchDeviceLocal = engine_.gpuScratchDeviceLocal();
         result.timestampsSupported = engine_.timestampsSupported();
         result.residentDispatches = kResidentDispatches;
         // One unmeasured full-size batch primes JIT compilation, caches and

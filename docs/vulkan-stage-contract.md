@@ -106,7 +106,9 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    32,768/65,536/131,072/262,144/524,288/1,048,576), and the default resident
    command group records eight batches before one fence wait. This reduces fixed
    `vkQueueSubmit`/fence work without duplicating the intermediate buffers. The
-   ring records also carry the GPU-generated address, so collection does not
+   projective Jacobian scratch is a separate GPU-only storage buffer and is not
+   mapped by the host; the profile reports whether its memory type is
+   device-local. The ring records also carry the GPU-generated address, so collection does not
    read the full address buffer for every pass. The profile reports host
    setup/record/submit/fence/collection intervals so wall-rate loss can be
    separated from shader time. It resets and drains the atomic ring once per

@@ -735,6 +735,45 @@ bool verifyScan(VulkanEngine& engine, secp256k1_context* context,
     return true;
 }
 
+bool verifyGroupedScan(VulkanEngine& engine, secp256k1_context* context,
+                       const Dictionary& dictionary, const unsigned char base[32],
+                       uint32_t offsetBase, uint32_t count, uint32_t dispatches,
+                       std::string& error) {
+    unsigned char basePub[64]{};
+    if (!publicXY(context, base, basePub)) { error = "Vulkan grouped base key invalid"; return false; }
+    std::vector<Candidate> candidates;
+    if (!engine.scanMany(basePub, offsetBase, count, dispatches, &candidates, error)) return false;
+    const uint32_t total = count * dispatches;
+    if (candidates.size() != total) {
+        error = "Vulkan grouped result ring dropped a full-alphabet record";
+        return false;
+    }
+    std::vector<bool> seen(total, false);
+    for (const auto& candidate : candidates) {
+        if (candidate.gid >= total || seen[candidate.gid]) {
+            error = "Vulkan grouped result IDs are not unique";
+            return false;
+        }
+        seen[candidate.gid] = true;
+        SecretScalar scalar;
+        unsigned char xy[64]{};
+        if (!addOffset(base, offsetBase + candidate.gid, scalar.data()) ||
+            !publicXY(context, scalar.data(), xy) ||
+            tronAddressFromPubXY(xy) != candidate.address) {
+            error = "Vulkan grouped address differs from CPU reference";
+            return false;
+        }
+        const auto ids = dictionary.matchIds(candidate.address);
+        if (ids.empty() || candidate.count != std::min<size_t>(16, ids.size()) ||
+            candidate.flags != (ids.size() > 16 ? 1u : 0u) ||
+            !std::equal(ids.begin(), ids.begin() + candidate.count, candidate.ids.begin())) {
+            error = "Vulkan grouped dictionary record differs from CPU reference";
+            return false;
+        }
+    }
+    return std::all_of(seen.begin(), seen.end(), [](bool value) { return value; });
+}
+
 class VulkanResidentBackend final : public Backend {
 public:
     explicit VulkanResidentBackend(std::shared_ptr<const Dictionary> dictionary,
@@ -1067,6 +1106,12 @@ int vulkanResidentSelfTest() {
                 passed = false;
                 break;
             }
+        }
+        if (passed && !verifyGroupedScan(engine, context, *dictionary, base.data(),
+                                         255, 17, kResidentDispatches, error)) {
+            error = "curve batch " + std::to_string(batch) +
+                    ", grouped resident submit: " + error;
+            passed = false;
         }
         if (!passed) break;
     }

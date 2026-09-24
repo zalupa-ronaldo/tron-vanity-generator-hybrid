@@ -2,40 +2,36 @@
 
 The native Vulkan wallet backend is **experimental**. Source builds with
 `-DTRON_ENABLE_VULKAN=ON` have a generic dispatch probe, a native secp256k1
-10x26 field-math point stage, Keccak-256, SHA-256d, Base58Check and flattened
-dictionary matching. The curve stage can compute `P + G` or walk from one
-base point through three 8-bit offset-table windows; it currently inverts
-each result individually by default. An optional four-key shader shares one
-Montgomery inversion across four Jacobian Z values. It is built as separate
-SPIR-V so its larger live arrays cannot inflate register pressure in the
-default one-key variant. Both variants have now been profiled on the RX 9070 XT
-with the same 358-word dictionary; correctness passed, but wall throughput was
-only about 2.9-3.0 M keys/s versus about 104.6 M/s for staged OpenCL.
-The generic and deterministic stage tests do not save wallets. A separate
-reusable `--backend vulkan` path now runs full-address searches or no-wallet
-benchmarks, and has passed a no-wallet correctness/profile run on the RX
-9070 XT. The regular Windows
-release now includes the Vulkan code, while its adjacent config still selects
-OpenCL by default. Vulkan requires an explicit backend selection.
+10x26 field-math point stage, a separate batched-affine stage, Keccak-256,
+SHA-256d, Base58Check and flattened dictionary matching. The curve stage can
+compute `P + G` or walk from one base point through three 8-bit offset-table
+windows and leaves Jacobian points in GPU-only scratch. The affine stage then
+shares one Fermat inversion across 4 or 8 points (`--vulkan-affine-batch`).
+The earlier RX profile (2.9-3.0 M keys/s) predates this split and is not a
+measurement of the new pipeline. A new RX correctness gate and matched
+profile are required before making a performance claim. The generic and
+deterministic stage tests do not save wallets. Vulkan requires an explicit
+backend selection.
 
 ## Verified interface to preserve
 
-`vulkan/curve.comp` reads a `3 × 256 × 16`-word table at binding 7. Production
-mode 1 reads the one affine base point from push constants and computes
-`P0 + offset·G`, where the offset is a push-constant base plus the invocation
-ID; it writes 16 words per public key at binding 0. Deterministic test mode 0
-uses the per-key affine points at binding 6 and tests `P + G`, including
-doubling at `P = G`. The host derives every expected point independently with
-`libsecp256k1`; tested offsets cross 255/256, 65535/65536 and end at
-`2^22 - 1`. A compute barrier separates curve from Keccak.
-Mode 2 maps each invocation to up to four consecutive offsets. It now builds
-the first point from the offset table and walks `+G` for the remaining three
-points, avoiding redundant table lookups and mixed additions. It stores the
-four Jacobian points and prefix products of their Z coordinates, inverts the
-final product once, then walks backward to derive each `1/Z`. Partial groups
-of 1, 3 and 5 keys, table-window boundaries and the last valid offset are
-checked against CPU addresses. The host dispatches only `ceil(count/4)`
-invocations for the curve stage; later address stages still dispatch `count`.
+`vulkan/curve.comp` reads a `3 × 256 × 16`-word table at binding 7. In the
+production projective variant, mode 1 reads the one affine base point from
+push constants and computes `P0 + offset·G`, where the offset is a
+push-constant base plus the invocation ID; it writes 30 words per Jacobian
+point `(X,Y,Z)` to binding 5. Deterministic test mode 0 uses the per-key
+affine points at binding 6 and retains the direct affine output contract for
+the stage-test pipeline. The host derives every expected point independently
+with `libsecp256k1`; tested offsets cross 255/256, 65535/65536 and end at
+`2^22 - 1`.
+The production projective batch-4 variant builds the first point from the
+offset table and walks `+G` for the remaining three points, avoiding redundant
+table lookups and mixed additions. A separate affine variant reads binding 5,
+performs one batch inversion for 4 or 8 Z coordinates, reloads X/Y only while
+emitting affine public keys to binding 0, and handles a final partial group.
+Compute barriers separate curve→affine→Keccak. The host dispatches
+`ceil(count/curveBatch)` curve invocations, `ceil(count/affineBatch)` affine
+invocations, and `count` address/match invocations.
 
 `vulkan/keccak.comp` takes 16 little-endian `uint32_t` words per 64-byte
 uncompressed public key (`X||Y`, no `0x04` prefix) at storage binding 0. It

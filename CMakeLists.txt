@@ -148,8 +148,14 @@ if(TRON_ENABLE_VULKAN)
   set(VULKAN_MATCH_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_match_spv.h)
   set(VULKAN_CURVE_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve.spv)
   set(VULKAN_CURVE_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_spv.h)
-  set(VULKAN_CURVE_BATCH4_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_batch4.spv)
-  set(VULKAN_CURVE_BATCH4_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_batch4_spv.h)
+  set(VULKAN_CURVE_PROJECTIVE_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_projective.spv)
+  set(VULKAN_CURVE_PROJECTIVE_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_projective_spv.h)
+  set(VULKAN_CURVE_PROJECTIVE_BATCH4_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_projective_batch4.spv)
+  set(VULKAN_CURVE_PROJECTIVE_BATCH4_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_curve_projective_batch4_spv.h)
+  set(VULKAN_AFFINE_BATCH4_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_affine_batch4.spv)
+  set(VULKAN_AFFINE_BATCH4_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_affine_batch4_spv.h)
+  set(VULKAN_AFFINE_BATCH8_SPV ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_affine_batch8.spv)
+  set(VULKAN_AFFINE_BATCH8_GEN ${CMAKE_CURRENT_BINARY_DIR}/gen/vulkan_affine_batch8_spv.h)
   add_custom_command(OUTPUT ${VULKAN_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
     COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
@@ -204,16 +210,46 @@ if(TRON_ENABLE_VULKAN)
     COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_CURVE_SPV} -DOUT=${VULKAN_CURVE_GEN}
             -DNAME=kVulkanCurveSpv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
     DEPENDS ${VULKAN_CURVE_SPV} cmake/embed_spirv.cmake VERBATIM)
-  add_custom_command(OUTPUT ${VULKAN_CURVE_BATCH4_SPV}
+  add_custom_command(OUTPUT ${VULKAN_CURVE_PROJECTIVE_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
     COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
-            -DVULKAN_BATCH4=1 ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/curve.comp
-            -o ${VULKAN_CURVE_BATCH4_SPV}
+            -DVULKAN_PROJECTIVE=1 ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/curve.comp
+            -o ${VULKAN_CURVE_PROJECTIVE_SPV}
     DEPENDS vulkan/curve.comp VERBATIM)
-  add_custom_command(OUTPUT ${VULKAN_CURVE_BATCH4_GEN}
-    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_CURVE_BATCH4_SPV} -DOUT=${VULKAN_CURVE_BATCH4_GEN}
-            -DNAME=kVulkanCurveBatch4Spv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
-    DEPENDS ${VULKAN_CURVE_BATCH4_SPV} cmake/embed_spirv.cmake VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_CURVE_PROJECTIVE_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_CURVE_PROJECTIVE_SPV} -DOUT=${VULKAN_CURVE_PROJECTIVE_GEN}
+            -DNAME=kVulkanCurveProjectiveSpv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    DEPENDS ${VULKAN_CURVE_PROJECTIVE_SPV} cmake/embed_spirv.cmake VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_CURVE_PROJECTIVE_BATCH4_SPV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
+    COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
+            -DVULKAN_PROJECTIVE=1 -DVULKAN_BATCH4=1 ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/curve.comp
+            -o ${VULKAN_CURVE_PROJECTIVE_BATCH4_SPV}
+    DEPENDS vulkan/curve.comp VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_CURVE_PROJECTIVE_BATCH4_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_CURVE_PROJECTIVE_BATCH4_SPV} -DOUT=${VULKAN_CURVE_PROJECTIVE_BATCH4_GEN}
+            -DNAME=kVulkanCurveProjectiveBatch4Spv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    DEPENDS ${VULKAN_CURVE_PROJECTIVE_BATCH4_SPV} cmake/embed_spirv.cmake VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_AFFINE_BATCH4_SPV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
+    COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
+            -DVULKAN_AFFINE=1 -DVULKAN_AFFINE_BATCH=4 ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/curve.comp
+            -o ${VULKAN_AFFINE_BATCH4_SPV}
+    DEPENDS vulkan/curve.comp VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_AFFINE_BATCH4_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_AFFINE_BATCH4_SPV} -DOUT=${VULKAN_AFFINE_BATCH4_GEN}
+            -DNAME=kVulkanAffineBatch4Spv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    DEPENDS ${VULKAN_AFFINE_BATCH4_SPV} cmake/embed_spirv.cmake VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_AFFINE_BATCH8_SPV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/gen
+    COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 -S comp
+            -DVULKAN_AFFINE=1 -DVULKAN_AFFINE_BATCH=8 ${CMAKE_CURRENT_SOURCE_DIR}/vulkan/curve.comp
+            -o ${VULKAN_AFFINE_BATCH8_SPV}
+    DEPENDS vulkan/curve.comp VERBATIM)
+  add_custom_command(OUTPUT ${VULKAN_AFFINE_BATCH8_GEN}
+    COMMAND ${CMAKE_COMMAND} -DIN=${VULKAN_AFFINE_BATCH8_SPV} -DOUT=${VULKAN_AFFINE_BATCH8_GEN}
+            -DNAME=kVulkanAffineBatch8Spv -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+    DEPENDS ${VULKAN_AFFINE_BATCH8_SPV} cmake/embed_spirv.cmake VERBATIM)
   list(REMOVE_ITEM SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_probe_stub.cpp
                        ${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan_backend_stub.cpp)
   list(APPEND SRC vulkan/vulkan_probe.cpp vulkan/vulkan_keccak.cpp vulkan/vulkan_backend.cpp)
@@ -222,9 +258,17 @@ if(APPLE)
   list(APPEND SRC src/metal_backend.mm src/metal_hardware_profile.mm)
 endif()
 if(APPLE)
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN} ${VULKAN_MATCH_GEN} ${VULKAN_CURVE_GEN} ${VULKAN_CURVE_BATCH4_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${METAL_GEN} ${METAL_HW_GEN}
+    ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN}
+    ${VULKAN_MATCH_GEN} ${VULKAN_CURVE_GEN}
+    ${VULKAN_CURVE_PROJECTIVE_GEN} ${VULKAN_CURVE_PROJECTIVE_BATCH4_GEN}
+    ${VULKAN_AFFINE_BATCH4_GEN} ${VULKAN_AFFINE_BATCH8_GEN})
 else()
-  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN} ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN} ${VULKAN_MATCH_GEN} ${VULKAN_CURVE_GEN} ${VULKAN_CURVE_BATCH4_GEN})
+  add_executable(tron_vanity_generator ${SRC} ${KERNEL_GEN} ${VULKAN_GEN}
+    ${VULKAN_KECCAK_GEN} ${VULKAN_CHECKSUM_GEN} ${VULKAN_BASE58_GEN}
+    ${VULKAN_MATCH_GEN} ${VULKAN_CURVE_GEN}
+    ${VULKAN_CURVE_PROJECTIVE_GEN} ${VULKAN_CURVE_PROJECTIVE_BATCH4_GEN}
+    ${VULKAN_AFFINE_BATCH4_GEN} ${VULKAN_AFFINE_BATCH8_GEN})
 endif()
 target_include_directories(tron_vanity_generator PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/gen)
 target_link_libraries(tron_vanity_generator PRIVATE secp256k1 ${CMAKE_DL_LIBS})

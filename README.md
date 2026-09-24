@@ -128,10 +128,14 @@ passes the no-wallet correctness gate and full-address profile on the RX 9070
 XT. The published 2.9-3.0 M keys/s wall result is the pre-resident-group
 baseline; the new grouped-submit path still needs a matched RX measurement.
 Do not use it for funds until wallet output is independently checked.
-The conservative Vulkan curve mode inverts each point separately;
-experimental `--vulkan-curve-batch 4` shares one field inversion across four
-points and was about 3.5% faster than batch 1 on wall time, but remains far
-behind OpenCL.
+The current source branch uses a split Vulkan curve pipeline: the curve stage
+leaves Jacobian `(X,Y,Z)` points in GPU-only scratch, and a separate affine
+stage performs one field inversion across 4 or 8 points before writing public
+keys. `--vulkan-affine-batch 4` is the default because the same RX 9070 XT's
+measured OpenCL path favored batch 4; use `8` for an A/B run.
+The earlier 2.9-3.0 M keys/s numbers were measured before this split and must
+not be presented as its performance. A new RX correctness gate and matched
+wall profile are still required.
 The regular Windows ZIP includes `bench-vulkan.cmd` and `bench-vulkan.ps1` for
 a bounded, no-wallet Vulkan/OpenCL comparison. GitHub Actions also keeps a
 short-lived, standalone `vulkan-stage-test-windows-x64` artifact; it is not
@@ -168,26 +172,30 @@ host-visible buffer is device-local. GPU-stage rate excludes host work and
 must not be presented as wallet-search throughput. The backend prefers
 host-visible device-local memory when exposed; if the only coherent mapping
 is system memory, a future device-local buffer plus staging path may win.
-The batch-4 shader is compiled separately so the default batch-1 shader does
-not inherit its larger live point arrays. Compare both modes in A/B/A order
-with the same dictionary and no competing GPU workload; keep OpenCL as the
-RX default until Vulkan's host/queue overhead is addressed.
+The projective curve and affine batch-4/8 shaders are compiled separately, so
+large live arrays do not inflate the other variants. Compare curve batch 1/4
+and affine batch 4/8 in A/B/A order with the same dictionary and no competing
+GPU workload; keep OpenCL as the RX default until the split Vulkan path has a
+fresh correctness gate and matched profile.
 An opt-in Vulkan config may use `backend=vulkan` and
-`vulkan-curve-batch=4`; the bundled RX config remains on its proven OpenCL
-settings.
+`vulkan-curve-batch=4` plus `vulkan-affine-batch=4|8`; the bundled RX config
+remains on its proven OpenCL settings.
 
 The native Vulkan path submits 131,072 keys per GPU dispatch by default instead
 of 32,768, and records four such dispatches in one command buffer before one
 fence wait. That makes the default resident group 524,288 keys while keeping
 the intermediate buffers single-copy. Use `--vulkan-batch-keys 32768`,
 `65536`, `131072`, `262144`, `524288`, or `1048576` for an A/B run. The larger
-values are opt-in because they reserve more resident GPU memory (about 224 MiB
-of intermediate buffers plus up to 464 MiB for the four-dispatch match ring at
-1,048,576 keys, before the dictionary and driver alignment). Curve, Keccak,
-checksum, Base58 and dictionary matching remain GPU stages; the CPU only seeds
-a large scalar window, records four offsets, waits once, and validates reported
-matches before output. Matching records now carry the GPU-produced address, so
-the host does not read the full address buffer after every dispatch. The
+values are opt-in because they reserve more resident GPU memory: the split
+curve/affine path adds a 120-byte-per-key Jacobian scratch buffer, plus up to
+464 MiB for the four-dispatch match ring at 1,048,576 keys, before the
+dictionary and driver alignment. Curve, affine, Keccak, checksum, Base58 and
+dictionary matching remain GPU stages; the CPU only seeds a large scalar
+window, records four offsets, waits once, and validates reported matches
+before output. Intermediate points, hashes and addresses are never read by
+the CPU in the normal profile/search path. Matching records now carry the
+GPU-produced address, so the host reads only compact records after the fence.
+The
 64-byte public base point is passed through push constants rather than read
 from a host-visible storage buffer for every key. On the RX 9070 XT the
 selected allocation is host-visible device-local memory; if another Vulkan

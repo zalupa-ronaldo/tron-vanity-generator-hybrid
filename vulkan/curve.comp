@@ -3,6 +3,15 @@
 #ifndef VULKAN_BATCH4
 #define VULKAN_BATCH4 0
 #endif
+#ifndef VULKAN_PROJECTIVE
+#define VULKAN_PROJECTIVE 0
+#endif
+#ifndef VULKAN_AFFINE
+#define VULKAN_AFFINE 0
+#endif
+#ifndef VULKAN_AFFINE_BATCH
+#define VULKAN_AFFINE_BATCH 4
+#endif
 
 // Native Vulkan secp256k1 mixed point addition. Modes 0/1 retain the
 // one-key reference path. Mode 2 computes four keys per invocation and uses
@@ -12,6 +21,11 @@ layout(std430, set = 0, binding = 0) writeonly buffer PublicKeys { uint words[];
 // Kept for the deterministic P+G stage test. Production mode 1 uses the
 // push-constant base point below, so it does not read this buffer per key.
 layout(std430, set = 0, binding = 6) readonly buffer InputPoints { uint words[]; } inputs;
+// The production curve variant leaves points in Jacobian form.  The affine
+// variant of this source consumes the same binding and converts groups of
+// points with one field inversion.  Keeping the binding in the common shader
+// lets the test-only affine curve path retain its old ABI.
+layout(std430, set = 0, binding = 5) buffer ProjectivePoints { uint words[]; } projectives;
 layout(std430, set = 0, binding = 7) readonly buffer OffsetTable { uint words[]; } table;
 layout(push_constant) uniform Params {
     uint count;
@@ -440,7 +454,114 @@ void writePoint(uint gid, Gej point, Fe zi) {
     }
 }
 
+void writeProjective(uint gid, Gej point) {
+    uint base = gid * 30u;
+    for (uint i = 0u; i < 10u; ++i) projectives.words[base + i] = point.x.n[i];
+    for (uint i = 0u; i < 10u; ++i) projectives.words[base + 10u + i] = point.y.n[i];
+    for (uint i = 0u; i < 10u; ++i) projectives.words[base + 20u + i] = point.z.n[i];
+}
+
+Fe loadProjective(uint gid, uint field) {
+    Fe value;
+    uint base = gid * 30u + field * 10u;
+    for (uint i = 0u; i < 10u; ++i) value.n[i] = projectives.words[base + i];
+    return value;
+}
+
+#if VULKAN_AFFINE
+// The RX OpenCL A/B favored four points per inversion; the eight-point
+// variant remains available for a target-specific comparison. Reload X/Y only
+// during the backward pass so their limbs do not stay live while the prefix
+// products and inversion chain are evaluated.
+void affineEmit(uint gid, Fe zi, out Fe zOut) {
+    Gej point;
+    point.x = loadProjective(gid, 0u);
+    point.y = loadProjective(gid, 1u);
+    point.z = loadProjective(gid, 2u);
+    point.inf = false;
+    zOut = point.z;
+    writePoint(gid, point, zi);
+}
+
+void affineTail(uint first, uint batchCount) {
+    Fe z[VULKAN_AFFINE_BATCH];
+    Fe prefix[VULKAN_AFFINE_BATCH];
+    for (uint i = 0u; i < batchCount; ++i) {
+        z[i] = loadProjective(first + i, 2u);
+        prefix[i] = i == 0u ? z[i] : feMul(prefix[i - 1u], z[i]);
+    }
+    Fe inv = feInv(prefix[batchCount - 1u]);
+    for (int i = int(batchCount) - 1; i >= 0; --i) {
+        Fe zi = i == 0 ? inv : feMul(inv, prefix[uint(i) - 1u]);
+        // Use the already-loaded Z value; emit only reloads the point X/Y.
+        Gej point;
+        point.x = loadProjective(first + uint(i), 0u);
+        point.y = loadProjective(first + uint(i), 1u);
+        point.z = z[uint(i)];
+        point.inf = false;
+        writePoint(first + uint(i), point, zi);
+        if (i > 0) inv = feMul(inv, z[uint(i)]);
+    }
+}
+
+void affineBatch() {
+    uint first = gl_GlobalInvocationID.x * uint(VULKAN_AFFINE_BATCH);
+    if (first >= params.count) return;
+    uint batchCount = min(uint(VULKAN_AFFINE_BATCH), params.count - first);
+    if (batchCount != uint(VULKAN_AFFINE_BATCH)) {
+        affineTail(first, batchCount);
+        return;
+    }
+#if VULKAN_AFFINE_BATCH == 8
+    Fe p0 = loadProjective(first, 2u);
+    Fe z, p1, p2, p3, p4, p5, p6, product, inverse, zi;
+    z = loadProjective(first + 1u, 2u); p1 = feMul(p0, z);
+    z = loadProjective(first + 2u, 2u); p2 = feMul(p1, z);
+    z = loadProjective(first + 3u, 2u); p3 = feMul(p2, z);
+    z = loadProjective(first + 4u, 2u); p4 = feMul(p3, z);
+    z = loadProjective(first + 5u, 2u); p5 = feMul(p4, z);
+    z = loadProjective(first + 6u, 2u); p6 = feMul(p5, z);
+    z = loadProjective(first + 7u, 2u); product = feMul(p6, z);
+    inverse = feInv(product);
+    zi = feMul(inverse, p6); affineEmit(first + 7u, zi, z);
+    inverse = feMul(inverse, z);
+    zi = feMul(inverse, p5); affineEmit(first + 6u, zi, z);
+    inverse = feMul(inverse, z);
+    zi = feMul(inverse, p4); affineEmit(first + 5u, zi, z);
+    inverse = feMul(inverse, z);
+    zi = feMul(inverse, p3); affineEmit(first + 4u, zi, z);
+    inverse = feMul(inverse, z);
+    zi = feMul(inverse, p2); affineEmit(first + 3u, zi, z);
+    inverse = feMul(inverse, z);
+    zi = feMul(inverse, p1); affineEmit(first + 2u, zi, z);
+    inverse = feMul(inverse, z);
+    zi = feMul(inverse, p0); affineEmit(first + 1u, zi, z);
+    inverse = feMul(inverse, z);
+    affineEmit(first, inverse, z);
+#else
+    Fe z0 = loadProjective(first, 2u);
+    Fe z1 = loadProjective(first + 1u, 2u);
+    Fe z2 = loadProjective(first + 2u, 2u);
+    Fe z3 = loadProjective(first + 3u, 2u);
+    Fe p01 = feMul(z0, z1);
+    Fe p012 = feMul(p01, z2);
+    Fe product = feMul(p012, z3);
+    Fe inverse = feInv(product), t, zi;
+    zi = feMul(inverse, p012); affineEmit(first + 3u, zi, z3);
+    t = feMul(inverse, z3);
+    zi = feMul(t, p01); affineEmit(first + 2u, zi, z2);
+    t = feMul(t, z2);
+    zi = feMul(t, z0); affineEmit(first + 1u, zi, z1);
+    zi = feMul(t, z1); affineEmit(first, zi, z0);
+#endif
+}
+#endif
+
 void main() {
+#if VULKAN_AFFINE
+    affineBatch();
+    return;
+#else
     uint invocation = gl_GlobalInvocationID.x;
 #if VULKAN_BATCH4
     if (params.curveMode == 2u) {
@@ -448,7 +569,9 @@ void main() {
         if (first >= params.count) return;
         uint batchCount = min(4u, params.count - first);
         Gej points[4];
+#if !VULKAN_PROJECTIVE
         Fe prefix[4];
+#endif
         // The four scalars are consecutive. Build the first point from the
         // offset table only once, then walk +G in Jacobian coordinates on the
         // GPU. Recomputing each point independently needs up to 12 table
@@ -462,10 +585,17 @@ void main() {
         generator.inf = false;
         for (uint i = 0u; i < batchCount; ++i) {
             points[i] = current;
+#if !VULKAN_PROJECTIVE
             if (i == 0u) prefix[i] = points[i].z;
             else prefix[i] = feMul(prefix[i - 1u], points[i].z);
+#endif
             if (i + 1u < batchCount) current = gejAddGe(current, generator);
         }
+#if VULKAN_PROJECTIVE
+        for (uint i = 0u; i < batchCount; ++i)
+            writeProjective(first + i, points[i]);
+        return;
+#else
         // inv = 1 / product(Z[0..batchCount-1]). Walk backward to derive every
         // 1/Z[i] with one field inversion and 2*(batchCount-1) multiplications.
         Fe inv = feInv(prefix[batchCount - 1u]);
@@ -477,9 +607,15 @@ void main() {
             writePoint(first + uint(i), points[i], zi);
         }
         return;
+#endif
     }
 #endif
     if (invocation >= params.count) return;
     Gej point = computePoint(invocation, params.curveMode);
+#if VULKAN_PROJECTIVE
+    writeProjective(invocation, point);
+#else
     writePoint(invocation, point, feInv(point.z));
+#endif
+#endif
 }

@@ -3,8 +3,10 @@
 #include "crypto.h"
 #include "rng.h"
 
-#include "vulkan_curve_spv.h"
-#include "vulkan_curve_batch4_spv.h"
+#include "vulkan_curve_projective_spv.h"
+#include "vulkan_curve_projective_batch4_spv.h"
+#include "vulkan_affine_batch4_spv.h"
+#include "vulkan_affine_batch8_spv.h"
 #include "vulkan_keccak_spv.h"
 #include "vulkan_checksum_spv.h"
 #include "vulkan_base58_spv.h"
@@ -35,7 +37,7 @@ constexpr uint32_t kGroupSize = 64;
 constexpr uint32_t kBindings = 10;
 constexpr uint32_t kRingWords = 29;
 constexpr uint32_t kResidentDispatches = 4;
-constexpr uint32_t kStageCount = 5;
+constexpr uint32_t kStageCount = 6;
 constexpr uint32_t kQueryStride = kStageCount + 1;
 constexpr std::array<uint32_t, kBindings> kWordsPerKey = {
     16, 6, 7, 9, 0, 18, 0, 0, 0, kRingWords
@@ -91,9 +93,10 @@ static_assert(sizeof(PushConstants) == 104, "Vulkan push-constant ABI changed");
 class VulkanEngine {
 public:
     explicit VulkanEngine(std::shared_ptr<const Dictionary> dictionary,
-                          bool allowSoftware, uint32_t curveBatch, uint32_t batchKeys)
+                          bool allowSoftware, uint32_t curveBatch, uint32_t batchKeys,
+                          uint32_t affineBatch = 4)
         : dictionary_(std::move(dictionary)), allowSoftware_(allowSoftware),
-          curveBatch_(curveBatch), batchKeys_(batchKeys) {}
+          curveBatch_(curveBatch), batchKeys_(batchKeys), affineBatch_(affineBatch) {}
     VulkanEngine(const VulkanEngine&) = delete;
     VulkanEngine& operator=(const VulkanEngine&) = delete;
     ~VulkanEngine() {
@@ -181,6 +184,7 @@ private:
     uint32_t ringCapacity_ = 0;
     uint32_t curveBatch_ = 1;
     uint32_t batchKeys_ = kDefaultBatchKeys;
+    uint32_t affineBatch_ = 4;
     std::array<double, kStageCount> stageSeconds_{};
     std::array<double, 5> hostSeconds_{};
     uint64_t candidateRecords_ = 0;
@@ -282,7 +286,7 @@ bool VulkanEngine::init(std::string& error) {
         }
     }
     if (!physical_) {
-        error = "no hardware Vulkan compute device with shaderInt64 and 11 storage buffers";
+        error = "no hardware Vulkan compute device with shaderInt64 and 10 storage buffers";
         return false;
     }
     deviceName_ = selected.deviceName;
@@ -325,7 +329,11 @@ bool VulkanEngine::init(std::string& error) {
         sizes_[i] = i == 4 ? automaton.size() * sizeof(uint32_t) :
                     i == 6 ? 64 : i == 7 ? table.size() * sizeof(uint32_t) :
                     i == 8 ? 2 * sizeof(uint32_t) :
-                    i == 5 ? 18 * sizeof(uint32_t) :
+                    // Binding 5 is the GPU-only Jacobian scratch between the
+                    // projective curve and batched-affine stages.  It is not
+                    // read by the host and is intentionally larger than the
+                    // old 18-word match scratch.
+                    i == 5 ? VkDeviceSize(batchKeys_) * 30 * sizeof(uint32_t) :
                     i == 9 ? VkDeviceSize(ringCapacity_) * kRingWords * sizeof(uint32_t) :
                     VkDeviceSize(batchKeys_) * kWordsPerKey[i] * sizeof(uint32_t);
     }
@@ -420,14 +428,17 @@ bool VulkanEngine::init(std::string& error) {
         writes[i].pBufferInfo = &ranges[i];
     }
     vkUpdateDescriptorSets(device_, kBindings, writes.data(), 0, nullptr);
+    const uint32_t* affineCode = affineBatch_ == 4 ? kVulkanAffineBatch4Spv : kVulkanAffineBatch8Spv;
+    const size_t affineCodeSize = affineBatch_ == 4 ? sizeof(kVulkanAffineBatch4Spv) :
+                                  sizeof(kVulkanAffineBatch8Spv);
     const std::array<const uint32_t*, kStageCount> codes = {
-        curveBatch_ == 4 ? kVulkanCurveBatch4Spv : kVulkanCurveSpv,
-        kVulkanKeccakSpv, kVulkanChecksumSpv,
+        curveBatch_ == 4 ? kVulkanCurveProjectiveBatch4Spv : kVulkanCurveProjectiveSpv,
+        affineCode, kVulkanKeccakSpv, kVulkanChecksumSpv,
         kVulkanBase58Spv, kVulkanMatchSpv
     };
     const std::array<size_t, kStageCount> codeSizes = {
-        curveBatch_ == 4 ? sizeof(kVulkanCurveBatch4Spv) : sizeof(kVulkanCurveSpv),
-        sizeof(kVulkanKeccakSpv), sizeof(kVulkanChecksumSpv),
+        curveBatch_ == 4 ? sizeof(kVulkanCurveProjectiveBatch4Spv) : sizeof(kVulkanCurveProjectiveSpv),
+        affineCodeSize, sizeof(kVulkanKeccakSpv), sizeof(kVulkanChecksumSpv),
         sizeof(kVulkanBase58Spv), sizeof(kVulkanMatchSpv)
     };
     for (uint32_t i = 0; i < kStageCount; ++i) {
@@ -575,7 +586,8 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
                                 queryPool_, queryBase);
         for (uint32_t stage = 0; stage < kStageCount; ++stage) {
             vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_[stage]);
-            const uint32_t invocations = stage == 0 ? (count + curveBatch_ - 1) / curveBatch_ : count;
+            const uint32_t invocations = stage == 0 ? (count + curveBatch_ - 1) / curveBatch_ :
+                stage == 1 ? (count + affineBatch_ - 1) / affineBatch_ : count;
             vkCmdDispatch(command_, (invocations + kGroupSize - 1) / kGroupSize, 1, 1);
             if (queryThisBatch)
                 vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -777,9 +789,11 @@ bool verifyGroupedScan(VulkanEngine& engine, secp256k1_context* context,
 class VulkanResidentBackend final : public Backend {
 public:
     explicit VulkanResidentBackend(std::shared_ptr<const Dictionary> dictionary,
-                                   bool allowSoftware, uint32_t curveBatch, uint32_t batchKeys)
-        : dictionary_(std::move(dictionary)), engine_(dictionary_, allowSoftware, curveBatch, batchKeys),
-          curveBatch_(curveBatch), batchKeys_(batchKeys) {
+                                   bool allowSoftware, uint32_t curveBatch, uint32_t batchKeys,
+                                   uint32_t affineBatch)
+        : dictionary_(std::move(dictionary)),
+          engine_(dictionary_, allowSoftware, curveBatch, batchKeys, affineBatch),
+          curveBatch_(curveBatch), batchKeys_(batchKeys), affineBatch_(affineBatch) {
         context_ = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
     }
     ~VulkanResidentBackend() override {
@@ -800,6 +814,7 @@ public:
                             "Host-visible device-local memory" :
                             "Host-visible non-device-local memory; PCIe staging may be faster");
         out.lines.push_back("Curve batch: " + std::to_string(curveBatch_));
+        out.lines.push_back("Affine inversion batch: " + std::to_string(affineBatch_));
         out.lines.push_back("Submit batch: " + std::to_string(batchKeys_) + " keys");
         out.lines.push_back("Resident queue group: " + std::to_string(kResidentDispatches) +
                             " batches per fence");
@@ -822,6 +837,7 @@ public:
         if (!ensureReady()) { result.error = error_; return result; }
         result.device = engine_.deviceName();
         result.curveBatch = curveBatch_;
+        result.affineBatch = affineBatch_;
         result.batchKeys = batchKeys_;
         result.deviceLocalHostVisible = engine_.deviceLocalHostVisible();
         result.timestampsSupported = engine_.timestampsSupported();
@@ -988,6 +1004,10 @@ private:
             error_ = "Vulkan curve batch must be 1 or 4";
             return false;
         }
+        if (affineBatch_ != 4 && affineBatch_ != 8) {
+            error_ = "Vulkan affine batch must be 4 or 8";
+            return false;
+        }
         if (batchKeys_ != 32768 && batchKeys_ != 65536 &&
             batchKeys_ != 131072 && batchKeys_ != 262144 &&
             batchKeys_ != 524288 && batchKeys_ != 1048576) {
@@ -1042,6 +1062,7 @@ private:
     VulkanEngine engine_;
     uint32_t curveBatch_ = 1;
     uint32_t batchKeys_ = kDefaultBatchKeys;
+    uint32_t affineBatch_ = 4;
     secp256k1_context* context_ = nullptr;
     SecretScalar base_;
     std::array<unsigned char, 64> basePub_{};
@@ -1052,20 +1073,22 @@ private:
 }
 
 std::unique_ptr<Backend> makeVulkanResidentBackend(
-    std::shared_ptr<const Dictionary> dictionary, uint32_t curveBatch, uint32_t batchKeys) {
+    std::shared_ptr<const Dictionary> dictionary, uint32_t curveBatch, uint32_t batchKeys,
+    uint32_t affineBatch) {
     // Software Vulkan is for reproducible tests only; production selection
     // must not silently replace the requested GPU with CPU llvmpipe.
     const char* allow = std::getenv("TRON_VULKAN_ALLOW_SOFTWARE");
     return std::make_unique<VulkanResidentBackend>(std::move(dictionary),
                                                    allow && std::strcmp(allow, "1") == 0,
-                                                   curveBatch, batchKeys);
+                                                   curveBatch, batchKeys, affineBatch);
 }
 
 VulkanProfileResult profileVulkanResident(std::shared_ptr<const Dictionary> dictionary,
-                                          double seconds, uint32_t curveBatch, uint32_t batchKeys) {
+                                          double seconds, uint32_t curveBatch, uint32_t batchKeys,
+                                          uint32_t affineBatch) {
     const char* allow = std::getenv("TRON_VULKAN_ALLOW_SOFTWARE");
     VulkanResidentBackend backend(std::move(dictionary), allow && std::strcmp(allow, "1") == 0,
-                                  curveBatch, batchKeys);
+                                  curveBatch, batchKeys, affineBatch);
     return backend.profile(seconds);
 }
 
@@ -1085,7 +1108,7 @@ int vulkanResidentSelfTest() {
         // bounded CPU verification independent from the production throughput
         // batch; increasing the latter must not turn `test-vulkan` into a
         // multi-minute test or make the launcher kill it.
-        VulkanEngine engine(dictionary, true, batch, kSelfTestBatchKeys);
+        VulkanEngine engine(dictionary, true, batch, kSelfTestBatchKeys, 4);
         if (!engine.init(error)) {
             secp256k1_context_destroy(context);
             std::cerr << "Vulkan resident setup batch " << batch << ": " << error << "\n";
@@ -1116,11 +1139,21 @@ int vulkanResidentSelfTest() {
         }
         if (!passed) break;
     }
+    if (passed) {
+        VulkanEngine affine8(dictionary, true, 1, kSelfTestBatchKeys, 8);
+        if (!affine8.init(error) ||
+            !verifyScan(affine8, context, *dictionary, base.data(), 255, 65, error) ||
+            !verifyGroupedScan(affine8, context, *dictionary, base.data(),
+                               65535, 17, kResidentDispatches, error)) {
+            if (error.empty()) error = "Vulkan affine batch-8 equivalence failed";
+            passed = false;
+        }
+    }
     secp256k1_context_destroy(context);
     if (!passed) { std::cerr << "Vulkan resident test: " << error << "\n"; return 1; }
     for (uint32_t batch : {1u, 4u}) {
         auto backend = std::make_unique<VulkanResidentBackend>(dictionary, true, batch,
-                                                              kSelfTestBatchKeys);
+                                                              kSelfTestBatchKeys, 4);
         if (!backend || !backend->available()) {
             std::cerr << "Vulkan production backend batch " << batch << ": "
                       << (backend ? backend->note() : "not built") << "\n";

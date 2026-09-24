@@ -92,14 +92,16 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    fails closed; `test-vulkan` also exercises the production backend without
    writing wallets, including a full 32,768-slot ring and CSPRNG base
    rollover. The embedded 58-word Base58 alphabet guarantees one match per
-   address in that test. The default curve inverts each key separately; optional
-   `--vulkan-curve-batch 4` is a separately compiled four-key Montgomery
-   inversion variant. Mesa CPU/GPU equivalence and short software-driver
-   A/B/A profiles pass. A matched RX/OpenCL no-wallet A/B/A also passes:
-   OpenCL averages 104.635 M/s, Vulkan batch 1 averages 2.885 M/s and batch 4
-   averages 2.985 M/s. The RX reports host-visible device-local memory, while
-   about 4.2-4.4 seconds of each five-second Vulkan run is outside GPU stages.
-   The native backend is therefore correctness-tested but not performance-ready;
+   address in that test. The current prototype separates projective curve
+   output from a GPU-only affine stage; `--vulkan-affine-batch 4|8` selects
+   one inversion per four or eight points, while `--vulkan-curve-batch 1|4`
+   selects the projective curve walk. The new variants compile and validate
+   as SPIR-V locally, but need the RX correctness gate and a matched profile.
+   The earlier RX profile (OpenCL 104.635 M/s, Vulkan 2.885/2.985 M/s) predates
+   the split and must not be used as its performance result. The RX reports
+   host-visible device-local memory, while about 4.2-4.4 seconds of each
+   five-second pre-split Vulkan run was outside GPU stages. The native backend
+   is therefore still not performance-ready;
    do not recommend it for funds until a long-running wallet-output test is
    independently verified. The normal Windows ZIP and opt-in CI
    artifact both package `bench-vulkan.cmd`, which first
@@ -107,7 +109,8 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    batch 1 / batch 4 / OpenCL with bounded child processes and the same
    adjacent `words.txt`. Its `summary.txt` and `benchmark.csv` are safe to
    share; wallets are not produced. The underlying `--vulkan-profile
-   --vulkan-curve-batch 1|4 --bench-seconds 5` reports wall rate and per-stage
+   --vulkan-curve-batch 1|4 --vulkan-affine-batch 4|8 --bench-seconds 5`
+   reports wall rate and per-stage
    GPU timestamps (when supported), plus host-visible memory locality.
    Compare wall rate first. A non-device-local mapping may be limited by PCIe;
    test device-local scratch plus staging before optimizing shader math.

@@ -2,7 +2,8 @@
 param(
     [ValidateRange(30, 600)][int]$TimeoutSeconds = 120,
     [ValidateRange(1, 60)][int]$Seconds = 5,
-    [ValidateSet(32768, 65536, 131072, 262144, 524288, 1048576)][int]$VulkanBatchKeys = 131072
+    [ValidateSet(32768, 65536, 131072, 262144, 524288, 1048576)][int]$VulkanBatchKeys = 131072,
+    [ValidateSet(4, 8)][int]$VulkanAffineBatch = 4
 )
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
@@ -88,7 +89,7 @@ function Invoke-Bounded([string]$Name, [string[]]$Arguments) {
             }
         }
         foreach ($line in ($output -split '\r?\n')) {
-            if ($status -ne "PASS" -or $line -match '^(Vulkan resident|Vulkan full-address|OpenCL resident profile|curve batch:|submit batch:|memory:|wall[: ]|GPU stages|GPU stage time|Host wall intervals|candidate records|  (curve|affine|keccak|checksum|base58|match|setup|record|submit|fence wait|collect)[: ])') {
+            if ($status -ne "PASS" -or $line -match '^(Vulkan resident|Vulkan full-address|OpenCL resident profile|curve batch:|affine batch:|submit batch:|memory:|wall[: ]|GPU stages|GPU stage time|Host wall intervals|candidate records|  (curve|affine|keccak|checksum|base58|match|setup|record|submit|fence wait|collect)[: ])') {
                 if ($line) { Write-Report $line }
             }
         }
@@ -113,7 +114,7 @@ function Write-Summary {
 Write-Report "No wallets or private keys are printed or saved by these tests."
 Write-Report "Executable SHA-256: $((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)"
 Write-Report "Dictionary SHA-256: $((Get-FileHash -LiteralPath $words -Algorithm SHA256).Hash)"
-Write-Report "Order: Vulkan correctness; OpenCL / Vulkan 1 / Vulkan 4 / Vulkan 1 / Vulkan 4 / OpenCL."
+Write-Report "Order: Vulkan correctness; OpenCL / Vulkan 1 / Vulkan 4 / Vulkan 1 / Vulkan 4 / OpenCL. Affine batch: $VulkanAffineBatch."
 if (-not (Invoke-Bounded "01-vulkan-selftest" @("--no-config", "test-vulkan"))) {
     Write-Report "Vulkan correctness failed; no throughput comparison is trustworthy."
     Write-Summary
@@ -128,10 +129,10 @@ $opencl = @("--no-config", "--backend", "opencl", "--gpu-group-size", "64",
             "--opencl-profile", "--words", "words.txt", "--gpu-buffer-mb", "8",
             "--bench-seconds", $secondsToken)
 $vulkan1 = @("--no-config", "--backend", "vulkan", "--words", "words.txt",
-             "--vulkan-profile", "--vulkan-curve-batch", "1", "--vulkan-batch-keys",
+             "--vulkan-profile", "--vulkan-curve-batch", "1", "--vulkan-affine-batch", "$VulkanAffineBatch", "--vulkan-batch-keys",
              "$VulkanBatchKeys", "--bench-seconds", $secondsToken)
 $vulkan4 = @("--no-config", "--backend", "vulkan", "--words", "words.txt",
-             "--vulkan-profile", "--vulkan-curve-batch", "4", "--vulkan-batch-keys",
+             "--vulkan-profile", "--vulkan-curve-batch", "4", "--vulkan-affine-batch", "$VulkanAffineBatch", "--vulkan-batch-keys",
              "$VulkanBatchKeys", "--bench-seconds", $secondsToken)
 $allPassed = $true
 foreach ($run in @(

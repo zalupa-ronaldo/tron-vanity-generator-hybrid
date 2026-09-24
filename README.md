@@ -182,16 +182,16 @@ An opt-in Vulkan config may use `backend=vulkan` and
 remains on its proven OpenCL settings.
 
 The native Vulkan path submits 131,072 keys per GPU dispatch by default instead
-of 32,768, and records four such dispatches in one command buffer before one
-fence wait. That makes the default resident group 524,288 keys while keeping
+of 32,768, and records eight such dispatches in one command buffer before one
+fence wait. That makes the default resident group 1,048,576 keys while keeping
 the intermediate buffers single-copy. Use `--vulkan-batch-keys 32768`,
 `65536`, `131072`, `262144`, `524288`, or `1048576` for an A/B run. The larger
 values are opt-in because they reserve more resident GPU memory: the split
 curve/affine path adds a 120-byte-per-key Jacobian scratch buffer, plus up to
-464 MiB for the four-dispatch match ring at 1,048,576 keys, before the
+928 MiB for the eight-dispatch match ring at 1,048,576 keys, before the
 dictionary and driver alignment. Curve, affine, Keccak, checksum, Base58 and
 dictionary matching remain GPU stages; the CPU only seeds a large scalar
-window, records four offsets, waits once, and validates reported matches
+window, records eight offsets, waits once, and validates reported matches
 before output. Intermediate points, hashes and addresses are never read by
 the CPU in the normal profile/search path. Matching records now carry the
 GPU-produced address, so the host reads only compact records after the fence.

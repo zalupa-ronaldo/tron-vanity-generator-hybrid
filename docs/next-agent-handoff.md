@@ -129,8 +129,11 @@ reduce the batch blindly, or infer VGPR occupancy from logical array size.
    The measured Vulkan bottleneck is now concrete: the RX completed only about
    1.3 ms of GPU stages per 32,768-key dispatch, while the wall profile spent
    about 4.2-4.4 s outside those stages across roughly 440-457 dispatches in
-   five seconds. First prototype a larger bounded batch (for example 64K,
-   128K and 256K keys) with a correspondingly sized ring, and separately
+   five seconds. The resident command-buffer group is now eight logical
+   dispatches, so the next RX benchmark must measure whether the reduced fence
+   count moves wall rate toward the GPU-stage rate. If it does not, prototype
+   a larger bounded batch (for example 64K, 128K and 256K keys) with a
+   correspondingly sized ring, and separately
    measure fence wait, mapped-buffer/ring drain, address reconstruction and
    command-recording time. Keep the same full-address CPU verification and
    compare wall rate in A/B/A; do not infer a win from GPU timestamps alone.

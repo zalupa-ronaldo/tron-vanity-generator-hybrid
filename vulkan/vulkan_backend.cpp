@@ -36,7 +36,11 @@ constexpr uint32_t kBaseWindowKeys = 1u << 22;
 constexpr uint32_t kGroupSize = 64;
 constexpr uint32_t kBindings = 10;
 constexpr uint32_t kRingWords = 29;
-constexpr uint32_t kResidentDispatches = 4;
+// Keep more logical scans in one command buffer/fence cycle. The GPU
+// intermediates are still reused between passes; only the append-only match
+// ring grows with this value. Four passes left the RX 9070 XT spending most
+// of wall time in queue/fence/driver work rather than shader execution.
+constexpr uint32_t kResidentDispatches = 8;
 constexpr uint32_t kStageCount = 6;
 constexpr uint32_t kQueryStride = kStageCount + 1;
 constexpr std::array<uint32_t, kBindings> kWordsPerKey = {

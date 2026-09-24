@@ -104,7 +104,7 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    bounded batches while recording the exact dispatch count and push constants
    per submission. The default GPU batch is 131,072 keys (configurable to
    32,768/65,536/131,072/262,144/524,288/1,048,576), and the default resident
-   command group records four batches before one fence wait. This reduces fixed
+   command group records eight batches before one fence wait. This reduces fixed
    `vkQueueSubmit`/fence work without duplicating the intermediate buffers. The
    ring records also carry the GPU-generated address, so collection does not
    read the full address buffer for every pass. The profile reports host

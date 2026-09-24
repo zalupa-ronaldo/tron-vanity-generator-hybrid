@@ -825,6 +825,7 @@ public:
         result.batchKeys = batchKeys_;
         result.deviceLocalHostVisible = engine_.deviceLocalHostVisible();
         result.timestampsSupported = engine_.timestampsSupported();
+        result.residentDispatches = kResidentDispatches;
         // One unmeasured full-size batch primes JIT compilation, caches and
         // the fixed-base table before the bounded wall-clock measurement.
         if (!scanChunk(batchKeys_, nullptr)) { result.error = error_; return result; }

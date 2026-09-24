@@ -31,6 +31,7 @@ struct VulkanProfileResult {
     bool deviceLocalHostVisible = false;
     uint32_t curveBatch = 1;
     uint32_t batchKeys = 131072;
+    uint32_t residentDispatches = 4;
 };
 
 // Full-address, no-wallet wall/GPU-stage profile. No CPU or software fallback.

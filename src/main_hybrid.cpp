@@ -634,6 +634,7 @@ int main(int argc, char** argv) {
         std::cout << "Vulkan full-address profile (no wallets): " << p.device << "\n"
                   << "curve batch: " << p.curveBatch << "\n"
                   << "submit batch: " << p.batchKeys << " keys\n"
+                  << "resident group: " << p.residentDispatches << " GPU dispatches / fence\n"
                   << "memory: " << (p.deviceLocalHostVisible ? "host-visible device-local" :
                                        "host-visible non-device-local") << "\n"
                   << "wall: " << p.keys << " keys / " << std::fixed << std::setprecision(3)

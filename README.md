@@ -187,18 +187,20 @@ explicit Vulkan config). It controls how many GPU batches are recorded before
 one fence; it does not move any per-key work to the CPU. The supplied
 `bench-vulkan.ps1` exposes the same choice as `-VulkanResidentGroup`.
 
-The native Vulkan path submits 131,072 keys per GPU dispatch by default instead
-of 32,768, and records eight such dispatches in one command buffer before one
-fence wait. That makes the default resident group 1,048,576 keys while keeping
-the intermediate buffers single-copy. Use `--vulkan-batch-keys 32768`,
+The native Vulkan path submits 131,072 keys per logical batch by default instead
+of 32,768. It combines eight logical batches into one contiguous resident
+group (1,048,576 keys), records six GPU stage dispatches for that whole group,
+and waits on one fence. This removes the per-batch command-recording and
+barrier loop while keeping intermediate data in one GPU-only allocation. Use
+`--vulkan-batch-keys 32768`,
 `65536`, `131072`, `262144`, `524288`, or `1048576` for an A/B run. The larger
 values are opt-in because they reserve more resident GPU memory: the split
 curve/affine path adds a 120-byte-per-key Jacobian scratch buffer, plus up to
 928 MiB for the eight-dispatch match ring at 1,048,576 keys, before the
 dictionary and driver alignment. Curve, affine, Keccak, checksum, Base58 and
 dictionary matching remain GPU stages; the CPU only seeds a large scalar
-window, records eight offsets, waits once, and validates reported matches
-before output. Intermediate points, hashes and addresses are never read by
+window, supplies one base/offset for the resident group, waits once, and
+validates reported matches before output. Intermediate points, hashes and addresses are never read by
 the CPU in the normal profile/search path. Matching records now carry the
 GPU-produced address, so the host reads only compact records after the fence.
 All per-key stage buffers (public keys, payloads, checksums, Base58 text and

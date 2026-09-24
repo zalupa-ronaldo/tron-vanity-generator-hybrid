@@ -353,18 +353,21 @@ bool VulkanEngine::init(std::string& error) {
         sizes_[i] = i == 4 ? automaton.size() * sizeof(uint32_t) :
                     i == 6 ? 64 : i == 7 ? table.size() * sizeof(uint32_t) :
                     i == 8 ? 2 * sizeof(uint32_t) :
-                    // Binding 5 is the GPU-only Jacobian scratch between the
-                    // projective curve and batched-affine stages.  It is not
-                    // read by the host and is intentionally larger than the
-                    // old 18-word match scratch.
-                    i == 5 ? VkDeviceSize(batchKeys_) * 30 * sizeof(uint32_t) :
+                    // Bindings 0..3 and 5 are GPU-only stage storage.  A
+                    // resident group is recorded as one contiguous logical
+                    // batch, so each stage must cover every key in the
+                    // group, not just one pass.
+                    i == 5 ? VkDeviceSize(ringCapacity_) * 30 * sizeof(uint32_t) :
                     i == 9 ? VkDeviceSize(ringCapacity_) * kRingWords * sizeof(uint32_t) :
-                    VkDeviceSize(batchKeys_) * kWordsPerKey[i] * sizeof(uint32_t);
+                    VkDeviceSize(ringCapacity_) * kWordsPerKey[i] * sizeof(uint32_t);
     }
     const VkDeviceSize alignment = std::max<VkDeviceSize>(4, selected.limits.minStorageBufferOffsetAlignment);
     VkDeviceSize total = 0;
     stageTotal_ = 0;
     for (uint32_t i = 0; i < kBindings; ++i) {
+        if (sizes_[i] > selected.limits.maxStorageBufferRange) {
+            error = "Vulkan storage buffer range too small"; return false;
+        }
         if (i < 4 || i == 5) {
             // Per-key stage data is never touched by the host during a normal
             // search. Keep all of it out of the mapped result/static-data
@@ -379,9 +382,6 @@ bool VulkanEngine::init(std::string& error) {
         total = aligned(total, alignment);
         offsets_[i] = total;
         total += sizes_[i];
-        if (sizes_[i] > selected.limits.maxStorageBufferRange) {
-            error = "Vulkan storage buffer range too small"; return false;
-        }
     }
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bufferInfo.size = total;
@@ -585,7 +585,9 @@ bool VulkanEngine::init(std::string& error) {
         timestampPeriod_ > 0.0) {
         VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        queryInfo.queryCount = residentDispatches_ * kQueryStride;
+        // The resident group is now one contiguous dispatch per stage, so a
+        // single timestamp interval covers the whole group.
+        queryInfo.queryCount = kQueryStride;
         // Timestamp queries are optional instrumentation, not required for
         // correctness or normal wallet generation.
         if (vkCreateQueryPool(device_, &queryInfo, nullptr, &queryPool_) != VK_SUCCESS)
@@ -645,7 +647,12 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
     // constant path instead of issuing one storage-buffer load per key.
     std::memcpy(constants_.baseWords.data(), basePub,
                 constants_.baseWords.size() * sizeof(uint32_t));
-    constants_.count = count;
+    // A resident group is laid out as one contiguous logical batch.  The
+    // shaders therefore process all count*dispatches keys in one invocation
+    // range, which removes the per-pass dispatch/push-constant/barrier loop.
+    constants_.count = totalKeys;
+    constants_.offsetBase = offsetBase;
+    constants_.recordBase = 0;
     const auto setupDone = std::chrono::steady_clock::now();
     // There is only one primary command buffer. Resetting the buffer directly
     // avoids invalidating the whole pool on every bounded scan and lets the
@@ -657,7 +664,7 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
     if (!check(vkBeginCommandBuffer(command_, &begin), "vkBeginCommandBuffer")) return false;
     const bool queryThisBatch = profiling_ && queryPool_ != VK_NULL_HANDLE;
     if (queryThisBatch) {
-        vkCmdResetQueryPool(command_, queryPool_, 0, dispatches * kQueryStride);
+        vkCmdResetQueryPool(command_, queryPool_, 0, kQueryStride);
     }
     if (allAddresses) {
         // Deterministic no-wallet tests must not pass because an earlier
@@ -666,7 +673,8 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
         // stores into a mapped allocation.
         for (uint32_t binding = 0; binding < 4; ++binding)
             vkCmdFillBuffer(command_, scratchBuffer_, stageOffsets_[binding],
-                            sizes_[binding], 0xa5a5a5a5u);
+                            VkDeviceSize(count) * kWordsPerKey[binding] * sizeof(uint32_t),
+                            0xa5a5a5a5u);
     }
     // The result counter is device-owned state. Clearing it on the command
     // stream avoids a host write to the mapped result buffer for every batch.
@@ -682,39 +690,24 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    for (uint32_t pass = 0; pass < dispatches; ++pass) {
-        constants_.offsetBase = offsetBase + pass * count;
-        constants_.recordBase = pass * count;
-        vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof(constants_), &constants_);
-        const uint32_t queryBase = pass * kQueryStride;
+    vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(constants_), &constants_);
+    if (queryThisBatch)
+        vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            queryPool_, 0);
+    for (uint32_t stage = 0; stage < kStageCount; ++stage) {
+        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_[stage]);
+        const uint32_t invocations = stage == 0 ?
+            (totalKeys + curveBatch_ - 1) / curveBatch_ :
+            stage == 1 ? (totalKeys + affineBatch_ - 1) / affineBatch_ : totalKeys;
+        vkCmdDispatch(command_, (invocations + kGroupSize - 1) / kGroupSize, 1, 1);
         if (queryThisBatch)
             vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                queryPool_, queryBase);
-        for (uint32_t stage = 0; stage < kStageCount; ++stage) {
-            vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_[stage]);
-            const uint32_t invocations = stage == 0 ? (count + curveBatch_ - 1) / curveBatch_ :
-                stage == 1 ? (count + affineBatch_ - 1) / affineBatch_ : count;
-            vkCmdDispatch(command_, (invocations + kGroupSize - 1) / kGroupSize, 1, 1);
-            if (queryThisBatch)
-                vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                    queryPool_, queryBase + stage + 1);
-            if (stage + 1 < kStageCount)
-                vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                     0, 1, &barrier, 0, nullptr, 0, nullptr);
-        }
-        if (pass + 1 < dispatches) {
-            // The next curve pass overwrites the same intermediate buffers,
-            // while the ring remains append-only. Make this an explicit
-            // shader write -> shader read/write dependency and keep all of it
-            // on the GPU.
-            VkMemoryBarrier reuseBarrier = barrier;
-            reuseBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                                queryPool_, stage + 1);
+        if (stage + 1 < kStageCount)
             vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 0, 1, &reuseBarrier, 0, nullptr, 0, nullptr);
-        }
+                                 0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
     if (allAddresses) {
         VkMemoryBarrier copyBarrier = barrier;
@@ -760,7 +753,7 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
     }
     const auto fenceDone = std::chrono::steady_clock::now();
     if (queryThisBatch) {
-        std::vector<uint64_t> ticks(size_t(dispatches) * kQueryStride);
+        std::vector<uint64_t> ticks(kQueryStride);
         if (!check(vkGetQueryPoolResults(device_, queryPool_, 0,
                                          static_cast<uint32_t>(ticks.size()),
                                          ticks.size() * sizeof(uint64_t), ticks.data(),
@@ -769,17 +762,12 @@ bool VulkanEngine::scanInternal(const unsigned char basePub[64], uint32_t offset
                    "vkGetQueryPoolResults")) return false;
         const uint64_t mask = timestampValidBits_ == 64 ? ~uint64_t(0) :
                               ((uint64_t(1) << timestampValidBits_) - 1);
-        for (uint32_t pass = 0; pass < dispatches; ++pass) {
-            const uint32_t queryBase = pass * kQueryStride;
-            for (uint32_t stage = 0; stage < kStageCount; ++stage) {
-                const uint64_t elapsed = (ticks[queryBase + stage + 1] -
-                                          ticks[queryBase + stage]) & mask;
-                stageSeconds_[stage] += double(elapsed) * timestampPeriod_ * 1e-9;
-            }
-            const uint64_t elapsed = (ticks[queryBase + kStageCount] -
-                                      ticks[queryBase]) & mask;
-            gpuSeconds_ += double(elapsed) * timestampPeriod_ * 1e-9;
+        for (uint32_t stage = 0; stage < kStageCount; ++stage) {
+            const uint64_t elapsed = (ticks[stage + 1] - ticks[stage]) & mask;
+            stageSeconds_[stage] += double(elapsed) * timestampPeriod_ * 1e-9;
         }
+        const uint64_t elapsed = (ticks[kStageCount] - ticks[0]) & mask;
+        gpuSeconds_ += double(elapsed) * timestampPeriod_ * 1e-9;
     }
     const auto* meta = reinterpret_cast<const uint32_t*>(bytes + offsets_[8]);
     if (meta[0] > totalKeys || (meta[1] & 1u)) {
@@ -976,6 +964,7 @@ public:
         result.curveBatch = curveBatch_;
         result.affineBatch = affineBatch_;
         result.batchKeys = batchKeys_;
+        result.gpuStageDispatchesPerSubmit = kStageCount;
         result.deviceLocalHostVisible = engine_.deviceLocalHostVisible();
         result.gpuScratchDeviceLocal = engine_.gpuScratchDeviceLocal();
         result.timestampsSupported = engine_.timestampsSupported();

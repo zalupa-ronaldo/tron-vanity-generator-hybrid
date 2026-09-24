@@ -22,6 +22,7 @@ struct VulkanProfileResult {
     uint64_t keys = 0;
     uint64_t dispatches = 0;
     uint64_t queueSubmits = 0;
+    uint32_t gpuStageDispatchesPerSubmit = 6;
     double wallSeconds = 0.0;
     double gpuSeconds = 0.0;
     std::array<double, 6> stageSeconds{};

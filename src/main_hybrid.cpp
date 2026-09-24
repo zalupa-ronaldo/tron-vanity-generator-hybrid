@@ -670,6 +670,8 @@ int main(int argc, char** argv) {
                   << "wall: " << p.keys << " keys / " << std::fixed << std::setprecision(3)
                   << p.wallSeconds << " s, " << benchRate(wallRate)
                   << ", " << p.dispatches << " logical dispatches\n"
+                  << "GPU stage dispatches: " << p.gpuStageDispatchesPerSubmit
+                  << " per queue submit\n"
                   << "queue submits: " << p.queueSubmits << " (one fence wait each)\n";
         if (!p.timestampsSupported) {
             std::cout << "GPU stage timestamps unavailable on this Vulkan queue\n";

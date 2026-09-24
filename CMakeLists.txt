@@ -358,6 +358,7 @@ if(BUILD_TESTING)
       ENVIRONMENT "TRON_VULKAN_ALLOW_SOFTWARE=1" TIMEOUT 60)
     add_test(NAME vulkan_profile_field8 COMMAND tron_vanity_generator --no-config --backend vulkan
       --words ${CMAKE_CURRENT_SOURCE_DIR}/tests/vulkan_words.txt --vulkan-field 8x32
+      --vulkan-batch-keys 4096 --vulkan-resident-group 4
       --vulkan-profile --bench-seconds 0.1)
     set_tests_properties(vulkan_profile_field8 PROPERTIES
       ENVIRONMENT "TRON_VULKAN_ALLOW_SOFTWARE=1" TIMEOUT 60)

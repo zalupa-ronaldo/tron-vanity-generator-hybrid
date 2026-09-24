@@ -154,6 +154,11 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    10x26 multiply/square schedules and carries the 64-byte public base point
    in push constants; the RX wall-rate effect still needs a matched A/B. A
    long-running funded-wallet run remains unvalidated.
+   The experimental 8x32 field profile uses a bounded 4096/8192/16384-key
+   submit (`--vulkan-batch-keys 4096` is the CI and first-run choice); larger
+   8x32 profile submits are rejected early because some Windows AMD drivers
+   can hold the first dispatch behind the watchdog. This profile limit does
+   not restrict production search.
 Khronos's [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
 and [shader interface specification](https://docs.vulkan.org/spec/latest/chapters/interfaces.html)
 define dispatch/descriptor requirements. If experimenting with `clspv`, use

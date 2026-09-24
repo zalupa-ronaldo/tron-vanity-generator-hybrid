@@ -111,6 +111,7 @@ function Write-Summary {
 }
 
 Write-Report "No wallets or private keys are printed or saved by these tests."
+Write-Report "Executable SHA-256: $((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)"
 Write-Report "Dictionary SHA-256: $((Get-FileHash -LiteralPath $words -Algorithm SHA256).Hash)"
 Write-Report "Order: Vulkan correctness; OpenCL / Vulkan 1 / Vulkan 4 / Vulkan 1 / Vulkan 4 / OpenCL."
 if (-not (Invoke-Bounded "01-vulkan-selftest" @("--no-config", "test-vulkan"))) {

@@ -330,9 +330,8 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     const VkDeviceSize tableOffset = (baseOffset + inBytes + alignment - 1) / alignment * alignment;
     const VkDeviceSize metaOffset = (tableOffset + tableBytes + alignment - 1) / alignment * alignment;
     const VkDeviceSize ringOffset = (metaOffset + 2 * sizeof(uint32_t) + alignment - 1) / alignment * alignment;
-    const VkDeviceSize runtimeOffset = (ringOffset + ringBytes + alignment - 1) / alignment * alignment;
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bufferInfo.size = runtimeOffset + 4 * sizeof(uint32_t);
+    bufferInfo.size = ringOffset + ringBytes;
     bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(state.device, &bufferInfo, nullptr, &state.buffer), "vkCreateBuffer")) return false;
@@ -374,24 +373,21 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     std::memcpy(static_cast<unsigned char*>(mapped) + tableOffset, offsetTable.data(), tableBytes);
     std::memset(static_cast<unsigned char*>(mapped) + metaOffset, 0, 2 * sizeof(uint32_t));
     std::memset(static_cast<unsigned char*>(mapped) + ringOffset, kCanary, ringBytes);
-    const std::array<uint32_t, 4> runtime = {activeItems, offsetBase, 0u, 0u};
-    std::memcpy(static_cast<unsigned char*>(mapped) + runtimeOffset,
-                runtime.data(), sizeof(runtime));
     vkUnmapMemory(state.device, state.memory);
 
-    VkDescriptorSetLayoutBinding bindings[11]{};
-    for (uint32_t i = 0; i < 11; ++i) {
+    VkDescriptorSetLayoutBinding bindings[10]{};
+    for (uint32_t i = 0; i < 10; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = 11;
+    layoutInfo.bindingCount = 10;
     layoutInfo.pBindings = bindings;
     if (!check(vkCreateDescriptorSetLayout(state.device, &layoutInfo, nullptr, &state.descriptorLayout),
                "vkCreateDescriptorSetLayout")) return false;
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = 1;
     poolInfo.poolSizeCount = 1;
@@ -404,16 +400,15 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     setInfo.pSetLayouts = &state.descriptorLayout;
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (!check(vkAllocateDescriptorSets(state.device, &setInfo, &set), "vkAllocateDescriptorSets")) return false;
-    VkDescriptorBufferInfo ranges[11] = {
+    VkDescriptorBufferInfo ranges[10] = {
         {state.buffer, 0, inBytes}, {state.buffer, outputOffset, outBytes},
         {state.buffer, fullOffset, fullBytes}, {state.buffer, addressOffset, addressBytes},
         {state.buffer, automatonOffset, automatonBytes}, {state.buffer, matchOffset, matchBytes},
         {state.buffer, baseOffset, inBytes}, {state.buffer, tableOffset, tableBytes},
-        {state.buffer, metaOffset, 2 * sizeof(uint32_t)}, {state.buffer, ringOffset, ringBytes},
-        {state.buffer, runtimeOffset, 4 * sizeof(uint32_t)}
+        {state.buffer, metaOffset, 2 * sizeof(uint32_t)}, {state.buffer, ringOffset, ringBytes}
     };
-    VkWriteDescriptorSet writes[11]{};
-    for (uint32_t i = 0; i < 11; ++i) {
+    VkWriteDescriptorSet writes[10]{};
+    for (uint32_t i = 0; i < 10; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
         writes[i].dstBinding = i;
@@ -421,7 +416,7 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[i].pBufferInfo = &ranges[i];
     }
-    vkUpdateDescriptorSets(state.device, 11, writes, 0, nullptr);
+    vkUpdateDescriptorSets(state.device, 10, writes, 0, nullptr);
 
     VkShaderModuleCreateInfo shaderInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     shaderInfo.codeSize = sizeof(kVulkanKeccakSpv);
@@ -598,20 +593,25 @@ int vulkanKeccakSelfTest() {
         return 1;
     }
     for (uint32_t count : {1u, kRingCapacity, 63u, 64u, 65u, kItems}) {
+        std::cout << "Vulkan stage self-test: P+G/address batch " << count << " BEGIN\n" << std::flush;
         if (!runKeccak(count, 0u, 0u, offsetTable, error)) {
             std::cerr << "Vulkan P+G pipeline test failed at count " << count
                       << ": " << error << "\n";
             return error == "no Vulkan compute device with shaderInt64" ? 77 : 1;
         }
+        std::cout << "Vulkan stage self-test: P+G/address batch " << count << " PASS\n" << std::flush;
     }
     struct WalkCase { uint32_t count, offsetBase; };
     for (const WalkCase test : {WalkCase{1u, 0u}, WalkCase{65u, 255u},
                                 WalkCase{65u, 65535u}, WalkCase{65u, (1u << 22) - 65u}}) {
+        std::cout << "Vulkan stage self-test: offset walk " << test.offsetBase
+                  << ", count " << test.count << " BEGIN\n" << std::flush;
         if (!runKeccak(test.count, 1u, test.offsetBase, offsetTable, error)) {
             std::cerr << "Vulkan offset-walk pipeline test failed at count " << test.count
                       << ", offset " << test.offsetBase << ": " << error << "\n";
             return error == "no Vulkan compute device with shaderInt64" ? 77 : 1;
         }
+        std::cout << "Vulkan stage self-test: offset walk " << test.offsetBase << " PASS\n" << std::flush;
     }
     std::cout << "Vulkan curve walk + address + dictionary stages PASS "
                  "(P+G and 24-bit offset boundaries; no wallets)\n";

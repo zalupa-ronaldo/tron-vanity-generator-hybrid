@@ -32,11 +32,11 @@ constexpr uint32_t kDefaultBatchKeys = 1u << 17;
 constexpr uint32_t kSelfTestBatchKeys = 1u << 15;
 constexpr uint32_t kBaseWindowKeys = 1u << 22;
 constexpr uint32_t kGroupSize = 64;
-constexpr uint32_t kBindings = 11;
+constexpr uint32_t kBindings = 10;
 constexpr uint32_t kRingWords = 20;
 constexpr uint32_t kStageCount = 5;
 constexpr std::array<uint32_t, kBindings> kWordsPerKey = {
-    16, 6, 7, 9, 0, 18, 0, 0, 0, kRingWords, 0
+    16, 6, 7, 9, 0, 18, 0, 0, 0, kRingWords
 };
 
 struct SecretScalar {
@@ -142,7 +142,6 @@ private:
         return (size + alignment - 1) / alignment * alignment;
     }
     bool createTable(std::vector<uint32_t>& table, std::string& error);
-    bool recordCommandBuffer(std::string& error);
     std::string readAddress(uint32_t gid) const;
 
     std::shared_ptr<const Dictionary> dictionary_;
@@ -178,7 +177,6 @@ private:
     double timestampPeriod_ = 0.0;
     uint32_t timestampValidBits_ = 0;
     bool profiling_ = false;
-    bool commandRecorded_ = false;
     bool deviceLocalHostVisible_ = false;
     bool abandoned_ = false;
     bool injectDeviceLossOnceForTest_ = false;
@@ -315,7 +313,6 @@ bool VulkanEngine::init(std::string& error) {
         sizes_[i] = i == 4 ? automaton.size() * sizeof(uint32_t) :
                     i == 6 ? 64 : i == 7 ? table.size() * sizeof(uint32_t) :
                     i == 8 ? 2 * sizeof(uint32_t) :
-                    i == 10 ? 4 * sizeof(uint32_t) :
                     i == 5 ? 18 * sizeof(uint32_t) :
                     VkDeviceSize(batchKeys_) * kWordsPerKey[i] * sizeof(uint32_t);
     }
@@ -371,8 +368,6 @@ bool VulkanEngine::init(std::string& error) {
     std::memset(bytes, 0, static_cast<size_t>(total));
     std::memcpy(bytes + offsets_[4], automaton.data(), sizes_[4]);
     std::memcpy(bytes + offsets_[7], table.data(), sizes_[7]);
-    const std::array<uint32_t, 4> initialRuntime = {batchKeys_, 0u, 0u, 0u};
-    std::memcpy(bytes + offsets_[10], initialRuntime.data(), sizes_[10]);
     constants_.curveMode = curveBatch_ == 4 ? 2u : 1u;
     constants_.ringMode = 1;
     constants_.ringCapacity = batchKeys_;
@@ -468,60 +463,6 @@ bool VulkanEngine::init(std::string& error) {
         if (vkCreateQueryPool(device_, &queryInfo, nullptr, &queryPool_) != VK_SUCCESS)
             queryPool_ = VK_NULL_HANDLE;
     }
-    return recordCommandBuffer(error);
-}
-
-bool VulkanEngine::recordCommandBuffer(std::string& error) {
-    auto check = [&](VkResult result, const char* call) {
-        if (result == VK_SUCCESS) return true;
-        error = std::string(call) + " failed: " + std::to_string(result);
-        return false;
-    };
-    if (!command_) {
-        error = "Vulkan command buffer is unavailable";
-        return false;
-    }
-    if (!check(vkResetCommandPool(device_, commandPool_, 0), "vkResetCommandPool"))
-        return false;
-    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    if (!check(vkBeginCommandBuffer(command_, &begin), "vkBeginCommandBuffer"))
-        return false;
-    // Timestamps are recorded permanently when supported. They are collected
-    // only during profile runs, so normal scans do not need command-buffer
-    // re-recording just to turn instrumentation on or off.
-    if (queryPool_ != VK_NULL_HANDLE) {
-        vkCmdResetQueryPool(command_, queryPool_, 0, kStageCount + 1);
-        vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, 0);
-    }
-    vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_,
-                            0, 1, &descriptorSet_, 0, nullptr);
-    PushConstants staticConstants = constants_;
-    staticConstants.count = batchKeys_;
-    staticConstants.offsetBase = 0;
-    vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0, sizeof(staticConstants), &staticConstants);
-    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    for (uint32_t stage = 0; stage < kStageCount; ++stage) {
-        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_[stage]);
-        const uint32_t invocations = stage == 0 ?
-            (batchKeys_ + curveBatch_ - 1) / curveBatch_ : batchKeys_;
-        vkCmdDispatch(command_, (invocations + kGroupSize - 1) / kGroupSize, 1, 1);
-        if (queryPool_ != VK_NULL_HANDLE)
-            vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                queryPool_, stage + 1);
-        if (stage + 1 < kStageCount)
-            vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 0, 1, &barrier, 0, nullptr, 0, nullptr);
-    }
-    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT,
-                         0, 1, &barrier, 0, nullptr, 0, nullptr);
-    if (!check(vkEndCommandBuffer(command_), "vkEndCommandBuffer")) return false;
-    commandRecorded_ = true;
     return true;
 }
 
@@ -544,7 +485,7 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
         return false;
     };
     if (abandoned_) { error = "Vulkan device was abandoned after a GPU failure"; return false; }
-    if (!mapped_ || !commandRecorded_ || count == 0 || count > batchKeys_ ||
+    if (!mapped_ || count == 0 || count > batchKeys_ ||
         offsetBase > kBaseWindowKeys - count) {
         error = "invalid Vulkan scan range"; return false;
     }
@@ -552,18 +493,50 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     auto* bytes = static_cast<unsigned char*>(mapped_);
     std::memcpy(bytes + offsets_[6], basePub, 64);
     std::memset(bytes + offsets_[8], 0, sizes_[8]);
-    const std::array<uint32_t, 4> runtime = {count, offsetBase, 0u, 0u};
-    std::memcpy(bytes + offsets_[10], runtime.data(), sizes_[10]);
     if (allAddresses) {
         // Deterministic no-wallet tests must not pass because an earlier
         // dispatch left the expected addresses in the same mapped buffer.
         for (uint32_t binding = 0; binding < 4; ++binding)
             std::memset(bytes + offsets_[binding], 0xa5, sizes_[binding]);
     }
+    constants_.count = count;
+    constants_.offsetBase = offsetBase;
     const auto setupDone = std::chrono::steady_clock::now();
-    if (!check(vkResetFences(device_, 1, &fence_), "vkResetFences")) return false;
+    if (!check(vkResetCommandPool(device_, commandPool_, 0), "vkResetCommandPool") ||
+        !check(vkResetFences(device_, 1, &fence_), "vkResetFences")) return false;
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (!check(vkBeginCommandBuffer(command_, &begin), "vkBeginCommandBuffer")) return false;
     const bool queryThisBatch = profiling_ && queryPool_ != VK_NULL_HANDLE;
-    const auto recordDone = setupDone;
+    if (queryThisBatch) {
+        vkCmdResetQueryPool(command_, queryPool_, 0, kStageCount + 1);
+        vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, 0);
+    }
+    vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_,
+                            0, 1, &descriptorSet_, 0, nullptr);
+    vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(constants_), &constants_);
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    for (uint32_t stage = 0; stage < kStageCount; ++stage) {
+        vkCmdBindPipeline(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines_[stage]);
+        const uint32_t invocations = stage == 0 ? (count + curveBatch_ - 1) / curveBatch_ : count;
+        vkCmdDispatch(command_, (invocations + kGroupSize - 1) / kGroupSize, 1, 1);
+        if (queryThisBatch)
+            vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                queryPool_, stage + 1);
+        if (stage + 1 < kStageCount)
+            vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+    if (!check(vkEndCommandBuffer(command_), "vkEndCommandBuffer")) return false;
+    const auto recordDone = std::chrono::steady_clock::now();
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_;
@@ -812,20 +785,24 @@ public:
     }
     bool selfTestRollover() {
         if (!ensureReady()) return false;
-        // Force one full dispatch to finish precisely at the end of the
-        // 22-bit offset window. The next one-key dispatch must choose a fresh
-        // CSPRNG base; production run() verifies every ring candidate.
+        // Exercise the final valid offset and the next-base transition with
+        // two one-key chunks. Scanning an entire full-alphabet batch here
+        // would make the test spend most of its time re-deriving thousands of
+        // deterministic public keys on the CPU, without testing another
+        // rollover invariant.
         base_.bytes.fill(0);
         base_.bytes[31] = 1;
         if (!publicXY(context_, base_.data(), basePub_.data())) {
             error_ = "Vulkan rollover test base point failed";
             return false;
         }
+        SecretScalar originalBase;
+        std::memcpy(originalBase.data(), base_.data(), originalBase.bytes.size());
         baseReady_ = true;
-        offsetBase_ = kBaseWindowKeys - batchKeys_;
+        offsetBase_ = kBaseWindowKeys - 1;
         RunConfig config;
         config.dictionary = dictionary_;
-        config.maxAttempts = batchKeys_ + 1;
+        config.maxAttempts = 1;
         config.seconds = 0;
         RunState state;
         bool validReports = true;
@@ -834,13 +811,21 @@ public:
                             !key.words.empty();
         });
         if (!validReports || !error_.empty() || state.stop.load() ||
-            state.checked.load() != batchKeys_ + 1 ||
-            state.gpuChecked.load() != batchKeys_ + 1 ||
-            state.found.load() != batchKeys_ + 1 ||
-            offsetBase_ != 1 ||
-            (std::all_of(base_.bytes.begin(), base_.bytes.end() - 1,
-                         [](unsigned char byte) { return byte == 0; }) && base_.bytes[31] == 1)) {
+            state.checked.load() != 1 || state.gpuChecked.load() != 1 ||
+            state.found.load() != 1 || offsetBase_ != kBaseWindowKeys) {
             if (error_.empty()) error_ = "Vulkan base rollover or bounded production run failed";
+            return false;
+        }
+        std::vector<Candidate> candidates;
+        if (!scanChunk(1, &candidates) || !error_.empty() || candidates.size() != 1 ||
+            offsetBase_ != 1 || base_.bytes == originalBase.bytes) {
+            if (error_.empty()) error_ = "Vulkan CSPRNG base did not roll over after the final offset";
+            return false;
+        }
+        unsigned char xy[64]{};
+        if (!publicXY(context_, base_.data(), xy) ||
+            tronAddressFromPubXY(xy) != candidates.front().address) {
+            error_ = "Vulkan post-rollover base does not match the scanned address";
             return false;
         }
         return true;

@@ -151,7 +151,7 @@ private:
     std::string readAddress(uint32_t gid) const;
     static std::string decodeAddress(const uint32_t* words);
     bool scanInternal(const unsigned char basePub[64], uint32_t offsetBase, uint32_t count,
-                      uint32_t dispatches, std::vector<Candidate>& candidates,
+                      uint32_t dispatches, std::vector<Candidate>* candidates,
                       std::vector<std::string>* allAddresses, std::string& error);
 
     std::shared_ptr<const Dictionary> dictionary_;

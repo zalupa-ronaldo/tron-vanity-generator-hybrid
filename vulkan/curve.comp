@@ -8,7 +8,6 @@
 // one-key reference path. Mode 2 computes four keys per invocation and uses
 // one Montgomery batch inversion for their four Jacobian Z coordinates.
 layout(local_size_x = 64) in;
-layout(std430, set = 0, binding = 6) readonly buffer InputPoints { uint words[]; } inputs;
 layout(std430, set = 0, binding = 0) writeonly buffer PublicKeys { uint words[]; } publics;
 layout(std430, set = 0, binding = 7) readonly buffer OffsetTable { uint words[]; } table;
 layout(push_constant) uniform Params {
@@ -19,6 +18,9 @@ layout(push_constant) uniform Params {
     uint outIdsOffset;
     uint curveMode;
     uint offsetBase;
+    uint ringMode;
+    uint ringCapacity;
+    uint baseWords[16];
 } params;
 
 struct Fe { uint n[10]; };
@@ -28,52 +30,197 @@ const uint64_t MASK26 = 0x3fffffful;
 const uint64_t R0 = 0x3d10ul;
 const uint64_t R1 = 0x400ul;
 
-uint64_t mulWide(uint a, uint b) { return uint64_t(a) * uint64_t(b); }
-
 // The 10x26 reduction is the same field representation as the OpenCL stage.
-// This loop form keeps the first Vulkan port auditable against fe_mul_inner.
+// Keep the multiply and square schedules explicit.  The former loop-based
+// Vulkan port made every square go through a generic multiply and left the
+// compiler to recover the convolution schedule from dynamically indexed
+// arrays.  The OpenCL implementation already uses these fixed schedules; the
+// explicit form gives the Vulkan compiler the same instruction-level shape.
 Fe feMul(Fe a, Fe b) {
-    uint64_t d = 0ul;
-    for (int i = 0; i < 10; ++i) d += mulWide(a.n[i], b.n[9 - i]);
-    uint t9 = uint(d & MASK26);
-    d >>= 26;
-    uint64_t c = mulWide(a.n[0], b.n[0]);
-    uint t[8];
-    for (int k = 0; k < 8; ++k) {
-        for (int i = k + 1; i < 10; ++i)
-            d += mulWide(a.n[i], b.n[k + 10 - i]);
-        uint64_t u = d & MASK26;
-        d >>= 26;
-        c += u * R0;
-        t[k] = uint(c & MASK26);
-        c >>= 26;
-        c += u * R1;
-        for (int i = 0; i <= k + 1; ++i)
-            c += mulWide(a.n[i], b.n[k + 1 - i]);
-    }
-    d += mulWide(a.n[9], b.n[9]);
-    uint64_t u8 = d & MASK26;
-    d >>= 26;
-    c += u8 * R0;
+    const uint64_t M = 0x3fffffful;
+    const uint64_t R0 = 0x3d10ul;
+    const uint64_t R1 = 0x400ul;
+    uint64_t c, d;
+    uint64_t u0, u1, u2, u3, u4, u5, u6, u7, u8;
+    uint t9, t0, t1, t2, t3, t4, t5, t6, t7;
+
+    d = uint64_t(a.n[0]) * b.n[9] + uint64_t(a.n[1]) * b.n[8] +
+        uint64_t(a.n[2]) * b.n[7] + uint64_t(a.n[3]) * b.n[6] +
+        uint64_t(a.n[4]) * b.n[5] + uint64_t(a.n[5]) * b.n[4] +
+        uint64_t(a.n[6]) * b.n[3] + uint64_t(a.n[7]) * b.n[2] +
+        uint64_t(a.n[8]) * b.n[1] + uint64_t(a.n[9]) * b.n[0];
+    t9 = uint(d & M); d >>= 26;
+
+    c = uint64_t(a.n[0]) * b.n[0];
+    d += uint64_t(a.n[1]) * b.n[9] + uint64_t(a.n[2]) * b.n[8] +
+         uint64_t(a.n[3]) * b.n[7] + uint64_t(a.n[4]) * b.n[6] +
+         uint64_t(a.n[5]) * b.n[5] + uint64_t(a.n[6]) * b.n[4] +
+         uint64_t(a.n[7]) * b.n[3] + uint64_t(a.n[8]) * b.n[2] +
+         uint64_t(a.n[9]) * b.n[1];
+    u0 = d & M; d >>= 26; c += u0 * R0;
+    t0 = uint(c & M); c >>= 26; c += u0 * R1;
+
+    c += uint64_t(a.n[0]) * b.n[1] + uint64_t(a.n[1]) * b.n[0];
+    d += uint64_t(a.n[2]) * b.n[9] + uint64_t(a.n[3]) * b.n[8] +
+         uint64_t(a.n[4]) * b.n[7] + uint64_t(a.n[5]) * b.n[6] +
+         uint64_t(a.n[6]) * b.n[5] + uint64_t(a.n[7]) * b.n[4] +
+         uint64_t(a.n[8]) * b.n[3] + uint64_t(a.n[9]) * b.n[2];
+    u1 = d & M; d >>= 26; c += u1 * R0;
+    t1 = uint(c & M); c >>= 26; c += u1 * R1;
+
+    c += uint64_t(a.n[0]) * b.n[2] + uint64_t(a.n[1]) * b.n[1] +
+         uint64_t(a.n[2]) * b.n[0];
+    d += uint64_t(a.n[3]) * b.n[9] + uint64_t(a.n[4]) * b.n[8] +
+         uint64_t(a.n[5]) * b.n[7] + uint64_t(a.n[6]) * b.n[6] +
+         uint64_t(a.n[7]) * b.n[5] + uint64_t(a.n[8]) * b.n[4] +
+         uint64_t(a.n[9]) * b.n[3];
+    u2 = d & M; d >>= 26; c += u2 * R0;
+    t2 = uint(c & M); c >>= 26; c += u2 * R1;
+
+    c += uint64_t(a.n[0]) * b.n[3] + uint64_t(a.n[1]) * b.n[2] +
+         uint64_t(a.n[2]) * b.n[1] + uint64_t(a.n[3]) * b.n[0];
+    d += uint64_t(a.n[4]) * b.n[9] + uint64_t(a.n[5]) * b.n[8] +
+         uint64_t(a.n[6]) * b.n[7] + uint64_t(a.n[7]) * b.n[6] +
+         uint64_t(a.n[8]) * b.n[5] + uint64_t(a.n[9]) * b.n[4];
+    u3 = d & M; d >>= 26; c += u3 * R0;
+    t3 = uint(c & M); c >>= 26; c += u3 * R1;
+
+    c += uint64_t(a.n[0]) * b.n[4] + uint64_t(a.n[1]) * b.n[3] +
+         uint64_t(a.n[2]) * b.n[2] + uint64_t(a.n[3]) * b.n[1] +
+         uint64_t(a.n[4]) * b.n[0];
+    d += uint64_t(a.n[5]) * b.n[9] + uint64_t(a.n[6]) * b.n[8] +
+         uint64_t(a.n[7]) * b.n[7] + uint64_t(a.n[8]) * b.n[6] +
+         uint64_t(a.n[9]) * b.n[5];
+    u4 = d & M; d >>= 26; c += u4 * R0;
+    t4 = uint(c & M); c >>= 26; c += u4 * R1;
+
+    c += uint64_t(a.n[0]) * b.n[5] + uint64_t(a.n[1]) * b.n[4] +
+         uint64_t(a.n[2]) * b.n[3] + uint64_t(a.n[3]) * b.n[2] +
+         uint64_t(a.n[4]) * b.n[1] + uint64_t(a.n[5]) * b.n[0];
+    d += uint64_t(a.n[6]) * b.n[9] + uint64_t(a.n[7]) * b.n[8] +
+         uint64_t(a.n[8]) * b.n[7] + uint64_t(a.n[9]) * b.n[6];
+    u5 = d & M; d >>= 26; c += u5 * R0;
+    t5 = uint(c & M); c >>= 26; c += u5 * R1;
+
+    c += uint64_t(a.n[0]) * b.n[6] + uint64_t(a.n[1]) * b.n[5] +
+         uint64_t(a.n[2]) * b.n[4] + uint64_t(a.n[3]) * b.n[3] +
+         uint64_t(a.n[4]) * b.n[2] + uint64_t(a.n[5]) * b.n[1] +
+         uint64_t(a.n[6]) * b.n[0];
+    d += uint64_t(a.n[7]) * b.n[9] + uint64_t(a.n[8]) * b.n[8] +
+         uint64_t(a.n[9]) * b.n[7];
+    u6 = d & M; d >>= 26; c += u6 * R0;
+    t6 = uint(c & M); c >>= 26; c += u6 * R1;
+
+    c += uint64_t(a.n[0]) * b.n[7] + uint64_t(a.n[1]) * b.n[6] +
+         uint64_t(a.n[2]) * b.n[5] + uint64_t(a.n[3]) * b.n[4] +
+         uint64_t(a.n[4]) * b.n[3] + uint64_t(a.n[5]) * b.n[2] +
+         uint64_t(a.n[6]) * b.n[1] + uint64_t(a.n[7]) * b.n[0];
+    d += uint64_t(a.n[8]) * b.n[9] + uint64_t(a.n[9]) * b.n[8];
+    u7 = d & M; d >>= 26; c += u7 * R0;
+    t7 = uint(c & M); c >>= 26; c += u7 * R1;
+
+    c += uint64_t(a.n[0]) * b.n[8] + uint64_t(a.n[1]) * b.n[7] +
+         uint64_t(a.n[2]) * b.n[6] + uint64_t(a.n[3]) * b.n[5] +
+         uint64_t(a.n[4]) * b.n[4] + uint64_t(a.n[5]) * b.n[3] +
+         uint64_t(a.n[6]) * b.n[2] + uint64_t(a.n[7]) * b.n[1] +
+         uint64_t(a.n[8]) * b.n[0];
+    d += uint64_t(a.n[9]) * b.n[9];
+    u8 = d & M; d >>= 26; c += u8 * R0;
+
     Fe r;
-    for (int i = 3; i <= 7; ++i) r.n[i] = t[i];
-    r.n[8] = uint(c & MASK26);
-    c >>= 26;
-    c += u8 * R1 + d * R0 + uint64_t(t9);
-    r.n[9] = uint(c & (MASK26 >> 4));
-    c >>= 22;
-    c += d * (R1 << 4);
-    d = c * (R0 >> 4) + uint64_t(t[0]);
-    r.n[0] = uint(d & MASK26);
-    d >>= 26;
-    d += c * (R1 >> 4) + uint64_t(t[1]);
-    r.n[1] = uint(d & MASK26);
-    d >>= 26;
-    r.n[2] = uint(d + uint64_t(t[2]));
+    r.n[3] = t3; r.n[4] = t4; r.n[5] = t5; r.n[6] = t6; r.n[7] = t7;
+    r.n[8] = uint(c & M); c >>= 26; c += u8 * R1;
+    c += d * R0 + uint64_t(t9);
+    r.n[9] = uint(c & (M >> 4)); c >>= 22; c += d * (R1 << 4);
+    d = c * (R0 >> 4) + uint64_t(t0);
+    r.n[0] = uint(d & M); d >>= 26;
+    d += c * (R1 >> 4) + uint64_t(t1);
+    r.n[1] = uint(d & M); d >>= 26;
+    r.n[2] = uint(d + uint64_t(t2));
     return r;
 }
 
-Fe feSqr(Fe a) { return feMul(a, a); }
+Fe feSqr(Fe a) {
+    const uint64_t M = 0x3fffffful;
+    const uint64_t R0 = 0x3d10ul;
+    const uint64_t R1 = 0x400ul;
+    uint64_t c, d;
+    uint64_t u0, u1, u2, u3, u4, u5, u6, u7, u8;
+    uint t9, t0, t1, t2, t3, t4, t5, t6, t7;
+
+    d = uint64_t(a.n[0] * 2u) * a.n[9] + uint64_t(a.n[1] * 2u) * a.n[8] +
+        uint64_t(a.n[2] * 2u) * a.n[7] + uint64_t(a.n[3] * 2u) * a.n[6] +
+        uint64_t(a.n[4] * 2u) * a.n[5];
+    t9 = uint(d & M); d >>= 26;
+
+    c = uint64_t(a.n[0]) * a.n[0];
+    d += uint64_t(a.n[1] * 2u) * a.n[9] + uint64_t(a.n[2] * 2u) * a.n[8] +
+         uint64_t(a.n[3] * 2u) * a.n[7] + uint64_t(a.n[4] * 2u) * a.n[6] +
+         uint64_t(a.n[5]) * a.n[5];
+    u0 = d & M; d >>= 26; c += u0 * R0;
+    t0 = uint(c & M); c >>= 26; c += u0 * R1;
+
+    c += uint64_t(a.n[0] * 2u) * a.n[1];
+    d += uint64_t(a.n[2] * 2u) * a.n[9] + uint64_t(a.n[3] * 2u) * a.n[8] +
+         uint64_t(a.n[4] * 2u) * a.n[7] + uint64_t(a.n[5] * 2u) * a.n[6];
+    u1 = d & M; d >>= 26; c += u1 * R0;
+    t1 = uint(c & M); c >>= 26; c += u1 * R1;
+
+    c += uint64_t(a.n[0] * 2u) * a.n[2] + uint64_t(a.n[1]) * a.n[1];
+    d += uint64_t(a.n[3] * 2u) * a.n[9] + uint64_t(a.n[4] * 2u) * a.n[8] +
+         uint64_t(a.n[5] * 2u) * a.n[7] + uint64_t(a.n[6]) * a.n[6];
+    u2 = d & M; d >>= 26; c += u2 * R0;
+    t2 = uint(c & M); c >>= 26; c += u2 * R1;
+
+    c += uint64_t(a.n[0] * 2u) * a.n[3] + uint64_t(a.n[1] * 2u) * a.n[2];
+    d += uint64_t(a.n[4] * 2u) * a.n[9] + uint64_t(a.n[5] * 2u) * a.n[8] +
+         uint64_t(a.n[6] * 2u) * a.n[7];
+    u3 = d & M; d >>= 26; c += u3 * R0;
+    t3 = uint(c & M); c >>= 26; c += u3 * R1;
+
+    c += uint64_t(a.n[0] * 2u) * a.n[4] + uint64_t(a.n[1] * 2u) * a.n[3] +
+         uint64_t(a.n[2]) * a.n[2];
+    d += uint64_t(a.n[5] * 2u) * a.n[9] + uint64_t(a.n[6] * 2u) * a.n[8] +
+         uint64_t(a.n[7]) * a.n[7];
+    u4 = d & M; d >>= 26; c += u4 * R0;
+    t4 = uint(c & M); c >>= 26; c += u4 * R1;
+
+    c += uint64_t(a.n[0] * 2u) * a.n[5] + uint64_t(a.n[1] * 2u) * a.n[4] +
+         uint64_t(a.n[2] * 2u) * a.n[3];
+    d += uint64_t(a.n[6] * 2u) * a.n[9] + uint64_t(a.n[7] * 2u) * a.n[8];
+    u5 = d & M; d >>= 26; c += u5 * R0;
+    t5 = uint(c & M); c >>= 26; c += u5 * R1;
+
+    c += uint64_t(a.n[0] * 2u) * a.n[6] + uint64_t(a.n[1] * 2u) * a.n[5] +
+         uint64_t(a.n[2] * 2u) * a.n[4] + uint64_t(a.n[3]) * a.n[3];
+    d += uint64_t(a.n[7] * 2u) * a.n[9] + uint64_t(a.n[8]) * a.n[8];
+    u6 = d & M; d >>= 26; c += u6 * R0;
+    t6 = uint(c & M); c >>= 26; c += u6 * R1;
+
+    c += uint64_t(a.n[0] * 2u) * a.n[7] + uint64_t(a.n[1] * 2u) * a.n[6] +
+         uint64_t(a.n[2] * 2u) * a.n[5] + uint64_t(a.n[3] * 2u) * a.n[4];
+    d += uint64_t(a.n[8] * 2u) * a.n[9];
+    u7 = d & M; d >>= 26; c += u7 * R0;
+    t7 = uint(c & M); c >>= 26; c += u7 * R1;
+
+    c += uint64_t(a.n[0] * 2u) * a.n[8] + uint64_t(a.n[1] * 2u) * a.n[7] +
+         uint64_t(a.n[2] * 2u) * a.n[6] + uint64_t(a.n[3] * 2u) * a.n[5] +
+         uint64_t(a.n[4]) * a.n[4];
+    d += uint64_t(a.n[9]) * a.n[9];
+    u8 = d & M; d >>= 26; c += u8 * R0;
+
+    Fe r;
+    r.n[3] = t3; r.n[4] = t4; r.n[5] = t5; r.n[6] = t6; r.n[7] = t7;
+    r.n[8] = uint(c & M); c >>= 26; c += u8 * R1;
+    c += d * R0 + uint64_t(t9);
+    r.n[9] = uint(c & (M >> 4)); c >>= 22; c += d * (R1 << 4);
+    d = c * (R0 >> 4) + uint64_t(t0);
+    r.n[0] = uint(d & M); d >>= 26;
+    d += c * (R1 >> 4) + uint64_t(t1);
+    r.n[1] = uint(d & M); d >>= 26;
+    r.n[2] = uint(d + uint64_t(t2));
+    return r;
+}
 Fe feInt(uint x) {
     Fe r;
     r.n[0] = x;
@@ -169,7 +316,7 @@ Fe feInv(Fe a) {
 
 uint sourceByte(uint index, uint byteIndex, bool fromTable) {
     uint address = index * 16u + byteIndex / 4u;
-    uint word = fromTable ? table.words[address] : inputs.words[address];
+    uint word = fromTable ? table.words[address] : params.baseWords[address];
     return (word >> (8u * (byteIndex & 3u))) & 255u;
 }
 Fe feFromBytes(uint index, uint start, bool fromTable) {

@@ -2,7 +2,7 @@
 param(
     [ValidateRange(30, 600)][int]$TimeoutSeconds = 120,
     [ValidateRange(1, 60)][int]$Seconds = 5,
-    [ValidateSet(32768, 65536, 131072, 262144)][int]$VulkanBatchKeys = 131072
+    [ValidateSet(32768, 65536, 131072, 262144, 524288, 1048576)][int]$VulkanBatchKeys = 131072
 )
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $PSScriptRoot "tron_vanity_generator.exe"
@@ -88,7 +88,7 @@ function Invoke-Bounded([string]$Name, [string[]]$Arguments) {
             }
         }
         foreach ($line in ($output -split '\r?\n')) {
-            if ($status -ne "PASS" -or $line -match '^(Vulkan resident|Vulkan full-address|OpenCL resident profile|curve batch:|memory:|wall[: ]|GPU stages|GPU stage time|  (curve|affine|keccak|checksum|base58|match)[: ])') {
+            if ($status -ne "PASS" -or $line -match '^(Vulkan resident|Vulkan full-address|OpenCL resident profile|curve batch:|submit batch:|memory:|wall[: ]|GPU stages|GPU stage time|Host wall intervals|candidate records|  (curve|affine|keccak|checksum|base58|match|setup|record|submit|fence wait|collect)[: ])') {
                 if ($line) { Write-Report $line }
             }
         }

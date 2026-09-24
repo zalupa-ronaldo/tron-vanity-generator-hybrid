@@ -82,8 +82,9 @@ struct Candidate {
 struct PushConstants {
     uint32_t count, dfaOffset, outStartOffset, outLenOffset, outIdsOffset;
     uint32_t curveMode, offsetBase, ringMode, ringCapacity;
+    std::array<uint32_t, 16> baseWords{};
 };
-static_assert(sizeof(PushConstants) == 36, "Vulkan push-constant ABI changed");
+static_assert(sizeof(PushConstants) == 100, "Vulkan push-constant ABI changed");
 
 class VulkanEngine {
 public:
@@ -328,7 +329,7 @@ bool VulkanEngine::init(std::string& error) {
     }
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bufferInfo.size = total;
-    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(device_, &bufferInfo, nullptr, &buffer_), "vkCreateBuffer")) return false;
     VkMemoryRequirements requirements{};
@@ -491,8 +492,11 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     }
     const auto profileStart = std::chrono::steady_clock::now();
     auto* bytes = static_cast<unsigned char*>(mapped_);
-    std::memcpy(bytes + offsets_[6], basePub, 64);
-    std::memset(bytes + offsets_[8], 0, sizes_[8]);
+    // The base point is immutable for every invocation in this submit. Keep
+    // it in the push-constant block so the curve shader can read it from the
+    // constant path instead of issuing one storage-buffer load per key.
+    std::memcpy(constants_.baseWords.data(), basePub,
+                constants_.baseWords.size() * sizeof(uint32_t));
     if (allAddresses) {
         // Deterministic no-wallet tests must not pass because an earlier
         // dispatch left the expected addresses in the same mapped buffer.
@@ -502,7 +506,10 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
     constants_.count = count;
     constants_.offsetBase = offsetBase;
     const auto setupDone = std::chrono::steady_clock::now();
-    if (!check(vkResetCommandPool(device_, commandPool_, 0), "vkResetCommandPool") ||
+    // There is only one primary command buffer. Resetting the buffer directly
+    // avoids invalidating the whole pool on every bounded scan and lets the
+    // driver retain pool-level bookkeeping between submits.
+    if (!check(vkResetCommandBuffer(command_, 0), "vkResetCommandBuffer") ||
         !check(vkResetFences(device_, 1, &fence_), "vkResetFences")) return false;
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -512,6 +519,15 @@ bool VulkanEngine::scan(const unsigned char basePub[64], uint32_t offsetBase, ui
         vkCmdResetQueryPool(command_, queryPool_, 0, kStageCount + 1);
         vkCmdWriteTimestamp(command_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queryPool_, 0);
     }
+    // The result counter is device-owned state. Clearing it on the command
+    // stream avoids a host write to the mapped result buffer for every batch.
+    vkCmdFillBuffer(command_, buffer_, offsets_[8], sizes_[8], 0u);
+    VkMemoryBarrier initBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    initBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    initBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &initBarrier,
+                         0, nullptr, 0, nullptr);
     vkCmdBindDescriptorSets(command_, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_,
                             0, 1, &descriptorSet_, 0, nullptr);
     vkCmdPushConstants(command_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
@@ -865,8 +881,9 @@ private:
             return false;
         }
         if (batchKeys_ != 32768 && batchKeys_ != 65536 &&
-            batchKeys_ != 131072 && batchKeys_ != 262144) {
-            error_ = "Vulkan submit batch must be 32768, 65536, 131072 or 262144";
+            batchKeys_ != 131072 && batchKeys_ != 262144 &&
+            batchKeys_ != 524288 && batchKeys_ != 1048576) {
+            error_ = "Vulkan submit batch must be 32768, 65536, 131072, 262144, 524288 or 1048576";
             return false;
         }
         if (!context_) { error_ = "secp256k1 context creation failed"; return false; }

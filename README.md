@@ -177,15 +177,15 @@ settings.
 
 The native Vulkan path submits 131,072 keys per dispatch by default instead of
 32,768, reducing CPU queue/fence churn. Use `--vulkan-batch-keys 32768`,
-`65536`, `131072`, or `262144` for an A/B run. Curve, Keccak, checksum, Base58
-and dictionary matching remain GPU stages; the CPU only seeds a large scalar
-window, waits for completion, and validates reported matches before output.
-
-The native Vulkan path submits 131,072 keys per dispatch by default instead of
-32,768, reducing CPU queue/fence churn. Use `--vulkan-batch-keys 32768`,
-`65536`, `131072`, or `262144` for an A/B run. Curve, Keccak, checksum, Base58
-and dictionary matching remain GPU stages; the CPU only seeds a large scalar
-window, waits for completion, and validates reported matches before output.
+`65536`, `131072`, `262144`, `524288`, or `1048576` for an A/B run. The larger
+values are opt-in because they reserve more resident GPU memory (about 224 MiB
+of intermediate buffers plus up to 80 MiB of match-ring space at 1,048,576
+keys, before the dictionary and driver alignment). Curve, Keccak, checksum,
+Base58 and dictionary matching remain GPU stages; the CPU only seeds a large
+scalar window, waits for completion, and validates reported matches before
+output. The current curve shader also keeps
+the 64-byte public base point in push constants; it is uploaded once per
+submit rather than read from a host-visible storage buffer for every key.
 
 ## Build on Windows
 

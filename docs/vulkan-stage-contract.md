@@ -137,7 +137,10 @@ CPU/GPU vectors covering each input/output word and the final partial word.
    reducing per-dispatch synchronization and host work, not changing the
    curve batch or staging memory blindly. `bench-vulkan.ps1 -VulkanBatchKeys
    32768` reproduces the old baseline; `-VulkanBatchKeys 131072` exercises the
-   larger submit. A long-running funded-wallet run remains unvalidated.
+   larger submit. The current curve shader uses explicit libsecp256k1-style
+   10x26 multiply/square schedules and carries the 64-byte public base point
+   in push constants; the RX wall-rate effect still needs a matched A/B. A
+   long-running funded-wallet run remains unvalidated.
 
 Khronos's [compute guide](https://docs.vulkan.org/guide/latest/compute_shaders.html)
 and [shader interface specification](https://docs.vulkan.org/spec/latest/chapters/interfaces.html)

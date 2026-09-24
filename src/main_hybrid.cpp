@@ -118,7 +118,7 @@ void usage() {
         "  --opencl-profile  time selected resident OpenCL mode; no wallets written\n"
         "  --vulkan-profile  time full Vulkan pipeline by stage; no wallets written\n"
         "  --vulkan-curve-batch 1|4  Vulkan field inversions per group (default 1)\n"
-        "  --vulkan-batch-keys N  keys per Vulkan submit: 32768, 65536, 131072 or 262144 (default 131072)\n"
+        "  --vulkan-batch-keys N  keys per Vulkan submit: 32768..1048576 powers of two (default 131072)\n"
         "  --opencl-inverse single|pair  resident field inversion (default single)\n"
         "  --opencl-affine-batch 2|4|8  staged paired inversion points per work-item (default 4)\n"
         "  --opencl-curve-batch 2|4|8  staged consecutive public points per work-item (default 2)\n"
@@ -185,8 +185,9 @@ bool parse(int argc, char** argv, Options& o) {
                 o.vulkanBatchKeysExplicit = true;
                 o.vulkanBatchKeys = std::stoul(next(i, "--vulkan-batch-keys"));
                 if (o.vulkanBatchKeys != 32768 && o.vulkanBatchKeys != 65536 &&
-                    o.vulkanBatchKeys != 131072 && o.vulkanBatchKeys != 262144)
-                    throw std::runtime_error("--vulkan-batch-keys must be 32768, 65536, 131072 or 262144");
+                    o.vulkanBatchKeys != 131072 && o.vulkanBatchKeys != 262144 &&
+                    o.vulkanBatchKeys != 524288 && o.vulkanBatchKeys != 1048576)
+                    throw std::runtime_error("--vulkan-batch-keys must be 32768, 65536, 131072, 262144, 524288 or 1048576");
             }
             else if (a == "--bench-seconds") o.benchSeconds = std::stod(next(i, "--bench-seconds"));
             else if (a == "--tune-seconds") o.tuneSeconds = std::stod(next(i, "--tune-seconds"));

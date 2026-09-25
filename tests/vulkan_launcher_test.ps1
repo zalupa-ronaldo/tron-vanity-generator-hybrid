@@ -28,7 +28,8 @@ public class Fixture {
         if (Value(args, "--words") != "words.txt" || Value(args, "--bench-seconds") != "1" ||
             Array.IndexOf(args, "--no-config") < 0) return 3;
         if (mode == "fail-profile" && batch == "4" && affine == "8") return 4;
-        if (batch == "") Console.WriteLine("wall 1.000 s, wall speed 10.000 M/s");
+        if (batch == "") Console.WriteLine("wall 1.000 s, wall speed " +
+                                             (mode == "opencl-winner" ? "40.00" : "10.00") + " M/s");
         else Console.WriteLine("Vulkan batch " + batch + " / affine " + affine +
                                " / fixture GPU " +
                                (batch == "4" && affine == "8" ? "30.00" : "20.00") + " M/s");
@@ -40,6 +41,7 @@ $previousMode = $env:TRON_VULKAN_FIXTURE
 try {
     foreach ($case in @(
         @{ Mode = "success"; Exit = 0; UpdateConfig = $true; Calls = "test,opencl,vulkan-baseline,vulkan-curve4-affine4,vulkan-winner,vulkan-winner,opencl" },
+        @{ Mode = "opencl-winner"; Exit = 0; UpdateConfig = $true; Calls = "test,opencl,vulkan-baseline,vulkan-curve4-affine4,vulkan-winner,vulkan-winner,opencl" },
         @{ Mode = "fail-test"; Exit = 1; Calls = "test" },
         @{ Mode = "fail-profile"; Exit = 1; Calls = "test,opencl,vulkan-baseline,vulkan-curve4-affine4,vulkan-winner,vulkan-winner,opencl" }
     )) {
@@ -82,14 +84,22 @@ try {
             } elseif ($winner.Result -notlike "FAIL*") { throw "Profile failure was not recorded" }
         }
         if ($case.UpdateConfig) {
-            $config = (Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf") -Raw).TrimStart([char]0xFEFF)
-            if ($config -notmatch '(?m)^backend=vulkan$' -or
-                $config -notmatch '(?m)^vulkan-curve-batch=4$' -or
-                $config -notmatch '(?m)^vulkan-affine-batch=8$' -or
-                $config -notmatch '(?m)^vulkan-batch-keys=131072$' -or
-                $config -notmatch '(?m)^vulkan-resident-group=16$' -or
-                $config -match '(?m)^opencl-') {
-                throw "Successful Vulkan winner did not replace stale OpenCL config"
+            $configLines = @(Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf")) |
+                ForEach-Object { $_.TrimStart([char]0xFEFF) }
+            if ($case.Mode -eq "opencl-winner") {
+                if (-not ($configLines -contains "backend=opencl") -or
+                    -not ($configLines -contains "gpu-resident=true") -or
+                    -not ($configLines -contains "opencl-pipeline=staged") -or
+                    @($configLines | Where-Object { $_ -like "vulkan-*" }).Count) {
+                    throw "Successful OpenCL winner did not replace stale Vulkan config: $($configLines -join '|')"
+                }
+            } elseif (-not ($configLines -contains "backend=vulkan") -or
+                      -not ($configLines -contains "vulkan-curve-batch=4") -or
+                      -not ($configLines -contains "vulkan-affine-batch=8") -or
+                      -not ($configLines -contains "vulkan-batch-keys=131072") -or
+                      -not ($configLines -contains "vulkan-resident-group=16") -or
+                      @($configLines | Where-Object { $_ -like "opencl-*" }).Count) {
+                throw "Successful Vulkan winner did not replace stale OpenCL config: $($configLines -join '|')"
             }
             if (-not (Get-ChildItem -LiteralPath $dir -Filter "tron-vanity.conf.bak-*")) {
                 throw "Config backup was not created"

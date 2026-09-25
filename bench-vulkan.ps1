@@ -108,9 +108,15 @@ function Invoke-Bounded([string]$Name, [string[]]$Arguments) {
                 if ($line) { Write-Report $line }
             }
         }
-        $results.Add([pscustomobject]@{ Test = $Name; Backend = Get-ArgumentValue $Arguments "--backend" "unknown"; Result = $status;
-            Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1);
-            MKeysPerSecond = $speed; Arguments = $Arguments -join " " })
+        $backendName = Get-ArgumentValue $Arguments "--backend" "unknown"
+        $results.Add([pscustomobject]@{
+            Test = $Name
+            Backend = $backendName
+            Result = $status
+            Seconds = [math]::Round($timer.Elapsed.TotalSeconds, 1)
+            MKeysPerSecond = $speed
+            Arguments = $Arguments -join " "
+        })
         Write-Report ("[$Name] $status")
         return $status -eq "PASS"
     } finally { $process.Dispose() }

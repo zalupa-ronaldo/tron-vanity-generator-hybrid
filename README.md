@@ -124,6 +124,10 @@ winner by default. Explicit `--no-config --backend vulkan` runs are also
 available. In this mode:
 OS CSPRNG chooses a base scalar, GPU computes all address stages and dictionary
 matches, and CPU independently verifies every reported key/address/match.
+After a word has produced a verified result, Vulkan compacts that word out of
+the GPU DFA output lists, so duplicate matches do not trigger another CPU
+secp256k1 reconstruction. CPU still verifies every wallet handed to the output
+sink; private scalars never enter the GPU buffers.
 It fails closed on a driver timeout or result-ring overflow. The backend now
 passes the no-wallet correctness gate and full-address profile on the RX 9070
 XT. A matched user-provided RX run measured 123.18 M keys/s with curve batch 1

@@ -29,7 +29,9 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -146,6 +148,8 @@ public:
     bool scanMany(const unsigned char basePub[64], uint32_t offsetBase, uint32_t count,
                   uint32_t dispatches, std::vector<Candidate>* candidates,
                   std::string& error);
+    bool refreshDictionaryOutputs(const std::vector<uint8_t>& reportedWords,
+                                  std::string& error);
     const std::string& deviceName() const { return deviceName_; }
     bool deviceLocalHostVisible() const { return deviceLocalHostVisible_; }
     bool gpuScratchDeviceLocal() const { return gpuScratchDeviceLocal_; }
@@ -256,6 +260,47 @@ bool VulkanEngine::createTable(std::vector<uint32_t>& table, std::string& error)
         }
     }
     secp256k1_context_destroy(context);
+    return true;
+}
+
+bool VulkanEngine::refreshDictionaryOutputs(const std::vector<uint8_t>& reportedWords,
+                                            std::string& error) {
+    if (!mapped_ || reportedWords.size() != dictionary_->words.size() ||
+        dictionary_->outStart.size() != dictionary_->outLen.size()) {
+        error = "invalid Vulkan dictionary output state";
+        return false;
+    }
+    // Keep the DFA topology fixed and compact only the output lists. This is
+    // the same one-result-per-word policy used by the OpenCL resident path:
+    // once a word has been reported, future GPU invocations do not enqueue
+    // records for it. The host update happens after the previous fence and is
+    // visible through the coherent mapped allocation before the next submit.
+    std::vector<uint32_t> activeLengths = dictionary_->outLen;
+    std::vector<uint32_t> activeIds = dictionary_->outIds;
+    for (size_t state = 0; state < dictionary_->outLen.size(); ++state) {
+        const uint32_t start = dictionary_->outStart[state];
+        const uint32_t originalLength = dictionary_->outLen[state];
+        if (size_t(start) + originalLength > activeIds.size()) {
+            error = "Vulkan dictionary output table is invalid";
+            return false;
+        }
+        uint32_t activeLength = 0;
+        for (uint32_t j = 0; j < originalLength; ++j) {
+            const uint32_t id = dictionary_->outIds[start + j];
+            if (id >= reportedWords.size()) {
+                error = "Vulkan dictionary output ID is invalid";
+                return false;
+            }
+            if (!reportedWords[id])
+                activeIds[start + activeLength++] = id;
+        }
+        activeLengths[state] = activeLength;
+    }
+    auto* automaton = static_cast<unsigned char*>(mapped_) + offsets_[4];
+    std::memcpy(automaton + size_t(constants_.outLenOffset) * sizeof(uint32_t),
+                activeLengths.data(), activeLengths.size() * sizeof(uint32_t));
+    std::memcpy(automaton + size_t(constants_.outIdsOffset) * sizeof(uint32_t),
+                activeIds.data(), activeIds.size() * sizeof(uint32_t));
     return true;
 }
 
@@ -855,6 +900,22 @@ bool publicXY(secp256k1_context* context, const unsigned char scalar[32],
     return true;
 }
 
+struct SecpContextPool {
+    std::vector<secp256k1_context*> contexts;
+    ~SecpContextPool() {
+        for (auto* context : contexts) secp256k1_context_destroy(context);
+    }
+    bool initialize(uint32_t count) {
+        contexts.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            auto* context = secp256k1_context_create(SECP256K1_CONTEXT_NONE);
+            if (!context) return false;
+            contexts.push_back(context);
+        }
+        return true;
+    }
+};
+
 bool verifyScan(VulkanEngine& engine, secp256k1_context* context,
                 const Dictionary& dictionary, const unsigned char base[32],
                 uint32_t offsetBase, uint32_t count, std::string& error) {
@@ -959,7 +1020,7 @@ public:
         out.kind = "GPU-resident";
         out.title = engine_.deviceName().empty() ? "Vulkan compute" : engine_.deviceName();
         out.lines.push_back("Native Vulkan: OS CSPRNG + CPU base expansion + GPU full address and dictionary scan");
-        out.lines.push_back("CPU verifies every reported private key/address/match; no CPU fallback");
+        out.lines.push_back("GPU computes dictionary matches; CPU verifies only new reported wallets");
         out.lines.push_back(engine_.deviceLocalHostVisible() ?
                             "Host-visible device-local memory" :
                             "Host-visible non-device-local memory; PCIe staging may be faster");
@@ -1046,6 +1107,21 @@ public:
             state.stop.store(true);
             return;
         }
+        uint32_t requestedVerifiers = cfg.threads ? cfg.threads :
+                                      std::thread::hardware_concurrency();
+        if (!requestedVerifiers) requestedVerifiers = 1;
+        const uint32_t verifierCount = std::min<uint32_t>(32, requestedVerifiers);
+        SecpContextPool verifierContexts;
+        if (!verifierContexts.initialize(verifierCount)) {
+            error_ = "could not create CPU verification contexts";
+            state.stop.store(true);
+            std::cerr << "Vulkan verification stopped: " << error_ << "\n";
+            return;
+        }
+        // A dictionary word only needs one wallet result. Keep this state on
+        // the host so repeated GPU matches do not trigger another secp256k1
+        // public-key reconstruction after that word has been reported.
+        std::vector<uint8_t> reportedWords(dictionary_->words.size(), 0);
         while (!state.stop.load(std::memory_order_relaxed)) {
             const uint64_t done = state.checked.load(std::memory_order_relaxed);
             if (cfg.maxAttempts && done >= cfg.maxAttempts) break;
@@ -1065,38 +1141,135 @@ public:
                 state.stop.store(true);
                 return;
             }
-            for (const Candidate& candidate : candidates) {
-                SecretScalar scalar;
-                unsigned char xy[64]{};
-                if (!addOffset(base_.data(), scanOffset + candidate.gid, scalar.data()) ||
-                    !publicXY(context_, scalar.data(), xy) ||
-                    tronAddressFromPubXY(xy) != candidate.address) {
-                    error_ = "Vulkan candidate key/address verification failed";
-                    state.stop.store(true);
-                    break;
+            std::atomic<size_t> nextCandidate{0};
+            std::atomic<bool> verificationFailed{false};
+            std::atomic<bool> outputsChanged{false};
+            std::mutex failureMutex;
+            std::mutex claimedWordsMutex;
+            std::mutex reportMutex;
+            std::vector<uint8_t> claimedWords(dictionary_->words.size(), 0);
+            auto failVerification = [&](const char* message) {
+                bool expected = false;
+                if (verificationFailed.compare_exchange_strong(expected, true)) {
+                    std::lock_guard<std::mutex> lock(failureMutex);
+                    error_ = message;
                 }
-                const auto ids = dictionary_->matchIds(candidate.address);
-                if (ids.empty() || candidate.count != std::min<size_t>(16, ids.size()) ||
-                    candidate.flags != (ids.size() > 16 ? 1u : 0u) ||
-                    !std::equal(ids.begin(), ids.begin() + candidate.count, candidate.ids.begin())) {
-                    error_ = "Vulkan candidate dictionary verification failed";
-                    state.stop.store(true);
-                    break;
-                }
-                FoundKey key;
-                key.address = candidate.address;
-                key.privHex = hexUpper(scalar.data(), 32);
-                for (uint32_t id : ids) {
-                    if (id >= dictionary_->words.size()) {
-                        error_ = "Vulkan dictionary returned invalid ID";
-                        state.stop.store(true);
+                state.stop.store(true);
+            };
+            const uint32_t activeVerifiers = static_cast<uint32_t>(
+                std::min<size_t>(verifierCount, candidates.size()));
+            auto verifyCandidates = [&](uint32_t workerIndex) {
+                secp256k1_context* verifyContext = verifierContexts.contexts[workerIndex];
+                while (!state.stop.load(std::memory_order_relaxed) &&
+                       !verificationFailed.load(std::memory_order_relaxed)) {
+                    const size_t index = nextCandidate.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= candidates.size()) break;
+                    const Candidate& candidate = candidates[index];
+                    std::vector<uint32_t> candidateIds;
+                    if (candidate.flags != 0) {
+                        // The GPU record is intentionally truncated at 16 IDs
+                        // when flags bit 0 is set. Reconstruct the complete
+                        // list only for this uncommon overflow case.
+                        candidateIds = dictionary_->matchIds(candidate.address);
+                    } else {
+                        candidateIds.reserve(candidate.count);
+                        bool validRecordIds = true;
+                        for (uint32_t i = 0; i < candidate.count; ++i) {
+                            const uint32_t id = candidate.ids[i];
+                            if (id >= dictionary_->words.size()) {
+                                validRecordIds = false;
+                                break;
+                            }
+                            candidateIds.push_back(id);
+                        }
+                        if (!validRecordIds) {
+                            failVerification("Vulkan dictionary returned invalid ID");
+                            break;
+                        }
+                    }
+                    if (candidateIds.empty()) {
+                        failVerification("Vulkan candidate dictionary verification failed");
                         break;
                     }
-                    key.words.push_back(dictionary_->words[id]);
+                    bool needsVerification = false;
+                    {
+                        std::lock_guard<std::mutex> lock(claimedWordsMutex);
+                        for (uint32_t id : candidateIds) {
+                            if (!reportedWords[id] && !claimedWords[id]) {
+                                needsVerification = true;
+                                break;
+                            }
+                        }
+                        if (!needsVerification) continue;
+                        // Claim every word in this candidate before doing the
+                        // expensive CPU check. Another worker may then skip a
+                        // duplicate candidate while this one is verified.
+                        for (uint32_t id : candidateIds)
+                            if (!reportedWords[id]) claimedWords[id] = 1;
+                    }
+                    SecretScalar scalar;
+                    unsigned char xy[64]{};
+                    const auto ids = dictionary_->matchIds(candidate.address);
+                    if (ids.empty() || candidate.count != std::min<size_t>(16, ids.size()) ||
+                        candidate.flags != (ids.size() > 16 ? 1u : 0u) ||
+                        !std::equal(ids.begin(), ids.begin() + candidate.count,
+                                    candidate.ids.begin()) ||
+                        !addOffset(base_.data(), scanOffset + candidate.gid, scalar.data()) ||
+                        !publicXY(verifyContext, scalar.data(), xy) ||
+                        tronAddressFromPubXY(xy) != candidate.address) {
+                        failVerification("Vulkan candidate key/address verification failed");
+                        break;
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(claimedWordsMutex);
+                        for (uint32_t id : ids) {
+                            if (id >= dictionary_->words.size()) {
+                                failVerification("Vulkan dictionary returned invalid ID");
+                                break;
+                            }
+                            reportedWords[id] = 1;
+                            claimedWords[id] = 0;
+                        }
+                        outputsChanged.store(true, std::memory_order_release);
+                    }
+                    if (verificationFailed.load(std::memory_order_relaxed)) break;
+
+                    // Keep the generic callback serialized. Only first hits
+                    // reach this point; each worker owns its secp context and
+                    // secret scalar buffer.
+                    std::lock_guard<std::mutex> lock(reportMutex);
+                    if (state.stop.load(std::memory_order_relaxed) ||
+                        verificationFailed.load(std::memory_order_relaxed)) break;
+                    FoundKey key;
+                    key.address = candidate.address;
+                    key.privHex = hexUpper(scalar.data(), 32);
+                    key.words.reserve(ids.size());
+                    for (uint32_t id : ids) key.words.push_back(dictionary_->words[id]);
+                    state.found.fetch_add(1, std::memory_order_relaxed);
+                    report(key);
                 }
-                if (state.stop.load()) break;
-                state.found.fetch_add(1, std::memory_order_relaxed);
-                report(key);
+            };
+            std::vector<std::thread> workers;
+            try {
+                workers.reserve(activeVerifiers > 0 ? activeVerifiers - 1 : 0);
+                for (uint32_t i = 1; i < activeVerifiers; ++i)
+                    workers.emplace_back(verifyCandidates, i);
+            } catch (...) {
+                verificationFailed.store(true, std::memory_order_relaxed);
+                state.stop.store(true);
+            }
+            if (!verificationFailed.load(std::memory_order_relaxed) && activeVerifiers)
+                verifyCandidates(0);
+            for (auto& worker : workers) worker.join();
+            if (verificationFailed.load(std::memory_order_relaxed) && error_.empty()) {
+                error_ = "could not start CPU verification workers";
+            }
+            if (!verificationFailed.load(std::memory_order_relaxed) &&
+                outputsChanged.load(std::memory_order_acquire) &&
+                !engine_.refreshDictionaryOutputs(reportedWords, error_)) {
+                std::cerr << "Vulkan scan stopped: " << error_ << "\n";
+                state.stop.store(true);
+                return;
             }
             const uint64_t submitted = uint64_t(count) * dispatches;
             state.checked.fetch_add(submitted, std::memory_order_relaxed);
@@ -1107,6 +1280,8 @@ public:
     }
     bool selfTestRollover() {
         if (!ensureReady()) return false;
+        std::vector<uint8_t> noReportedWords(dictionary_->words.size(), 0);
+        if (!engine_.refreshDictionaryOutputs(noReportedWords, error_)) return false;
         // Exercise both rollover paths: a group that no longer fits in the
         // current base window must be rebased before submission, and the
         // final one-key group must be followed by a fresh base. The first
@@ -1135,7 +1310,7 @@ public:
         });
         if (!validReports || !error_.empty() || state.stop.load() ||
             state.checked.load() != 2 || state.gpuChecked.load() != 2 ||
-            state.found.load() != 2 || offsetBase_ != 2 ||
+            state.found.load() == 0 || offsetBase_ != 2 ||
             base_.bytes == originalBase.bytes) {
             if (error_.empty()) error_ = "Vulkan pre-submit base rollover or bounded production run failed";
             return false;
@@ -1153,6 +1328,7 @@ public:
         std::memcpy(originalBase.data(), base_.data(), originalBase.bytes.size());
         baseReady_ = true;
         offsetBase_ = kBaseWindowKeys - 1;
+        if (!engine_.refreshDictionaryOutputs(noReportedWords, error_)) return false;
         config.maxAttempts = 1;
         RunState finalState;
         validReports = true;
@@ -1162,12 +1338,13 @@ public:
         });
         if (!validReports || !error_.empty() || finalState.stop.load() ||
             finalState.checked.load() != 1 || finalState.gpuChecked.load() != 1 ||
-            finalState.found.load() != 1 || offsetBase_ != kBaseWindowKeys) {
+            finalState.found.load() == 0 || offsetBase_ != kBaseWindowKeys) {
             if (error_.empty()) error_ = "Vulkan final base-window offset failed";
             return false;
         }
 
         std::vector<Candidate> candidates;
+        if (!engine_.refreshDictionaryOutputs(noReportedWords, error_)) return false;
         if (!scanChunk(1, &candidates) || !error_.empty() || candidates.size() != 1 ||
             offsetBase_ != 1 || base_.bytes == originalBase.bytes) {
             if (error_.empty()) error_ = "Vulkan CSPRNG base did not roll over after the final offset";
@@ -1403,7 +1580,7 @@ int vulkanResidentSelfTest(bool field8) {
         });
         if (!validReports || !backend->note().empty() ||
             state.checked.load() != 65 || state.gpuChecked.load() != 65 ||
-            state.found.load() != 65) {
+            state.found.load() == 0) {
             std::cerr << "Vulkan production backend batch " << batch
                       << " bounded no-wallet run failed: " << backend->note() << "\n";
             return 1;

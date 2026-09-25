@@ -11,6 +11,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <secp256k1.h>
@@ -154,12 +155,13 @@ public:
                 return;
             }
             bool outputsChanged = false;
+            std::unordered_set<uint32_t> processedScalars;
+            processedScalars.reserve(hits.size() / 2);
             for (size_t hi = 0; hi + 1 < hits.size(); hi += 2) {
                 uint32_t s = hits[hi];
                 uint32_t wordId = hits[hi + 1];
                 if (wordId >= dictionary_->words.size()) continue;
-                const uint32_t hitMask = 1U << (wordId & 31);
-                if (!(activeWords_[wordId >> 5] & hitMask)) continue;
+                if (!processedScalars.insert(s).second) continue;
                 unsigned char k[32];
                 std::memcpy(k, k0, 32);
                 unsigned char tw[32];
@@ -174,9 +176,11 @@ public:
                 for (uint32_t id : ids) {
                     if (id >= dictionary_->words.size()) continue;
                     const uint32_t mask = 1U << (id & 31);
-                    if (activeWords_[id >> 5] & mask) {
-                        activeWords_[id >> 5] &= ~mask;
-                        outputsChanged = true;
+                    if (!cfg.uniquePerWord || (activeWords_[id >> 5] & mask)) {
+                        if (cfg.uniquePerWord) {
+                            activeWords_[id >> 5] &= ~mask;
+                            outputsChanged = true;
+                        }
                         words.push_back(dictionary_->words[id]);
                     }
                 }

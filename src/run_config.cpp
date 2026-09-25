@@ -55,7 +55,7 @@ bool loadRunConfig(const std::filesystem::path& path,
     };
     static const std::set<std::string> flags = {
         "gpu-resident", "opencl-async-meta-read", "opencl-sha-ring", "opencl-host-seed",
-        "case-sensitive", "strict-backend", "verbose"
+        "case-sensitive", "strict-backend", "verbose", "unique-words"
     };
     std::ifstream in(path, std::ios::binary);
     if (!in) { error = "cannot open config: " + path.string(); return false; }

@@ -58,6 +58,7 @@ struct Options {
     std::string backend = "auto";
     bool caseSensitive = false;
     bool verbose = false;
+    bool uniquePerWord = false;
     bool strictBackend = false;
     bool list = false;
     bool help = false;
@@ -149,6 +150,7 @@ void usage() {
         "  --metal-hw-case NAME filter hardware cases by name/category\n"
         "  --metal-hw-json FILE write hardware profile results as JSON\n"
         "  --case-sensitive  exact case matching\n"
+        "  --unique-words    stop reporting a word after its first verified address\n"
         "  --list            list CPU/OpenCL/CUDA devices and exit\n"
         "  --vulkan-test     native Vulkan compute API smoke test (not wallet search)\n"
         "  --vulkan-keccak-test  verify native Vulkan curve/address/ring against CPU\n"
@@ -175,6 +177,7 @@ bool parse(int argc, char** argv, Options& o) {
             else if (a == "--strict-backend") o.strictBackend = true;
             else if (a == "--case-sensitive") o.caseSensitive = true;
             else if (a == "--verbose") o.verbose = true;
+            else if (a == "--unique-words") o.uniquePerWord = true;
             else if (a == "--vulkan-profile") o.vulkanProfile = true;
             else if (a == "--list") o.list = true;
             else if (a == "--keys-per-item") o.keysPerItem = std::stoul(next(i, "--keys-per-item"));
@@ -353,31 +356,63 @@ std::string jsonEscape(const std::string& s) {
     return out;
 }
 
+std::string formatDuration(double seconds) {
+    if (!(seconds >= 0.0) || !std::isfinite(seconds)) return "?";
+    uint64_t total = static_cast<uint64_t>(std::min(seconds, 99.0 * 3600.0 + 59.0 * 60.0 + 59.0));
+    const uint64_t hours = total / 3600;
+    total %= 3600;
+    const uint64_t minutes = total / 60;
+    const uint64_t secs = total % 60;
+    std::ostringstream out;
+    if (hours) out << hours << ':' << std::setfill('0') << std::setw(2) << minutes;
+    else out << minutes;
+    out << ':' << std::setfill('0') << std::setw(2) << secs << std::setfill(' ');
+    return out.str();
+}
+
+std::string progressBar(double fraction, size_t width = 20) {
+    fraction = std::clamp(fraction, 0.0, 1.0);
+    const size_t filled = static_cast<size_t>(std::round(fraction * width));
+    return "[" + std::string(filled, '#') + std::string(width - filled, '-') + "]";
+}
+
 class JsonSink {
 public:
-    explicit JsonSink(std::string path) : path_(std::move(path)) {}
+    JsonSink(std::string path, bool uniquePerWord, RunState* state)
+        : path_(std::move(path)), uniquePerWord_(uniquePerWord), state_(state) {}
 
     void operator()(const FoundKey& key) {
         std::lock_guard<std::mutex> lock(mu_);
+        std::vector<std::string> words = key.words;
         std::vector<std::string> fresh;
-        for (const auto& word : key.words) if (seen_.insert(word).second) fresh.push_back(word);
-        if (fresh.empty()) return;
+        for (const auto& word : words) {
+            if (observedWords_.insert(word).second) {
+                if (state_) state_->uniqueWords.fetch_add(1, std::memory_order_relaxed);
+                fresh.push_back(word);
+            }
+        }
+        if (uniquePerWord_) {
+            words = std::move(fresh);
+        }
+        if (words.empty()) return;
         std::ofstream out(path_, std::ios::app | std::ios::binary);
         if (!out) { std::cerr << "cannot write " << path_ << "\n"; return; }
         out << "{\"address\":\"" << jsonEscape(key.address) << "\",\"words\":[";
-        for (size_t i = 0; i < fresh.size(); ++i) {
+        for (size_t i = 0; i < words.size(); ++i) {
             if (i) out << ',';
-            out << "\"" << jsonEscape(fresh[i]) << "\"";
+            out << "\"" << jsonEscape(words[i]) << "\"";
         }
         out << "],\"private_key\":\"" << jsonEscape(key.privHex) << "\"}\n";
         out.flush();
-        std::cout << "\nFOUND " << key.address << " words=" << fresh.size() << "\n";
+        std::cout << "\nFOUND " << key.address << " words=" << words.size() << "\n";
     }
 
 private:
     std::string path_;
+    bool uniquePerWord_ = false;
+    RunState* state_ = nullptr;
     std::mutex mu_;
-    std::unordered_set<std::string> seen_;
+    std::unordered_set<std::string> observedWords_;
 };
 
 std::string rate(uint64_t n, double seconds) {
@@ -1010,19 +1045,22 @@ int main(int argc, char** argv) {
             std::chrono::system_clock::now().time_since_epoch()).count();
         output = std::filesystem::path(opt.out) / ("wallets-" + std::to_string(ns) + ".jsonl");
     }
-    JsonSink sink(output.string());
+    RunState state;
+    JsonSink sink(output.string(), opt.uniquePerWord, &state);
     ReportFn report = [&sink](const FoundKey& key) { sink(key); };
     RunConfig cfg;
     cfg.threads = opt.threads;
     cfg.maxAttempts = opt.maxAttempts;
     cfg.seconds = opt.seconds;
     cfg.verbose = opt.verbose;
+    cfg.uniquePerWord = opt.uniquePerWord;
     cfg.dictionary = dictionary;
-    RunState state;
     gRunState = &state;
     std::signal(SIGINT, onSigint);
 
     std::cout << "\nDictionary: " << dictionary->words.size() << " words\n"
+              << "Match mode: " << (opt.uniquePerWord ? "first address per word" : "all dictionary matches") << "\n"
+              << "Progress: first-match coverage; all-match mode continues after 100%\n"
               << "CPU threads: " << (opt.threads ? opt.threads : std::thread::hardware_concurrency()) << "\n"
               << "Output: " << output.string() << "\n";
 
@@ -1037,17 +1075,37 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });
+    const size_t totalWords = dictionary->words.size();
     std::thread progressThread([&] {
         while (!finished.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             if (finished.load() || state.stop.load()) break;
             double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
             uint64_t cpu = state.cpuChecked.load(), gpu = state.gpuChecked.load();
-            double pct = opt.seconds ? std::min(100.0, elapsed * 100.0 / opt.seconds) : 0.0;
-            std::cout << "\r[" << std::fixed << std::setprecision(1) << pct << "%] "
-                      << "CPU " << rate(cpu, elapsed) << " (" << (opt.threads ? opt.threads : std::thread::hardware_concurrency())
-                      << "T) | GPU " << rate(gpu, elapsed) << " | total " << rate(cpu + gpu, elapsed)
-                      << " | matches " << state.found.load() << std::flush;
+            const uint64_t uniqueWords = state.uniqueWords.load();
+            const double coverage = totalWords
+                ? std::min(1.0, static_cast<double>(uniqueWords) / static_cast<double>(totalWords))
+                : 1.0;
+            std::string eta = "?";
+            if (uniqueWords >= totalWords) {
+                eta = "done";
+            } else if (uniqueWords && elapsed > 0.0) {
+                const double wordsPerSecond = static_cast<double>(uniqueWords) / elapsed;
+                eta = formatDuration((static_cast<double>(totalWords) - uniqueWords) / wordsPerSecond);
+            }
+            std::cout << "\r[t=" << formatDuration(elapsed) << "] "
+                      << progressBar(coverage) << " words " << uniqueWords << "/" << totalWords
+                      << " | CPU " << rate(cpu, elapsed) << " ("
+                      << (opt.threads ? opt.threads : std::thread::hardware_concurrency())
+                      << "T) | GPU " << rate(gpu, elapsed)
+                      << " | total " << rate(cpu + gpu, elapsed)
+                      << " | matches " << state.found.load()
+                      << " | ETA~" << eta;
+            if (opt.seconds) {
+                const double runPct = std::min(100.0, elapsed * 100.0 / opt.seconds);
+                std::cout << " | run " << std::fixed << std::setprecision(1) << runPct << "%";
+            }
+            std::cout << std::flush;
             if (state.stop.load()) break;
         }
     });

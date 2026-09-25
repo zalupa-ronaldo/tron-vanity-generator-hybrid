@@ -124,10 +124,11 @@ winner by default. Explicit `--no-config --backend vulkan` runs are also
 available. In this mode:
 OS CSPRNG chooses a base scalar, GPU computes all address stages and dictionary
 matches, and CPU independently verifies every reported key/address/match.
-After a word has produced a verified result, Vulkan compacts that word out of
-the GPU DFA output lists, so duplicate matches do not trigger another CPU
-secp256k1 reconstruction. CPU still verifies every wallet handed to the output
-sink; private scalars never enter the GPU buffers.
+By default every matching address is reported, including later matches for a
+word that was already found. CPU still verifies every wallet handed to the
+output sink; private scalars never enter the GPU buffers. Use
+`--unique-words` when you deliberately want the legacy bounded mode that
+reports only the first verified address for each dictionary word.
 It fails closed on a driver timeout or result-ring overflow. The backend now
 passes the no-wallet correctness gate and full-address profile on the RX 9070
 XT. A matched user-provided RX run measured 123.18 M keys/s with curve batch 1
@@ -249,8 +250,9 @@ GPU-produced address, so the host reads only compact records after the fence.
 All per-key stage buffers (public keys, payloads, checksums, Base58 text and
 Jacobian scratch) are allocated in one separate GPU-only Vulkan buffer and are
 never mapped by the host; the profile reports whether that allocation is
-device-local. The mapped buffer contains the result path and static
-dictionary/table data. A small host-visible readback exists only for the
+device-local. The immutable DFA and offset table are uploaded once into a
+separate static Vulkan buffer; only the mutable output lists and result ring
+remain in the mapped buffer. A small host-visible readback exists only for the
 no-wallet address self-test; normal search never copies stage data to it.
 The
 64-byte public base point is passed through push constants rather than read
@@ -281,8 +283,14 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
   --out results
 ```
 
-The console progress line shows elapsed percentage, CPU threads and keys/s,
-GPU keys/s, total throughput and match count. `--seconds 0` runs until Ctrl+C.
+The console progress line shows elapsed time, a bar for first-match coverage of
+the dictionary, CPU/GPU keys/s, total throughput, match count and a rough ETA
+for the remaining words. The ETA is stochastic: it estimates time until every
+dictionary word has appeared at least once, not a guaranteed completion time.
+In the default all-match mode the bar can reach 100% while scanning continues
+and `matches` keeps growing. `--seconds 0` runs until Ctrl+C. Add
+`--unique-words` to restore the legacy mode that reports only the first
+verified address for each word.
 
 The old fine-grained flags remain available for controlled experiments, but
 normal operation only needs the config and the short commands above. For a
@@ -366,10 +374,10 @@ base M4 measured 27.8 M keys/s versus 23.1 M keys/s for the indexed reference
 permutation (about 20% faster); cold short runs reached 34.3 M keys/s. Startup
 compares both permutations over 1,024 deterministic blocks.
 
-Already-saved dictionary words are removed from the live DFA output tables
-between OpenCL, CUDA and Metal dispatches. This preserves the existing
-one-result-per-word behavior without sending millions of duplicate short-word
-records back to the CPU. The Metal grid is scaled inversely with keys per lane,
+The default OpenCL, CUDA, Metal and Vulkan searches keep all dictionary outputs
+active, so repeated matches are preserved. `--unique-words` enables the
+bounded legacy mode and removes already-saved words from the live DFA output
+tables between dispatches. The Metal grid is scaled inversely with keys per lane,
 keeping command buffers near the same key count as the batch changes; the tuned
 M4 command is about 0.76 seconds instead of growing into a multi-second
 dispatch.

@@ -154,6 +154,7 @@ public:
             std::cerr << "Metal resident unavailable: " << error_ << "\n";
             return;
         }
+        pruneOutputs_ = cfg.uniquePerWord;
         while (!state.stop.load(std::memory_order_relaxed)) {
             if (cfg.maxAttempts && state.checked.load() >= cfg.maxAttempts) break;
             uint32_t overflow = 0;
@@ -187,6 +188,7 @@ private:
     uint32_t profileStage_ = 0;
     bool scalarKeccak_ = false;
     uint32_t pipelineMaxThreads_ = 0;
+    bool pruneOutputs_ = true;
     uint64_t streamBase_ = 0;
     uint32_t readPos_ = 0;
     secp256k1_context* context_ = nullptr;
@@ -356,9 +358,12 @@ private:
                 for (uint32_t j = 0; j < n; ++j) {
                     uint32_t id = read32(rec + 72 + j * 4);
                     uint32_t mask = 1U << (id & 31);
-                    if (id < dictionary_->words.size() && (activeWords_[id >> 5] & mask)) {
-                        activeWords_[id >> 5] &= ~mask;
-                        outputsChanged = true;
+                    if (id < dictionary_->words.size() &&
+                        (!pruneOutputs_ || (activeWords_[id >> 5] & mask))) {
+                        if (pruneOutputs_) {
+                            activeWords_[id >> 5] &= ~mask;
+                            outputsChanged = true;
+                        }
                         key.words.push_back(dictionary_->words[id]);
                     }
                 }

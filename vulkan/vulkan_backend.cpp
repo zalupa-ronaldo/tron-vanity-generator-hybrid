@@ -40,7 +40,7 @@ constexpr uint32_t kDefaultBatchKeys = 1u << 17;
 constexpr uint32_t kSelfTestBatchKeys = 1u << 15;
 constexpr uint32_t kBaseWindowKeys = 1u << 22;
 constexpr uint32_t kGroupSize = 64;
-constexpr uint32_t kBindings = 10;
+constexpr uint32_t kBindings = 11;
 constexpr uint32_t kRingWords = 29;
 // Keep more logical scans in one command buffer/fence cycle. The per-key
 // workspace and append-only match ring both scale with this value. The RX
@@ -51,7 +51,7 @@ constexpr uint32_t kDefaultResidentDispatches = 16;
 constexpr uint32_t kStageCount = 6;
 constexpr uint32_t kQueryStride = kStageCount + 1;
 constexpr std::array<uint32_t, kBindings> kWordsPerKey = {
-    16, 6, 7, 9, 0, 18, 0, 0, 0, kRingWords
+    16, 6, 7, 9, 0, 18, 0, 0, 0, kRingWords, 0
 };
 
 struct SecretScalar {
@@ -132,9 +132,11 @@ public:
         if (device_ && descriptorPool_) vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
         if (device_ && descriptorLayout_) vkDestroyDescriptorSetLayout(device_, descriptorLayout_, nullptr);
         if (device_ && readbackBuffer_) vkDestroyBuffer(device_, readbackBuffer_, nullptr);
+        if (device_ && staticBuffer_) vkDestroyBuffer(device_, staticBuffer_, nullptr);
         if (device_ && scratchBuffer_) vkDestroyBuffer(device_, scratchBuffer_, nullptr);
         if (device_ && buffer_) vkDestroyBuffer(device_, buffer_, nullptr);
         if (device_ && readbackMemory_) vkFreeMemory(device_, readbackMemory_, nullptr);
+        if (device_ && staticMemory_) vkFreeMemory(device_, staticMemory_, nullptr);
         if (device_ && scratchMemory_) vkFreeMemory(device_, scratchMemory_, nullptr);
         if (device_ && memory_) vkFreeMemory(device_, memory_, nullptr);
         if (device_) vkDestroyDevice(device_, nullptr);
@@ -153,6 +155,7 @@ public:
     const std::string& deviceName() const { return deviceName_; }
     bool deviceLocalHostVisible() const { return deviceLocalHostVisible_; }
     bool gpuScratchDeviceLocal() const { return gpuScratchDeviceLocal_; }
+    bool staticDataDeviceLocal() const { return staticDataDeviceLocal_; }
     const char* fieldRepresentation() const { return field8_ ? "8x32" : "10x26"; }
     uint32_t residentDispatches() const { return residentDispatches_; }
     bool timestampsSupported() const { return queryPool_ != VK_NULL_HANDLE; }
@@ -193,6 +196,8 @@ private:
     VkDeviceMemory memory_ = VK_NULL_HANDLE;
     VkBuffer scratchBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory scratchMemory_ = VK_NULL_HANDLE;
+    VkBuffer staticBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory staticMemory_ = VK_NULL_HANDLE;
     VkBuffer readbackBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory readbackMemory_ = VK_NULL_HANDLE;
     void* mapped_ = nullptr;
@@ -209,7 +214,9 @@ private:
     VkQueryPool queryPool_ = VK_NULL_HANDLE;
     std::array<VkDeviceSize, kBindings> offsets_{};
     std::array<VkDeviceSize, kBindings> stageOffsets_{};
+    std::array<VkDeviceSize, kBindings> staticOffsets_{};
     VkDeviceSize stageTotal_ = 0;
+    VkDeviceSize staticTotal_ = 0;
     std::array<VkDeviceSize, kBindings> sizes_{};
     PushConstants constants_{};
     uint32_t ringCapacity_ = 0;
@@ -227,6 +234,7 @@ private:
     bool profiling_ = false;
     bool deviceLocalHostVisible_ = false;
     bool gpuScratchDeviceLocal_ = false;
+    bool staticDataDeviceLocal_ = false;
     bool abandoned_ = false;
     bool injectDeviceLossOnceForTest_ = false;
 };
@@ -361,7 +369,7 @@ bool VulkanEngine::init(std::string& error) {
         }
     }
     if (!physical_) {
-        error = "no hardware Vulkan compute device with shaderInt64 and 10 storage buffers";
+        error = "no hardware Vulkan compute device with shaderInt64 and 11 storage buffers";
         return false;
     }
     deviceName_ = selected.deviceName;
@@ -386,15 +394,20 @@ bool VulkanEngine::init(std::string& error) {
     if (!check(vkCreateDevice(physical_, &deviceInfo, nullptr, &device_), "vkCreateDevice")) return false;
     vkGetDeviceQueue(device_, queueFamily_, 0, &queue_);
 
-    std::vector<uint32_t> automaton;
-    automaton.insert(automaton.end(), dictionary_->dfa.begin(), dictionary_->dfa.end());
-    constants_.outStartOffset = static_cast<uint32_t>(automaton.size());
-    automaton.insert(automaton.end(), dictionary_->outStart.begin(), dictionary_->outStart.end());
-    constants_.outLenOffset = static_cast<uint32_t>(automaton.size());
-    automaton.insert(automaton.end(), dictionary_->outLen.begin(), dictionary_->outLen.end());
-    constants_.outIdsOffset = static_cast<uint32_t>(automaton.size());
-    automaton.insert(automaton.end(), dictionary_->outIds.begin(), dictionary_->outIds.end());
-    if (automaton.size() > std::numeric_limits<uint32_t>::max()) {
+    // Keep immutable DFA state and the offset table in a device-local upload
+    // buffer. Only the small output lists remain host-visible because they
+    // are compacted after verified words are found.
+    std::vector<uint32_t> staticAutomaton;
+    staticAutomaton.insert(staticAutomaton.end(), dictionary_->dfa.begin(), dictionary_->dfa.end());
+    constants_.outStartOffset = static_cast<uint32_t>(staticAutomaton.size());
+    staticAutomaton.insert(staticAutomaton.end(), dictionary_->outStart.begin(), dictionary_->outStart.end());
+    std::vector<uint32_t> dynamicAutomaton;
+    constants_.outLenOffset = 0;
+    dynamicAutomaton.insert(dynamicAutomaton.end(), dictionary_->outLen.begin(), dictionary_->outLen.end());
+    constants_.outIdsOffset = static_cast<uint32_t>(dynamicAutomaton.size());
+    dynamicAutomaton.insert(dynamicAutomaton.end(), dictionary_->outIds.begin(), dictionary_->outIds.end());
+    if (staticAutomaton.size() > std::numeric_limits<uint32_t>::max() ||
+        dynamicAutomaton.size() > std::numeric_limits<uint32_t>::max()) {
         error = "Vulkan dictionary exceeds 32-bit index space"; return false;
     }
     std::vector<uint32_t> table;
@@ -403,8 +416,9 @@ bool VulkanEngine::init(std::string& error) {
         residentDispatches_, std::max<uint32_t>(1, kBaseWindowKeys / batchKeys_));
     ringCapacity_ = batchKeys_ * residentDispatches_;
     for (uint32_t i = 0; i < kBindings; ++i) {
-        sizes_[i] = i == 4 ? automaton.size() * sizeof(uint32_t) :
+        sizes_[i] = i == 4 ? dynamicAutomaton.size() * sizeof(uint32_t) :
                     i == 6 ? 64 : i == 7 ? table.size() * sizeof(uint32_t) :
+                    i == 10 ? staticAutomaton.size() * sizeof(uint32_t) :
                     i == 8 ? 2 * sizeof(uint32_t) :
                     // Bindings 0..3 and 5 are GPU-only stage storage.  A
                     // resident group is recorded as one contiguous logical
@@ -432,6 +446,13 @@ bool VulkanEngine::init(std::string& error) {
             offsets_[i] = 0;
             continue;
         }
+        if (i == 7 || i == 10) {
+            staticTotal_ = aligned(staticTotal_, alignment);
+            staticOffsets_[i] = staticTotal_;
+            staticTotal_ += sizes_[i];
+            offsets_[i] = 0;
+            continue;
+        }
         total = aligned(total, alignment);
         offsets_[i] = total;
         total += sizes_[i];
@@ -449,10 +470,18 @@ bool VulkanEngine::init(std::string& error) {
     scratchInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!check(vkCreateBuffer(device_, &scratchInfo, nullptr, &scratchBuffer_),
                "vkCreateBuffer(GPU stages)")) return false;
+    VkBufferCreateInfo staticInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    staticInfo.size = staticTotal_;
+    staticInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    staticInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (!check(vkCreateBuffer(device_, &staticInfo, nullptr, &staticBuffer_),
+               "vkCreateBuffer(static GPU data)")) return false;
     VkMemoryRequirements requirements{};
     vkGetBufferMemoryRequirements(device_, buffer_, &requirements);
     VkMemoryRequirements scratchRequirements{};
     vkGetBufferMemoryRequirements(device_, scratchBuffer_, &scratchRequirements);
+    VkMemoryRequirements staticRequirements{};
+    vkGetBufferMemoryRequirements(device_, staticBuffer_, &staticRequirements);
     VkBufferCreateInfo readbackInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     readbackInfo.size = sizes_[3];
     readbackInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -504,6 +533,24 @@ bool VulkanEngine::init(std::string& error) {
     if (scratchMemoryType == memoryProps.memoryTypeCount) {
         error = "no Vulkan memory for GPU stage buffers"; return false;
     }
+    uint32_t staticMemoryType = memoryProps.memoryTypeCount;
+    int staticScore = -1;
+    for (uint32_t i = 0; i < memoryProps.memoryTypeCount; ++i) {
+        if (!(staticRequirements.memoryTypeBits & (1u << i))) continue;
+        const VkMemoryPropertyFlags flags = memoryProps.memoryTypes[i].propertyFlags;
+        // Immutable DFA/table data is read-only during the search. Prefer
+        // true VRAM and upload it once through a temporary staging buffer.
+        const int score = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? 4 : 0) +
+                          (flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ? 1 : 0);
+        if (score > staticScore) {
+            staticScore = score;
+            staticMemoryType = i;
+            staticDataDeviceLocal_ = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+        }
+    }
+    if (staticMemoryType == memoryProps.memoryTypeCount) {
+        error = "no Vulkan memory for static GPU data"; return false;
+    }
     uint32_t readbackMemoryType = memoryProps.memoryTypeCount;
     for (uint32_t i = 0; i < memoryProps.memoryTypeCount; ++i) {
         if (!(readbackRequirements.memoryTypeBits & (1u << i))) continue;
@@ -531,6 +578,13 @@ bool VulkanEngine::init(std::string& error) {
                "vkAllocateMemory(GPU stages)") ||
         !check(vkBindBufferMemory(device_, scratchBuffer_, scratchMemory_, 0),
                "vkBindBufferMemory(GPU stages)")) return false;
+    VkMemoryAllocateInfo staticAllocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    staticAllocation.allocationSize = staticRequirements.size;
+    staticAllocation.memoryTypeIndex = staticMemoryType;
+    if (!check(vkAllocateMemory(device_, &staticAllocation, nullptr, &staticMemory_),
+               "vkAllocateMemory(static GPU data)") ||
+        !check(vkBindBufferMemory(device_, staticBuffer_, staticMemory_, 0),
+               "vkBindBufferMemory(static GPU data)")) return false;
     VkMemoryAllocateInfo readbackAllocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     readbackAllocation.allocationSize = readbackRequirements.size;
     readbackAllocation.memoryTypeIndex = readbackMemoryType;
@@ -542,8 +596,7 @@ bool VulkanEngine::init(std::string& error) {
                "vkMapMemory(test readback)")) return false;
     auto* bytes = static_cast<unsigned char*>(mapped_);
     std::memset(bytes, 0, static_cast<size_t>(total));
-    std::memcpy(bytes + offsets_[4], automaton.data(), sizes_[4]);
-    std::memcpy(bytes + offsets_[7], table.data(), sizes_[7]);
+    std::memcpy(bytes + offsets_[4], dynamicAutomaton.data(), sizes_[4]);
     constants_.curveMode = curveBatch_ == 4 ? 2u : 1u;
     constants_.ringMode = 1;
     constants_.ringCapacity = ringCapacity_;
@@ -576,6 +629,8 @@ bool VulkanEngine::init(std::string& error) {
     for (uint32_t i = 0; i < kBindings; ++i) {
         ranges[i] = (i < 4 || i == 5) ?
                               VkDescriptorBufferInfo{scratchBuffer_, stageOffsets_[i], sizes_[i]} :
+                    (i == 7 || i == 10) ?
+                              VkDescriptorBufferInfo{staticBuffer_, staticOffsets_[i], sizes_[i]} :
                               VkDescriptorBufferInfo{buffer_, offsets_[i], sizes_[i]};
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = descriptorSet_;
@@ -655,6 +710,112 @@ bool VulkanEngine::init(std::string& error) {
     if (!check(vkAllocateCommandBuffers(device_, &commandInfo, &command_), "vkAllocateCommandBuffers")) return false;
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (!check(vkCreateFence(device_, &fenceInfo, nullptr, &fence_), "vkCreateFence")) return false;
+    // Upload immutable dictionary state once. The match shader reads the DFA
+    // and the public-key offset table from the device-local buffer, while the
+    // small output lists stay in the mapped buffer so unique-per-word mode
+    // can still compact them between submits.
+    auto uploadStaticData = [&]() -> bool {
+        VkBuffer stagingBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        auto cleanup = [&] {
+            if (stagingBuffer) vkDestroyBuffer(device_, stagingBuffer, nullptr);
+            if (stagingMemory) vkFreeMemory(device_, stagingMemory, nullptr);
+        };
+        VkBufferCreateInfo stagingInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        stagingInfo.size = staticTotal_;
+        stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (!check(vkCreateBuffer(device_, &stagingInfo, nullptr, &stagingBuffer),
+                   "vkCreateBuffer(static staging)")) {
+            cleanup();
+            return false;
+        }
+        VkMemoryRequirements stagingRequirements{};
+        vkGetBufferMemoryRequirements(device_, stagingBuffer, &stagingRequirements);
+        uint32_t stagingMemoryType = memoryProps.memoryTypeCount;
+        for (uint32_t i = 0; i < memoryProps.memoryTypeCount; ++i) {
+            if (!(stagingRequirements.memoryTypeBits & (1u << i))) continue;
+            const auto flags = memoryProps.memoryTypes[i].propertyFlags;
+            if ((flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                stagingMemoryType = i;
+                break;
+            }
+        }
+        if (stagingMemoryType == memoryProps.memoryTypeCount) {
+            error = "no coherent host-visible Vulkan static staging memory";
+            cleanup();
+            return false;
+        }
+        VkMemoryAllocateInfo stagingAllocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        stagingAllocation.allocationSize = stagingRequirements.size;
+        stagingAllocation.memoryTypeIndex = stagingMemoryType;
+        if (!check(vkAllocateMemory(device_, &stagingAllocation, nullptr, &stagingMemory),
+                   "vkAllocateMemory(static staging)")) {
+            cleanup();
+            return false;
+        }
+        if (!check(vkBindBufferMemory(device_, stagingBuffer, stagingMemory, 0),
+                   "vkBindBufferMemory(static staging)")) {
+            cleanup();
+            return false;
+        }
+        void* stagingMapped = nullptr;
+        if (!check(vkMapMemory(device_, stagingMemory, 0, staticTotal_, 0, &stagingMapped),
+                   "vkMapMemory(static staging)")) {
+            cleanup();
+            return false;
+        }
+        auto* uploadBytes = static_cast<unsigned char*>(stagingMapped);
+        std::memset(uploadBytes, 0, static_cast<size_t>(staticTotal_));
+        std::memcpy(uploadBytes + staticOffsets_[7], table.data(), sizes_[7]);
+        std::memcpy(uploadBytes + staticOffsets_[10], staticAutomaton.data(), sizes_[10]);
+        vkUnmapMemory(device_, stagingMemory);
+
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (!check(vkBeginCommandBuffer(command_, &begin), "vkBeginCommandBuffer(static upload)")) {
+            cleanup();
+            return false;
+        }
+        std::array<VkBufferCopy, 2> copies{};
+        copies[0].srcOffset = staticOffsets_[7];
+        copies[0].dstOffset = staticOffsets_[7];
+        copies[0].size = sizes_[7];
+        copies[1].srcOffset = staticOffsets_[10];
+        copies[1].dstOffset = staticOffsets_[10];
+        copies[1].size = sizes_[10];
+        vkCmdCopyBuffer(command_, stagingBuffer, staticBuffer_,
+                        static_cast<uint32_t>(copies.size()), copies.data());
+        VkMemoryBarrier uploadBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        uploadBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        uploadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(command_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                             &uploadBarrier, 0, nullptr, 0, nullptr);
+        if (!check(vkEndCommandBuffer(command_), "vkEndCommandBuffer(static upload)")) {
+            cleanup();
+            return false;
+        }
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &command_;
+        if (!check(vkQueueSubmit(queue_, 1, &submit, fence_),
+                   "vkQueueSubmit(static upload)")) {
+            cleanup();
+            return false;
+        }
+        if (!check(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
+                   "vkWaitForFences(static upload)")) {
+            cleanup();
+            return false;
+        }
+        cleanup();
+        return true;
+    };
+    if (!uploadStaticData()) return false;
     if (selected.limits.timestampComputeAndGraphics && timestampValidBits_ >= 36 &&
         timestampPeriod_ > 0.0) {
         VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
@@ -1027,6 +1188,9 @@ public:
         out.lines.push_back(engine_.gpuScratchDeviceLocal() ?
                             "GPU stage buffers: device-local, not host-mapped" :
                             "GPU stage buffers: not device-local, not host-mapped");
+        out.lines.push_back(engine_.staticDataDeviceLocal() ?
+                            "Static DFA/table: device-local GPU memory" :
+                            "Static DFA/table: host-visible memory");
         out.lines.push_back("Curve batch: " + std::to_string(curveBatch_));
         out.lines.push_back("Affine inversion batch: " + std::to_string(affineBatch_));
         out.lines.push_back("Field representation: " + std::string(engine_.fieldRepresentation()));
@@ -1118,9 +1282,9 @@ public:
             std::cerr << "Vulkan verification stopped: " << error_ << "\n";
             return;
         }
-        // A dictionary word only needs one wallet result. Keep this state on
-        // the host so repeated GPU matches do not trigger another secp256k1
-        // public-key reconstruction after that word has been reported.
+        const bool uniquePerWord = cfg.uniquePerWord;
+        // Keep this state on the host only for the optional legacy
+        // one-result-per-word mode.
         std::vector<uint8_t> reportedWords(dictionary_->words.size(), 0);
         while (!state.stop.load(std::memory_order_relaxed)) {
             const uint64_t done = state.checked.load(std::memory_order_relaxed);
@@ -1135,10 +1299,11 @@ public:
                 std::min<uint32_t>(effectiveResidentDispatches(), windowDispatches),
                 std::max<uint64_t>(1, remaining / count)));
             uint32_t scanOffset = 0;
-            // GPU output lists are pruned only between submits. Keep the
-            // exact mask used by this dispatch group so host validation can
-            // compare the record with the active GPU dictionary, even while
-            // other verifier workers are reporting words from this group.
+            // GPU output lists are pruned only between submits in the
+            // optional legacy mode. Keep the exact mask used by this
+            // dispatch group so host validation can compare the record with
+            // the active GPU dictionary, even while other verifier workers
+            // are reporting words from this group.
             const std::vector<uint8_t> reportedAtSubmit = reportedWords;
             std::vector<Candidate> candidates;
             if (!scanChunks(count, dispatches, &candidates, &scanOffset)) {
@@ -1200,8 +1365,8 @@ public:
                         failVerification("Vulkan candidate dictionary verification failed");
                         break;
                     }
-                    bool needsVerification = false;
-                    {
+                    bool needsVerification = !uniquePerWord;
+                    if (uniquePerWord) {
                         std::lock_guard<std::mutex> lock(claimedWordsMutex);
                         for (uint32_t id : candidateIds) {
                             if (!reportedWords[id] && !claimedWords[id]) {
@@ -1247,16 +1412,18 @@ public:
                                 failVerification("Vulkan dictionary returned invalid ID");
                                 break;
                             }
-                            reportedWords[id] = 1;
-                            claimedWords[id] = 0;
+                            if (uniquePerWord) {
+                                reportedWords[id] = 1;
+                                claimedWords[id] = 0;
+                            }
                         }
-                        outputsChanged.store(true, std::memory_order_release);
+                        if (uniquePerWord)
+                            outputsChanged.store(true, std::memory_order_release);
                     }
                     if (verificationFailed.load(std::memory_order_relaxed)) break;
 
-                    // Keep the generic callback serialized. Only first hits
-                    // reach this point; each worker owns its secp context and
-                    // secret scalar buffer.
+                    // Each worker owns its secp context and secret scalar
+                    // buffer; serialize only the generic callback.
                     std::lock_guard<std::mutex> lock(reportMutex);
                     if (state.stop.load(std::memory_order_relaxed) ||
                         verificationFailed.load(std::memory_order_relaxed)) break;
@@ -1284,7 +1451,7 @@ public:
             if (verificationFailed.load(std::memory_order_relaxed) && error_.empty()) {
                 error_ = "could not start CPU verification workers";
             }
-            if (!verificationFailed.load(std::memory_order_relaxed) &&
+            if (!verificationFailed.load(std::memory_order_relaxed) && uniquePerWord &&
                 outputsChanged.load(std::memory_order_acquire) &&
                 !engine_.refreshDictionaryOutputs(reportedWords, error_)) {
                 std::cerr << "Vulkan scan stopped: " << error_ << "\n";

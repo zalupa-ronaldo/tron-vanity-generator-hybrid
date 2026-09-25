@@ -254,9 +254,11 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     automaton.insert(automaton.end(), dictionary->dfa.begin(), dictionary->dfa.end());
     constants.outStartOffset = static_cast<uint32_t>(automaton.size());
     automaton.insert(automaton.end(), dictionary->outStart.begin(), dictionary->outStart.end());
-    constants.outLenOffset = static_cast<uint32_t>(automaton.size());
+    const uint32_t dynamicOutLenOffset = static_cast<uint32_t>(automaton.size());
+    constants.outLenOffset = 0;
     automaton.insert(automaton.end(), dictionary->outLen.begin(), dictionary->outLen.end());
-    constants.outIdsOffset = static_cast<uint32_t>(automaton.size());
+    const uint32_t dynamicOutIdsOffset = static_cast<uint32_t>(automaton.size());
+    constants.outIdsOffset = dynamicOutIdsOffset - dynamicOutLenOffset;
     automaton.insert(automaton.end(), dictionary->outIds.begin(), dictionary->outIds.end());
     State state;
     auto check = [&](VkResult result, const char* call) {
@@ -285,7 +287,9 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
         vkGetPhysicalDeviceFeatures(device, &features);
         vkGetPhysicalDeviceProperties(device, &properties);
         if (!features.shaderInt64 || properties.limits.maxComputeWorkGroupInvocations < 64 ||
-            properties.limits.maxComputeWorkGroupSize[0] < 64) continue;
+            properties.limits.maxComputeWorkGroupSize[0] < 64 ||
+            properties.limits.maxPerStageDescriptorStorageBuffers < 11 ||
+            properties.limits.maxDescriptorSetStorageBuffers < 11) continue;
         uint32_t familyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
         std::vector<VkQueueFamilyProperties> families(familyCount);
@@ -380,19 +384,19 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     std::memset(static_cast<unsigned char*>(mapped) + ringOffset, kCanary, ringBytes);
     vkUnmapMemory(state.device, state.memory);
 
-    VkDescriptorSetLayoutBinding bindings[10]{};
-    for (uint32_t i = 0; i < 10; ++i) {
+    VkDescriptorSetLayoutBinding bindings[11]{};
+    for (uint32_t i = 0; i < 11; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = 10;
+    layoutInfo.bindingCount = 11;
     layoutInfo.pBindings = bindings;
     if (!check(vkCreateDescriptorSetLayout(state.device, &layoutInfo, nullptr, &state.descriptorLayout),
                "vkCreateDescriptorSetLayout")) return false;
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10};
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = 1;
     poolInfo.poolSizeCount = 1;
@@ -405,15 +409,19 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
     setInfo.pSetLayouts = &state.descriptorLayout;
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (!check(vkAllocateDescriptorSets(state.device, &setInfo, &set), "vkAllocateDescriptorSets")) return false;
-    VkDescriptorBufferInfo ranges[10] = {
+    const VkDeviceSize staticAutomatonBytes = VkDeviceSize(dictionary->dfa.size() + dictionary->outStart.size()) * sizeof(uint32_t);
+    const VkDeviceSize dynamicAutomatonBytes = VkDeviceSize(dictionary->outLen.size() + dictionary->outIds.size()) * sizeof(uint32_t);
+    VkDescriptorBufferInfo ranges[11] = {
         {state.buffer, 0, inBytes}, {state.buffer, outputOffset, outBytes},
         {state.buffer, fullOffset, fullBytes}, {state.buffer, addressOffset, addressBytes},
-        {state.buffer, automatonOffset, automatonBytes}, {state.buffer, matchOffset, matchBytes},
+        {state.buffer, automatonOffset + VkDeviceSize(dynamicOutLenOffset) * sizeof(uint32_t), dynamicAutomatonBytes},
+        {state.buffer, matchOffset, matchBytes},
         {state.buffer, baseOffset, inBytes}, {state.buffer, tableOffset, tableBytes},
-        {state.buffer, metaOffset, 2 * sizeof(uint32_t)}, {state.buffer, ringOffset, ringBytes}
+        {state.buffer, metaOffset, 2 * sizeof(uint32_t)}, {state.buffer, ringOffset, ringBytes},
+        {state.buffer, automatonOffset, staticAutomatonBytes}
     };
-    VkWriteDescriptorSet writes[10]{};
-    for (uint32_t i = 0; i < 10; ++i) {
+    VkWriteDescriptorSet writes[11]{};
+    for (uint32_t i = 0; i < 11; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
         writes[i].dstBinding = i;
@@ -421,7 +429,7 @@ bool runKeccak(uint32_t activeItems, uint32_t curveMode, uint32_t offsetBase,
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[i].pBufferInfo = &ranges[i];
     }
-    vkUpdateDescriptorSets(state.device, 10, writes, 0, nullptr);
+    vkUpdateDescriptorSets(state.device, 11, writes, 0, nullptr);
 
     VkShaderModuleCreateInfo shaderInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     shaderInfo.codeSize = sizeof(kVulkanKeccakSpv);

@@ -6,9 +6,12 @@ layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 3) readonly buffer TextAddresses {
     uint words[];
 } addresses;
-layout(std430, set = 0, binding = 4) readonly buffer Automaton {
+layout(std430, set = 0, binding = 4) readonly buffer DynamicAutomaton {
     uint words[];
-} automaton;
+} dynamicAutomaton;
+layout(std430, set = 0, binding = 10) readonly buffer StaticAutomaton {
+    uint words[];
+} staticAutomaton;
 layout(std430, set = 0, binding = 5) writeonly buffer MatchScratch {
     uint words[];
 } results;
@@ -53,11 +56,11 @@ void main() {
         for (uint i = 0u; i < 58u; ++i)
             if (ch == ALPHABET[i]) { index = i; break; }
         if (index == 58u) { state = 0u; continue; }
-        state = automaton.words[params.dfaOffset + state * 58u + index];
-        uint start = automaton.words[params.outStartOffset + state];
-        uint length = automaton.words[params.outLenOffset + state];
+        state = staticAutomaton.words[params.dfaOffset + state * 58u + index];
+        uint start = staticAutomaton.words[params.outStartOffset + state];
+        uint length = dynamicAutomaton.words[params.outLenOffset + state];
         for (uint j = 0u; j < length; ++j) {
-            uint id = automaton.words[params.outIdsOffset + start + j];
+            uint id = dynamicAutomaton.words[params.outIdsOffset + start + j];
             bool seen = false;
             for (uint k = 0u; k < count; ++k)
                 if (ids[k] == id) { seen = true; break; }

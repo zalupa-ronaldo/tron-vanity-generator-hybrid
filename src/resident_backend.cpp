@@ -184,6 +184,9 @@ public:
             std::cerr << "GPU resident unavailable: " << error_ << "\n";
             return;
         }
+        // Keep every dictionary output active by default. The old one-result-
+        // per-word mode remains available through --unique-words.
+        pruneOutputs_ = cfg.uniquePerWord;
         while (!state.stop.load(std::memory_order_relaxed)) {
             if (cfg.maxAttempts && state.checked.load() >= cfg.maxAttempts) break;
             uint32_t produced = 0, overflow = 0;

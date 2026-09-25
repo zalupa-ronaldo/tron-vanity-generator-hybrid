@@ -15,6 +15,9 @@ struct RunConfig {
     uint64_t maxAttempts = 0;      // 0 = 无限
     uint64_t seconds = 60;         // 0 = until Ctrl+C
     bool verbose = false;
+    // Production searches report every matching address by default. The
+    // legacy one-result-per-word behavior is opt-in for bounded runs.
+    bool uniquePerWord = false;
     std::shared_ptr<const Dictionary> dictionary;
 };
 
@@ -31,6 +34,7 @@ struct RunState {
     std::atomic<uint64_t> cpuChecked{0};
     std::atomic<uint64_t> gpuChecked{0};
     std::atomic<uint64_t> found{0};
+    std::atomic<uint64_t> uniqueWords{0};
     std::atomic<bool> stop{false};
 };
 

@@ -52,8 +52,8 @@ saves a scalar.
 binding 3 (34 ASCII characters and two zero padding bytes). The test compares
 this final text with `tronAddressFromPubXY()` on every vector. It uses the
 same two-digit (base 58²) long division as the OpenCL resident kernel.
-`vulkan/match.comp` reads text at binding 3 and packed DFA/output tables at
-binding 4. In test mode it writes one 18-word record per address at binding 5
+`vulkan/match.comp` reads text at binding 3, the immutable DFA/offset table at
+binding 10 and the mutable output lists at binding 4. In test mode it writes one 18-word record per address at binding 5
 (count, overflow, 16 distinct word IDs). In ring mode it atomically reserves
 a slot in metadata binding 8 and writes a 29-word record at binding 9 (key
 index, count, flags, reserved, 16 IDs and nine packed words of the GPU

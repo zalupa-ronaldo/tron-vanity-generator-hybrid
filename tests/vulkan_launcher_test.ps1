@@ -14,8 +14,8 @@ public class Fixture {
     public static int Main(string[] args) {
         bool test = Array.IndexOf(args, "test-vulkan") >= 0;
         bool failTest = File.Exists("fixture-fail-test");
-        bool failProfile = File.Exists("fixture-fail-profile");
-        bool openclWinner = File.Exists("fixture-opencl-winner");
+        bool failProfile = Value(args, "--vulkan-batch-keys") == "262144";
+        bool openclWinner = Value(args, "--bench-seconds") == "2";
         string batch = Value(args, "--vulkan-curve-batch");
         string affine = Value(args, "--vulkan-affine-batch");
         string name = test ? "test" : batch == "" ? "opencl" :
@@ -27,7 +27,8 @@ public class Fixture {
             Console.WriteLine("Vulkan resident repeated dispatch + CPU verification PASS (no wallets)");
             return 0;
         }
-        if (Value(args, "--words") != "words.txt" || Value(args, "--bench-seconds") != "1" ||
+        if (Value(args, "--words") != "words.txt" ||
+            (Value(args, "--bench-seconds") != "1" && Value(args, "--bench-seconds") != "2") ||
             Array.IndexOf(args, "--no-config") < 0) return 3;
         if (failProfile && batch == "4") return 4;
         if (batch == "") Console.WriteLine("wall 1.000 s, wall speed " +
@@ -60,12 +61,10 @@ try {
         }
         if ($case.Mode -eq "fail-test") {
             New-Item -ItemType File -Path (Join-Path $dir "fixture-fail-test") | Out-Null
-        } elseif ($case.Mode -eq "fail-profile") {
-            New-Item -ItemType File -Path (Join-Path $dir "fixture-fail-profile") | Out-Null
-        } elseif ($case.Mode -eq "opencl-winner") {
-            New-Item -ItemType File -Path (Join-Path $dir "fixture-opencl-winner") | Out-Null
         }
-        $launcherArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $dir "bench-vulkan.ps1"), "-Seconds", "1")
+        $runSeconds = if ($case.Mode -eq "opencl-winner") { "2" } else { "1" }
+        $launcherArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $dir "bench-vulkan.ps1"), "-Seconds", $runSeconds)
+        if ($case.Mode -eq "fail-profile") { $launcherArgs += @("-VulkanBatchKeys", "262144") }
         if ($case.UpdateConfig) { $launcherArgs += "-UpdateConfig" }
         $output = & powershell.exe @launcherArgs 2>&1
         if ($LASTEXITCODE -ne $case.Exit) {

@@ -28,7 +28,7 @@ public class Fixture {
         if (Value(args, "--words") != "words.txt" || Value(args, "--bench-seconds") != "1" ||
             Array.IndexOf(args, "--no-config") < 0) return 3;
         if (mode == "fail-profile" && batch == "4" && affine == "8") return 4;
-        if (batch == "") Console.WriteLine("wall 1.000 s, wall speed 100.000 M/s");
+        if (batch == "") Console.WriteLine("wall 1.000 s, wall speed 10.000 M/s");
         else Console.WriteLine("Vulkan batch " + batch + " / affine " + affine +
                                " / fixture GPU " +
                                (batch == "4" && affine == "8" ? "30.00" : "20.00") + " M/s");

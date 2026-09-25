@@ -1,0 +1,44 @@
+{
+  "changed_files": [
+    "AGENTS.md",
+    ".agent-policy.yaml",
+    ".agent-policy.draft.yaml",
+    ".agent-policy/",
+    ".codex/skills/agent-engineering/SKILL.md",
+    ".cline/skills/agent-engineering/SKILL.md",
+    ".github/workflows/agent-policy.yml",
+    "docs/agent/README.md"
+  ],
+  "commit": "4e227275abc4df9500a10a11ff1629b4f9d2c96e",
+  "completed_checks": [
+    "independent policy review: valid",
+    "policy validate: valid",
+    "baseline configure: passed",
+    "baseline build: passed",
+    "baseline tests: 8/8 passed",
+    "baseline diff-check: passed",
+    "final policy check: passed",
+    "evidence capture: passed"
+  ],
+  "current_state": "Standard artifacts are generated, the active policy is reviewed and valid, baseline and final policy checks pass, and the isolated adoption branch is ready to merge.",
+  "failed_checks": [],
+  "format": 1,
+  "goal": "Install the pinned Agent Engineering Standard in the TRON vanity generator project",
+  "known_risks": [
+    "SECRET-001 flags tools/manage-benchmark-token.sh from its filename; no credential value was read or persisted, and the finding remains documented for review.",
+    "Validation and baseline ran on the local macOS host; Windows-specific GPU release paths still require their normal CI or user-side validation."
+  ],
+  "next_command": "Run agent-policy check . before substantive future changes.",
+  "open_questions": [],
+  "standard": {
+    "id": "agent-engineering-standard",
+    "requested_ref": "d21f002d0c43f2ca2a74390b84bddbaaacb5ef4c",
+    "source": "https://github.com/zalupa-ronaldo/agent-engineering-standard.git",
+    "source_kind": "git",
+    "standard_commit": "d21f002d0c43f2ca2a74390b84bddbaaacb5ef4c",
+    "standard_hash": "297b4cce86e4352ee7abce26abd520efb870ebffd3845192757cceaad059aca8",
+    "version": "1.0.0"
+  },
+  "status": "complete",
+  "updated_at": "2026-09-25T21:02:50.463777+00:00"
+}

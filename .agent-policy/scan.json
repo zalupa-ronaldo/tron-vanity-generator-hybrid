@@ -1,0 +1,60 @@
+{
+  "agent_rules": [],
+  "ci_files": [
+    ".github/workflows/release.yml"
+  ],
+  "commands": {},
+  "external_integrations": [],
+  "findings": [
+    {
+      "code": "GIT-002",
+      "message": "Working tree contains pre-existing changes; they are not modified by the scanner",
+      "severity": "warning"
+    },
+    {
+      "code": "POLICY-001",
+      "message": "No project policy file was found; run agent-policy init",
+      "severity": "warning"
+    },
+    {
+      "code": "SECRET-001",
+      "message": "Potential secret-bearing file requires review",
+      "path": "tools/manage-benchmark-token.sh",
+      "severity": "error"
+    }
+  ],
+  "frameworks": [],
+  "git": {
+    "base": "a3c18d9ba02e8165b40ed9392160aa85f5a05fc4",
+    "branch": "agent-standard-adoption",
+    "dirty": true,
+    "head": "4e227275abc4df9500a10a11ff1629b4f9d2c96e",
+    "is_repository": true,
+    "remote": "https://github.com/hlzzhqb/tron-vanity-generator.git",
+    "status": [
+      "?? .agent-policy/"
+    ]
+  },
+  "languages": [
+    "python"
+  ],
+  "lockfiles": [],
+  "migration_paths": [],
+  "modules": [
+    {
+      "critical": false,
+      "id": "src",
+      "paths": [
+        "src"
+      ],
+      "tests": [
+        "tests"
+      ]
+    }
+  ],
+  "package_managers": [
+    "pip"
+  ],
+  "policy_files": [],
+  "root": "/private/tmp/tron-vanity-standard-adoption"
+}

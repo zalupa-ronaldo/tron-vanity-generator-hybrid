@@ -1,0 +1,21 @@
+name: agent-policy
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install policy CLI
+        run: python -m pip install --disable-pip-version-check "agent-policy==0.1.0"
+      - name: Validate policy
+        run: agent-policy validate --json
+      - name: Run policy checks
+        run: agent-policy check --json

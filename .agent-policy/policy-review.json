@@ -1,0 +1,11 @@
+{
+  "draft": "/private/tmp/tron-vanity-standard-adoption/.agent-policy.draft.yaml",
+  "findings": [],
+  "format": 1,
+  "independent": true,
+  "observed_modules": [
+    "src"
+  ],
+  "reviewer": "codex-independent-policy-review",
+  "valid": true
+}

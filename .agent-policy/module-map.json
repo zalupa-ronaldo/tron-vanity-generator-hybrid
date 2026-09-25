@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "critical": false,
+      "id": "src",
+      "paths": [
+        "src"
+      ],
+      "tests": [
+        "tests"
+      ]
+    }
+  ]
+}

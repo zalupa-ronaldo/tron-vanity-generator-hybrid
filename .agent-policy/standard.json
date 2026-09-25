@@ -1,0 +1,9 @@
+{
+  "id": "agent-engineering-standard",
+  "requested_ref": "d21f002d0c43f2ca2a74390b84bddbaaacb5ef4c",
+  "source": "https://github.com/zalupa-ronaldo/agent-engineering-standard.git",
+  "source_kind": "git",
+  "standard_commit": "d21f002d0c43f2ca2a74390b84bddbaaacb5ef4c",
+  "standard_hash": "297b4cce86e4352ee7abce26abd520efb870ebffd3845192757cceaad059aca8",
+  "version": "1.0.0"
+}

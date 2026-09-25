@@ -1,0 +1,112 @@
+version: 1
+standard:
+  name: agent-engineering-standard
+  version: 1.0.0
+  id: agent-engineering-standard
+  standard_commit: d21f002d0c43f2ca2a74390b84bddbaaacb5ef4c
+  standard_hash: 297b4cce86e4352ee7abce26abd520efb870ebffd3845192757cceaad059aca8
+project:
+  name: tron-vanity-gpu
+  modules:
+  - id: src
+    paths:
+    - src
+    tests:
+    - tests
+    critical: true
+  - id: gpu-pipelines
+    paths:
+    - kernels
+    - vulkan
+    tests:
+    - tests
+    critical: true
+  - id: packaging-and-upload
+    paths:
+    - deploy
+    - tools
+    - build.ps1
+    - build-macos.sh
+    tests:
+    - tests
+    critical: false
+  languages:
+  - c
+  - c++
+  - glsl
+  - metal
+  - powershell
+  - python
+  frameworks: []
+  package_managers:
+  - cmake
+  - git-submodule
+  lockfiles: []
+  agent_rules:
+  - AGENTS.md
+  ci_files:
+  - .github/workflows/release.yml
+  - .github/workflows/agent-policy.yml
+  migration_paths: []
+  external_integrations:
+  - deploy/tron_bench_upload.py
+  - tools/upload-benchmark-results.ps1
+commands:
+  configure:
+    argv:
+    - cmake
+    - -S
+    - .
+    - -B
+    - build-agent-policy
+    - -DCMAKE_BUILD_TYPE=Release
+    timeout_seconds: 900
+  build:
+    argv:
+    - cmake
+    - --build
+    - build-agent-policy
+    - --parallel
+    - '2'
+    timeout_seconds: 1800
+  test:
+    argv:
+    - ctest
+    - --test-dir
+    - build-agent-policy
+    - --output-on-failure
+    timeout_seconds: 1800
+  diff-check:
+    argv:
+    - git
+    - diff
+    - --check
+    timeout_seconds: 120
+quality:
+  line_coverage_min: 95
+  branch_coverage_min: 90
+  mutation_score_min: 90
+architecture:
+  forbidden_imports: []
+  max_cyclomatic_complexity: 10
+security:
+  required_checks:
+  - invalid_input
+  - authorization
+  - replay
+  - dependency_failure
+  - secret_scan
+  unknown_external_result: blocked
+release:
+  dangerous_actions: blocked
+  reversible_deploy_only: true
+  auto_merge: false
+  auto_deploy: false
+evidence:
+  require_commit_match: true
+  include_source_hashes: true
+baseline:
+  created_at: '2026-09-25T20:51:09.848015+00:00'
+  ratchet: true
+  known_failures: []
+  source_commit: 4e227275abc4df9500a10a11ff1629b4f9d2c96e

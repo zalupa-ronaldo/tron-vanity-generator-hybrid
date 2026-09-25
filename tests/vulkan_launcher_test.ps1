@@ -27,7 +27,7 @@ public class Fixture {
         }
         if (Value(args, "--words") != "words.txt" || Value(args, "--bench-seconds") != "1" ||
             Array.IndexOf(args, "--no-config") < 0) return 3;
-        if (mode == "fail-profile" && batch == "4" && affine == "8") return 4;
+        if (mode == "fail-profile" && batch == "4") return 4;
         if (batch == "") Console.WriteLine("wall 1.000 s, wall speed " +
                                              (mode == "opencl-winner" ? "40.00" : "10.00") + " M/s");
         else Console.WriteLine("Vulkan batch " + batch + " / affine " + affine +

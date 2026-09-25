@@ -40,12 +40,11 @@ The ZIP contains `tron_vanity_generator.exe`, `tron-vanity.conf`,
 `words.txt` and `bench.cmd`. Replace `words.txt` with your own dictionary if
 needed. Double-click **`tron_vanity_generator.exe`**: it reads the adjacent
 config and searches on the RX 9070 XT until Ctrl+C. The bundled config uses
-the validated staged OpenCL settings (GPU only, paired inversion, affine
-batch 4, group 64); it does not enable unmeasured experiments. If the selected
-GPU is unavailable, it fails instead of silently running on CPU.
-The reported ~105 M/s RX profile used an 8 MiB result ring; the bundled
-search config uses 128 MiB for match capacity. Their wall-rate difference
-has not yet been measured on the RX.
+the validated resident Vulkan winner: 10x26 field, curve batch 4, affine
+batch 8, 131072-key submits and resident group 16. The matched user run
+measured 157.14 M/s for that configuration versus about 105 M/s for the
+OpenCL reference. If the selected GPU is unavailable, it fails instead of
+silently running on CPU.
 
 From a terminal in the extracted folder, the short commands are:
 
@@ -58,12 +57,14 @@ bench.cmd                           bounded OpenCL matrix + Vulkan A/B benchmark
 
 `bench.cmd` runs the complete OpenCL configuration matrix and then the
 Vulkan/OpenCL A/B suite, each with independent correctness gates and timeouts.
-After a valid profile has passed its own correctness gate, it updates the
-adjacent `tron-vanity.conf` to the fastest measured OpenCL variant and saves
-the previous file as a timestamped `.bak-YYYYMMDD-HHmmss` copy. Optional
-comparison cases that time out on a particular driver no longer block this
-update; if there is no successful timed profile, the existing config is left
-unchanged. It writes `summary.txt` and `benchmark.csv` in separate
+The final Vulkan/OpenCL suite measures the same full-address wall workload on
+both backends, ranks only successful positive-rate rows, and updates the
+adjacent `tron-vanity.conf` to the fastest measured backend configuration.
+It saves the previous file as a timestamped `.bak-YYYYMMDD-HHmmss` copy and
+removes stale options belonging to the losing backend. Optional comparison
+cases that time out on a particular driver no longer block this update; if
+there is no successful timed profile, the existing config is left unchanged.
+It writes `summary.txt` and `benchmark.csv` in separate
 `opencl-diagnostic-*` and `vulkan-benchmark-*` folders. Send both pairs of
 reports. It ignores the adjacent search config and records
 the exe and dictionary SHA-256 hashes, so A/B results can be checked against
@@ -118,9 +119,9 @@ The production-backend part additionally uses the full 58-character Base58
 alphabet to fill the result ring and test fresh-base rollover without saving
 wallets.
 The Windows ZIP includes an **experimental** `--backend vulkan` full-address
-wallet backend, but its adjacent `tron-vanity.conf` still selects OpenCL, so
-double-clicking the exe does not use Vulkan. Vulkan runs only when explicitly
-selected. In this mode:
+wallet backend, and the adjacent `tron-vanity.conf` selects the measured RX
+winner by default. Explicit `--no-config --backend vulkan` runs are also
+available. In this mode:
 OS CSPRNG chooses a base scalar, GPU computes all address stages and dictionary
 matches, and CPU independently verifies every reported key/address/match.
 It fails closed on a driver timeout or result-ring overflow. The backend now
@@ -141,7 +142,7 @@ keys. The measured RX winner is `--vulkan-curve-batch 4` with
 defaults for explicit Vulkan runs. The older 2.9-3.0 M keys/s numbers were
 measured before this split and must not be presented as current performance.
 The regular Windows ZIP includes `bench-vulkan.cmd` and `bench-vulkan.ps1` for
-a bounded, no-wallet Vulkan/OpenCL comparison. GitHub Actions also keeps a
+a bounded, no-wallet Vulkan/OpenCL comparison and winner selection. GitHub Actions also keeps a
 short-lived, standalone `vulkan-stage-test-windows-x64` artifact; it is not
 needed if you have the current ZIP.
 
@@ -158,15 +159,19 @@ then double-click `bench-vulkan.cmd` (or run it in a terminal):
 bench-vulkan.cmd
 ```
 
-It first runs `test-vulkan`, then measures the matched OpenCL reference and
-Vulkan curve batches 1/4 twice in interleaved order. Every child has a
-timeout; `summary.txt` and `benchmark.csv` contain the wall rates and
+It first runs `test-vulkan`, then measures the matched OpenCL reference,
+Vulkan baseline, curve batch 4 / affine 4 and the resident winner twice.
+The resident winner defaults to curve 4 / affine 8 / group 16. Every child
+has a timeout; `summary.txt` and `benchmark.csv` contain the wall rates and
 dictionary hash, without wallet files. The historical 2.985 M/s result was
 from the pre-resident split and is not comparable to the current raw resident
-benchmark. Send only these two reports, not `results` or wallets.
-The script passes `--no-config` because the bundled config intentionally
-selects OpenCL and includes OpenCL-only options. `--backend vulkan` never silently
-falls back to CPU: software Vulkan devices are rejected for normal runs.
+benchmark. With `-UpdateConfig` (the default of `bench-vulkan.cmd`), the
+script writes the fastest successful row to `tron-vanity.conf` and saves a
+timestamped backup. Send only these two reports, not `results` or wallets.
+The script passes `--no-config` so the benchmark always supplies its own
+backend-specific arguments and never inherits the search configuration.
+`--backend vulkan` never silently falls back to CPU: software Vulkan devices
+are rejected for normal runs.
 For a deliberate no-wallet software-driver benchmark in a development
 environment, set `TRON_VULKAN_ALLOW_SOFTWARE=1`. Do not compare that CI rate
 with RX hardware.
@@ -180,8 +185,9 @@ The projective curve and affine batch-4/8 shaders are compiled separately, so
 large live arrays do not inflate the other variants. On the RX 9070 XT, curve
 4 / affine 8 / resident group 16 reached 157.14 M/s wall in the no-wallet
 resident benchmark; curve 1 / affine 4 / group 8 reached 123.18 M/s under
-the same style of run. The bundled config intentionally remains OpenCL for
-compatibility; explicit Vulkan uses the measured winner. Repeat the A/B/A
+the same style of run. The bundled config now uses that measured Vulkan
+winner on the RX 9070 XT; `bench-vulkan.cmd` can switch it back to OpenCL if
+a future full-address comparison measures OpenCL faster. Repeat the A/B/A
 comparison with the same dictionary after driver changes.
 The Windows build also contains an opt-in 8x32 field representation for the
 Vulkan curve/affine stages. It uses 32-bit limbs and the secp256k1
@@ -201,10 +207,10 @@ larger 8x32 submits are rejected by the bounded profile because some Windows
 AMD driver configurations can hold the first dispatch behind the watchdog.
 That limit applies to the diagnostic profile only, not to production search.
 The same choice can be written as `vulkan-field=8x32` in an explicit Vulkan
-config; the bundled search config remains OpenCL.
-An opt-in Vulkan config may use `backend=vulkan` and
-`vulkan-curve-batch=4` plus `vulkan-affine-batch=4|8`; the bundled RX config
-remains on its proven OpenCL settings.
+config; the bundled search config uses the validated `vulkan-field=10x26`.
+The bundled RX config is `backend=vulkan` with
+`vulkan-curve-batch=4`, `vulkan-affine-batch=8`,
+`vulkan-batch-keys=131072` and `vulkan-resident-group=16`.
 
 The resident group can be compared without rebuilding: use
 `--vulkan-resident-group 4|8|16` (or `vulkan-resident-group=4|8|16` in an

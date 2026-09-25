@@ -144,6 +144,10 @@ function Update-SearchConfig([object]$Best) {
     $tokens = @($Best.Arguments -split ' ' | Where-Object { $_ -ne "" })
     $updates = [ordered]@{
         "backend" = "opencl"
+        "strict-backend" = "true"
+        "seconds" = "0"
+        "words" = "words.txt"
+        "out" = "results"
         "gpu-rng" = Get-ArgumentValue $tokens "--gpu-rng" "chacha12"
         "gpu-buffer-mb" = Get-ArgumentValue $tokens "--gpu-buffer-mb" "8"
         "gpu-chunk-ms" = Get-ArgumentValue $tokens "--gpu-chunk-ms" "32"
@@ -158,15 +162,23 @@ function Update-SearchConfig([object]$Best) {
         "opencl-sha-ring" = if (Has-Argument $tokens "--opencl-sha-ring") { "true" } else { "false" }
         "opencl-host-seed" = if (Has-Argument $tokens "--opencl-host-seed") { "true" } else { "false" }
     }
+    $managed = @("backend", "strict-backend", "seconds", "words", "out", "gpu-resident",
+        "gpu-rng", "gpu-buffer-mb", "gpu-chunk-ms", "gpu-group-size", "opencl-pipeline",
+        "opencl-inverse", "opencl-affine-batch", "opencl-curve-batch", "opencl-compiler",
+        "opencl-opt-mask", "opencl-async-meta-read", "opencl-sha-ring", "opencl-host-seed",
+        "vulkan-curve-batch", "vulkan-affine-batch", "vulkan-batch-keys", "vulkan-resident-group",
+        "vulkan-field")
     $lines = @(Get-Content -LiteralPath $configPath -Encoding UTF8)
     $output = [System.Collections.Generic.List[string]]::new()
     $seen = @{}
     foreach ($line in $lines) {
         if ($line -match '^(\s*)([A-Za-z0-9-]+)(\s*=).*$') {
             $key = $matches[2]
-            if ($updates.Contains($key)) {
-                $output.Add(($matches[1] + $key + $matches[3] + [string]$updates[$key]))
-                $seen[$key] = $true
+            if ($managed -contains $key) {
+                if ($updates.Contains($key)) {
+                    $output.Add(($matches[1] + $key + $matches[3] + [string]$updates[$key]))
+                    $seen[$key] = $true
+                }
                 continue
             }
         }

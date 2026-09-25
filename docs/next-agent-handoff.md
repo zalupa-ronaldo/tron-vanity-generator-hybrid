@@ -30,7 +30,7 @@ dropping matches. A successful benchmark never writes wallet files.
   `tests/opencl_launcher_test.ps1`: fake-process launcher
   regression test. `tests/opencl_runtime_test.cpp`: actual OpenCL runtime
   integration (CPU OpenCL in Linux CI is correctness evidence, not RX speed).
-- `tron-vanity.conf`: conservative RX 9070 XT defaults. `src/run_config.cpp`:
+- `tron-vanity.conf`: measured RX 9070 XT Vulkan defaults. `src/run_config.cpp`:
   strict key=value parser; relative dictionary/output paths resolve next to
   the config. The config has no secret values.
 
@@ -73,8 +73,11 @@ the selected explicit-Vulkan default and is about 50% above the earlier
 `vkAllocateMemory -2`, so it is an allocation limit, not evidence that the
 curve or address math is incorrect. The redacted measurements are in
 [`amd-rx9070xt-vulkan-2026-09-24.json`](../benchmarks/amd-rx9070xt-vulkan-2026-09-24.json).
-The bundled `tron-vanity.conf` deliberately remains OpenCL; Vulkan is still
-explicit opt-in and wallet-output validation remains a separate gate.
+The bundled `tron-vanity.conf` now selects the measured resident Vulkan winner
+(curve 4, affine 8, 131072-key submits, group 16, 10x26). `bench.cmd` compares
+the full-address OpenCL and Vulkan rows and can switch the config back to
+OpenCL only when a later valid measurement wins. Wallet-output validation
+remains a separate gate.
 
 ## Highest-value next experiments
 
@@ -95,8 +98,8 @@ explicit opt-in and wallet-output validation remains a separate gate.
    10x26 secp256k1 offset walk, full-address encoding and a bounded atomic
    match ring. The tests compare every stage and ring record with
    CPU/libsecp256k1, including offset-window and capacity boundaries. The
-   Windows release compiles this backend, but its adjacent config selects
-   OpenCL; Vulkan is explicit opt-in. `--backend vulkan` fails closed and
+   Windows release compiles this backend, and its adjacent config selects the
+   measured Vulkan winner. `--backend vulkan` fails closed and
    `test-vulkan` exercises the production backend without writing wallets,
    including ring, rollover and synthetic device-loss checks.
    The current source separates projective curve output from a GPU-only affine

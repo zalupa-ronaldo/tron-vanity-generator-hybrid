@@ -15,7 +15,10 @@ public class Fixture {
         bool test = Array.IndexOf(args, "test-vulkan") >= 0;
         string mode = Environment.GetEnvironmentVariable("TRON_VULKAN_FIXTURE");
         string batch = Value(args, "--vulkan-curve-batch");
-        string name = test ? "test" : batch == "" ? "opencl" : "vulkan-" + batch;
+        string affine = Value(args, "--vulkan-affine-batch");
+        string name = test ? "test" : batch == "" ? "opencl" :
+            batch == "1" ? "vulkan-baseline" :
+            affine == "4" ? "vulkan-curve4-affine4" : "vulkan-winner";
         File.AppendAllText("calls.txt", name + Environment.NewLine);
         if (test) {
             if (mode == "fail-test") return 2;
@@ -24,10 +27,11 @@ public class Fixture {
         }
         if (Value(args, "--words") != "words.txt" || Value(args, "--bench-seconds") != "1" ||
             Array.IndexOf(args, "--no-config") < 0) return 3;
-        if (mode == "fail-profile" && batch == "4") return 4;
+        if (mode == "fail-profile" && batch == "4" && affine == "8") return 4;
         if (batch == "") Console.WriteLine("wall 1.000 s, wall speed 100.000 M/s");
-        else Console.WriteLine("wall: 25000000 keys / 1.000 s, " +
-                               (batch == "4" ? "30.00" : "20.00") + " M/s, 10 dispatches");
+        else Console.WriteLine("Vulkan batch " + batch + " / affine " + affine +
+                               " / fixture GPU " +
+                               (batch == "4" && affine == "8" ? "30.00" : "20.00") + " M/s");
         return 0;
     }
 }
@@ -35,17 +39,26 @@ public class Fixture {
 $previousMode = $env:TRON_VULKAN_FIXTURE
 try {
     foreach ($case in @(
-        @{ Mode = "success"; Exit = 0; Calls = "test,opencl,vulkan-1,vulkan-4,vulkan-1,vulkan-4,opencl" },
+        @{ Mode = "success"; Exit = 0; UpdateConfig = $true; Calls = "test,opencl,vulkan-baseline,vulkan-curve4-affine4,vulkan-winner,vulkan-winner,opencl" },
         @{ Mode = "fail-test"; Exit = 1; Calls = "test" },
-        @{ Mode = "fail-profile"; Exit = 1; Calls = "test,opencl,vulkan-1,vulkan-4,vulkan-1,vulkan-4,opencl" }
+        @{ Mode = "fail-profile"; Exit = 1; Calls = "test,opencl,vulkan-baseline,vulkan-curve4-affine4,vulkan-winner,vulkan-winner,opencl" }
     )) {
         $dir = Join-Path $root ("test " + $case.Mode)
         New-Item -ItemType Directory -Path $dir | Out-Null
         Copy-Item -LiteralPath $fixture -Destination (Join-Path $dir "tron_vanity_generator.exe")
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../bench-vulkan.ps1") -Destination $dir
         Set-Content -LiteralPath (Join-Path $dir "words.txt") -Value "energy" -Encoding ASCII
+        if ($case.UpdateConfig) {
+            Set-Content -LiteralPath (Join-Path $dir "tron-vanity.conf") -Value @(
+                "backend=opencl", "gpu-resident=true", "gpu-group-size=64",
+                "opencl-pipeline=staged", "opencl-inverse=pair",
+                "vulkan-curve-batch=1", "vulkan-affine-batch=4"
+            ) -Encoding ASCII
+        }
         $env:TRON_VULKAN_FIXTURE = $case.Mode
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir "bench-vulkan.ps1") -Seconds 1 2>&1
+        $launcherArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $dir "bench-vulkan.ps1"), "-Seconds", "1")
+        if ($case.UpdateConfig) { $launcherArgs += "-UpdateConfig" }
+        $output = & powershell.exe @launcherArgs 2>&1
         if ($LASTEXITCODE -ne $case.Exit) {
             throw "$($case.Mode) exit mismatch: $LASTEXITCODE`n$($output -join "`n")"
         }
@@ -59,12 +72,28 @@ try {
         } else {
             $csv = Import-Csv -LiteralPath (Join-Path $reports[0].Directory.FullName "benchmark.csv")
             if ($csv.Count -ne 7) { throw "$($case.Mode) expected seven benchmark rows" }
-            $vulkan4 = @($csv | Where-Object { $_.Test -eq "04-vulkan-4-A" })[0]
+            $vulkan4 = @($csv | Where-Object { $_.Test -eq "04-vulkan-curve4-affine4-A" })[0]
+            $winner = @($csv | Where-Object { $_.Test -eq "05-vulkan-winner-A" })[0]
             if ($case.Mode -eq "success") {
-                if ($vulkan4.Result -ne "PASS" -or $vulkan4.MKeysPerSecond -ne "30") {
-                    throw "Vulkan batch-4 wall rate was not parsed"
+                if ($vulkan4.Result -ne "PASS" -or $vulkan4.MKeysPerSecond -ne "20" -or
+                    $winner.Result -ne "PASS" -or $winner.MKeysPerSecond -ne "30") {
+                    throw "Vulkan resident wall rates were not parsed"
                 }
-            } elseif ($vulkan4.Result -notlike "FAIL*") { throw "Profile failure was not recorded" }
+            } elseif ($winner.Result -notlike "FAIL*") { throw "Profile failure was not recorded" }
+        }
+        if ($case.UpdateConfig) {
+            $config = Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf") -Raw
+            if ($config -notmatch '(?m)^backend=vulkan$' -or
+                $config -notmatch '(?m)^vulkan-curve-batch=4$' -or
+                $config -notmatch '(?m)^vulkan-affine-batch=8$' -or
+                $config -notmatch '(?m)^vulkan-batch-keys=131072$' -or
+                $config -notmatch '(?m)^vulkan-resident-group=16$' -or
+                $config -match '(?m)^opencl-') {
+                throw "Successful Vulkan winner did not replace stale OpenCL config"
+            }
+            if (-not (Get-ChildItem -LiteralPath $dir -Filter "tron-vanity.conf.bak-*")) {
+                throw "Config backup was not created"
+            }
         }
         if (Get-ChildItem -LiteralPath $dir -Recurse -Filter *.jsonl) {
             throw "$($case.Mode) wrote wallet output"

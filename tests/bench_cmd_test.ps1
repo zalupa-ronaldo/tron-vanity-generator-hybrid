@@ -9,8 +9,9 @@ try {
     if ($launcherText -notmatch 'Send the summary\.txt and benchmark\.csv from both report folders') {
         throw "bench.cmd is missing the report-sharing instruction"
     }
-    if ($launcherText -notmatch 'test-opencl\.ps1.*-All.*-UpdateConfig') {
-        throw "bench.cmd does not enable safe benchmark config update"
+    if ($launcherText -notmatch 'test-opencl\.ps1.*-All' -or
+        $launcherText -notmatch 'bench-vulkan\.ps1.*-UpdateConfig') {
+        throw "bench.cmd does not run the cross-backend config winner update"
     }
     $uploadText = Get-Content -LiteralPath (Join-Path $PSScriptRoot "../tools/upload-benchmark-results.ps1") -Raw
     if ($uploadText -notmatch '\$env:TRON_BENCH_UPLOAD_TOKEN\)\.Trim\(\)') {

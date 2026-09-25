@@ -1135,6 +1135,11 @@ public:
                 std::min<uint32_t>(effectiveResidentDispatches(), windowDispatches),
                 std::max<uint64_t>(1, remaining / count)));
             uint32_t scanOffset = 0;
+            // GPU output lists are pruned only between submits. Keep the
+            // exact mask used by this dispatch group so host validation can
+            // compare the record with the active GPU dictionary, even while
+            // other verifier workers are reporting words from this group.
+            const std::vector<uint8_t> reportedAtSubmit = reportedWords;
             std::vector<Candidate> candidates;
             if (!scanChunks(count, dispatches, &candidates, &scanOffset)) {
                 std::cerr << "Vulkan scan stopped: " << error_ << "\n";
@@ -1169,8 +1174,12 @@ public:
                     if (candidate.flags != 0) {
                         // The GPU record is intentionally truncated at 16 IDs
                         // when flags bit 0 is set. Reconstruct the complete
-                        // list only for this uncommon overflow case.
-                        candidateIds = dictionary_->matchIds(candidate.address);
+                        // active list only for this uncommon overflow case.
+                        const auto fullIds = dictionary_->matchIds(candidate.address);
+                        candidateIds.reserve(fullIds.size());
+                        for (uint32_t id : fullIds)
+                            if (id < reportedAtSubmit.size() && !reportedAtSubmit[id])
+                                candidateIds.push_back(id);
                     } else {
                         candidateIds.reserve(candidate.count);
                         bool validRecordIds = true;
@@ -1209,10 +1218,21 @@ public:
                     }
                     SecretScalar scalar;
                     unsigned char xy[64]{};
-                    const auto ids = dictionary_->matchIds(candidate.address);
-                    if (ids.empty() || candidate.count != std::min<size_t>(16, ids.size()) ||
-                        candidate.flags != (ids.size() > 16 ? 1u : 0u) ||
-                        !std::equal(ids.begin(), ids.begin() + candidate.count,
+                    const auto fullIds = dictionary_->matchIds(candidate.address);
+                    std::vector<uint32_t> activeIds;
+                    activeIds.reserve(fullIds.size());
+                    for (uint32_t id : fullIds) {
+                        if (id >= reportedAtSubmit.size()) {
+                            failVerification("Vulkan dictionary returned invalid ID");
+                            break;
+                        }
+                        if (!reportedAtSubmit[id]) activeIds.push_back(id);
+                    }
+                    if (verificationFailed.load(std::memory_order_relaxed)) break;
+                    if (activeIds.empty() ||
+                        candidate.count != std::min<size_t>(16, activeIds.size()) ||
+                        candidate.flags != (activeIds.size() > 16 ? 1u : 0u) ||
+                        !std::equal(activeIds.begin(), activeIds.begin() + candidate.count,
                                     candidate.ids.begin()) ||
                         !addOffset(base_.data(), scanOffset + candidate.gid, scalar.data()) ||
                         !publicXY(verifyContext, scalar.data(), xy) ||
@@ -1222,7 +1242,7 @@ public:
                     }
                     {
                         std::lock_guard<std::mutex> lock(claimedWordsMutex);
-                        for (uint32_t id : ids) {
+                        for (uint32_t id : activeIds) {
                             if (id >= dictionary_->words.size()) {
                                 failVerification("Vulkan dictionary returned invalid ID");
                                 break;
@@ -1243,8 +1263,8 @@ public:
                     FoundKey key;
                     key.address = candidate.address;
                     key.privHex = hexUpper(scalar.data(), 32);
-                    key.words.reserve(ids.size());
-                    for (uint32_t id : ids) key.words.push_back(dictionary_->words[id]);
+                    key.words.reserve(activeIds.size());
+                    for (uint32_t id : activeIds) key.words.push_back(dictionary_->words[id]);
                     state.found.fetch_add(1, std::memory_order_relaxed);
                     report(key);
                 }

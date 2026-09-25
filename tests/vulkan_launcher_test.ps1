@@ -13,7 +13,9 @@ public class Fixture {
     }
     public static int Main(string[] args) {
         bool test = Array.IndexOf(args, "test-vulkan") >= 0;
-        string mode = Environment.GetEnvironmentVariable("TRON_VULKAN_FIXTURE");
+        bool failTest = File.Exists("fixture-fail-test");
+        bool failProfile = File.Exists("fixture-fail-profile");
+        bool openclWinner = File.Exists("fixture-opencl-winner");
         string batch = Value(args, "--vulkan-curve-batch");
         string affine = Value(args, "--vulkan-affine-batch");
         string name = test ? "test" : batch == "" ? "opencl" :
@@ -21,15 +23,15 @@ public class Fixture {
             affine == "4" ? "vulkan-curve4-affine4" : "vulkan-winner";
         File.AppendAllText("calls.txt", name + Environment.NewLine);
         if (test) {
-            if (mode == "fail-test") return 2;
+            if (failTest) return 2;
             Console.WriteLine("Vulkan resident repeated dispatch + CPU verification PASS (no wallets)");
             return 0;
         }
         if (Value(args, "--words") != "words.txt" || Value(args, "--bench-seconds") != "1" ||
             Array.IndexOf(args, "--no-config") < 0) return 3;
-        if (mode == "fail-profile" && batch == "4") return 4;
+        if (failProfile && batch == "4") return 4;
         if (batch == "") Console.WriteLine("wall 1.000 s, wall speed " +
-                                             (mode == "opencl-winner" ? "40.00" : "10.00") + " M/s");
+                                             (openclWinner ? "40.00" : "10.00") + " M/s");
         else Console.WriteLine("Vulkan batch " + batch + " / affine " + affine +
                                " / fixture GPU " +
                                (batch == "4" && affine == "8" ? "30.00" : "20.00") + " M/s");
@@ -37,7 +39,6 @@ public class Fixture {
     }
 }
 '@
-$previousMode = $env:TRON_VULKAN_FIXTURE
 try {
     foreach ($case in @(
         @{ Mode = "success"; Exit = 0; UpdateConfig = $true; Calls = "test,opencl,vulkan-baseline,vulkan-curve4-affine4,vulkan-winner,vulkan-winner,opencl" },
@@ -57,7 +58,13 @@ try {
                 "vulkan-curve-batch=1", "vulkan-affine-batch=4"
             ) -Encoding ASCII
         }
-        $env:TRON_VULKAN_FIXTURE = $case.Mode
+        if ($case.Mode -eq "fail-test") {
+            New-Item -ItemType File -Path (Join-Path $dir "fixture-fail-test") | Out-Null
+        } elseif ($case.Mode -eq "fail-profile") {
+            New-Item -ItemType File -Path (Join-Path $dir "fixture-fail-profile") | Out-Null
+        } elseif ($case.Mode -eq "opencl-winner") {
+            New-Item -ItemType File -Path (Join-Path $dir "fixture-opencl-winner") | Out-Null
+        }
         $launcherArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $dir "bench-vulkan.ps1"), "-Seconds", "1")
         if ($case.UpdateConfig) { $launcherArgs += "-UpdateConfig" }
         $output = & powershell.exe @launcherArgs 2>&1
@@ -81,9 +88,7 @@ try {
                     $winner.Result -ne "PASS" -or $winner.MKeysPerSecond -ne "30") {
                     throw "Vulkan resident wall rates were not parsed"
                 }
-            } elseif ($winner.Result -notlike "FAIL*") {
-                throw "Profile failure was not recorded: winner=$($winner | ConvertTo-Json -Compress); rows=$($csv | ConvertTo-Csv | Out-String)"
-            }
+            } elseif ($winner.Result -notlike "FAIL*") { throw "Profile failure was not recorded" }
         }
         if ($case.UpdateConfig) {
             $configLines = @(Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf")) |
@@ -113,7 +118,6 @@ try {
     }
     Write-Host "Vulkan benchmark launcher PASS (success and failure paths)"
 } finally {
-    $env:TRON_VULKAN_FIXTURE = $previousMode
     if (Test-Path -LiteralPath $root) { [IO.Directory]::Delete($root, $true) }
 }
 # The final fixture intentionally exits 1. Do not leak that LASTEXITCODE into

@@ -82,7 +82,7 @@ try {
             if ($csv.Count -ne 7) { throw "$($case.Mode) expected seven benchmark rows" }
             $vulkan4 = @($csv | Where-Object { $_.Test -eq "04-vulkan-curve4-affine4-A" })[0]
             $winner = @($csv | Where-Object { $_.Test -eq "05-vulkan-winner-A" })[0]
-            if ($case.Mode -eq "success") {
+            if ($case.Mode -eq "success" -or $case.Mode -eq "opencl-winner") {
                 if ($vulkan4.Result -ne "PASS" -or $vulkan4.MKeysPerSecond -ne "20" -or
                     $winner.Result -ne "PASS" -or $winner.MKeysPerSecond -ne "30") {
                     throw "Vulkan resident wall rates were not parsed"

@@ -82,7 +82,7 @@ try {
             } elseif ($winner.Result -notlike "FAIL*") { throw "Profile failure was not recorded" }
         }
         if ($case.UpdateConfig) {
-            $config = Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf") -Raw
+            $config = (Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf") -Raw).TrimStart([char]0xFEFF)
             if ($config -notmatch '(?m)^backend=vulkan$' -or
                 $config -notmatch '(?m)^vulkan-curve-batch=4$' -or
                 $config -notmatch '(?m)^vulkan-affine-batch=8$' -or

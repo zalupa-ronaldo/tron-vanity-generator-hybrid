@@ -81,7 +81,9 @@ try {
                     $winner.Result -ne "PASS" -or $winner.MKeysPerSecond -ne "30") {
                     throw "Vulkan resident wall rates were not parsed"
                 }
-            } elseif ($winner.Result -notlike "FAIL*") { throw "Profile failure was not recorded" }
+            } elseif ($winner.Result -notlike "FAIL*") {
+                throw "Profile failure was not recorded: winner=$($winner | ConvertTo-Json -Compress); rows=$($csv | ConvertTo-Csv | Out-String)"
+            }
         }
         if ($case.UpdateConfig) {
             $configLines = @(Get-Content -LiteralPath (Join-Path $dir "tron-vanity.conf")) |

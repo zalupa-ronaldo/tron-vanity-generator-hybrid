@@ -1058,9 +1058,9 @@ public:
             const uint32_t dispatches = static_cast<uint32_t>(std::min<uint64_t>(
                 std::min<uint32_t>(effectiveResidentDispatches(), windowDispatches),
                 std::max<uint64_t>(1, remaining / count)));
-            const uint32_t scanOffset = offsetBase_;
+            uint32_t scanOffset = 0;
             std::vector<Candidate> candidates;
-            if (!scanChunks(count, dispatches, &candidates)) {
+            if (!scanChunks(count, dispatches, &candidates, &scanOffset)) {
                 std::cerr << "Vulkan scan stopped: " << error_ << "\n";
                 state.stop.store(true);
                 return;
@@ -1107,11 +1107,12 @@ public:
     }
     bool selfTestRollover() {
         if (!ensureReady()) return false;
-        // Exercise the final valid offset and the next-base transition with
-        // two one-key chunks. Scanning an entire full-alphabet batch here
-        // would make the test spend most of its time re-deriving thousands of
-        // deterministic public keys on the CPU, without testing another
-        // rollover invariant.
+        // Exercise both rollover paths: a group that no longer fits in the
+        // current base window must be rebased before submission, and the
+        // final one-key group must be followed by a fresh base. The first
+        // case is the production path used by a resident group after exactly
+        // 2^22 scanned keys; verifying it here prevents a stale pre-rebase
+        // offset from being used for CPU candidate checks.
         base_.bytes.fill(0);
         base_.bytes[31] = 1;
         if (!publicXY(context_, base_.data(), basePub_.data())) {
@@ -1124,7 +1125,7 @@ public:
         offsetBase_ = kBaseWindowKeys - 1;
         RunConfig config;
         config.dictionary = dictionary_;
-        config.maxAttempts = 1;
+        config.maxAttempts = 2;
         config.seconds = 0;
         RunState state;
         bool validReports = true;
@@ -1133,11 +1134,39 @@ public:
                             !key.words.empty();
         });
         if (!validReports || !error_.empty() || state.stop.load() ||
-            state.checked.load() != 1 || state.gpuChecked.load() != 1 ||
-            state.found.load() != 1 || offsetBase_ != kBaseWindowKeys) {
-            if (error_.empty()) error_ = "Vulkan base rollover or bounded production run failed";
+            state.checked.load() != 2 || state.gpuChecked.load() != 2 ||
+            state.found.load() != 2 || offsetBase_ != 2 ||
+            base_.bytes == originalBase.bytes) {
+            if (error_.empty()) error_ = "Vulkan pre-submit base rollover or bounded production run failed";
             return false;
         }
+
+        // The last valid offset still belongs to the old base. This separate
+        // one-key check keeps the boundary itself covered after the rebase
+        // regression check above.
+        base_.bytes.fill(0);
+        base_.bytes[31] = 1;
+        if (!publicXY(context_, base_.data(), basePub_.data())) {
+            error_ = "Vulkan final-offset test base point failed";
+            return false;
+        }
+        std::memcpy(originalBase.data(), base_.data(), originalBase.bytes.size());
+        baseReady_ = true;
+        offsetBase_ = kBaseWindowKeys - 1;
+        config.maxAttempts = 1;
+        RunState finalState;
+        validReports = true;
+        run(config, finalState, [&](const FoundKey& key) {
+            validReports &= key.address.size() == 34 && key.privHex.size() == 64 &&
+                            !key.words.empty();
+        });
+        if (!validReports || !error_.empty() || finalState.stop.load() ||
+            finalState.checked.load() != 1 || finalState.gpuChecked.load() != 1 ||
+            finalState.found.load() != 1 || offsetBase_ != kBaseWindowKeys) {
+            if (error_.empty()) error_ = "Vulkan final base-window offset failed";
+            return false;
+        }
+
         std::vector<Candidate> candidates;
         if (!scanChunk(1, &candidates) || !error_.empty() || candidates.size() != 1 ||
             offsetBase_ != 1 || base_.bytes == originalBase.bytes) {
@@ -1229,7 +1258,8 @@ private:
     bool scanChunk(uint32_t count, std::vector<Candidate>* out) {
         return scanChunks(count, 1, out);
     }
-    bool scanChunks(uint32_t count, uint32_t dispatches, std::vector<Candidate>* out) {
+    bool scanChunks(uint32_t count, uint32_t dispatches, std::vector<Candidate>* out,
+                    uint32_t* scanOffsetOut = nullptr) {
         const uint64_t total = uint64_t(count) * dispatches;
         if (!count || !dispatches || total > kBaseWindowKeys) {
             error_ = "invalid Vulkan resident dispatch group";
@@ -1243,6 +1273,7 @@ private:
                               out ? &local : nullptr, error_))
             return false;
         offsetBase_ += static_cast<uint32_t>(total);
+        if (scanOffsetOut) *scanOffsetOut = scanOffset;
         if (out) *out = std::move(local);
         return true;
     }

@@ -7,6 +7,7 @@ option(STATIC_RUNTIME "静态链接 C/C++ 运行库（便携 exe）" ON)
 
 project(tron_vanity_generator CXX)
 
+option(TRON_ENABLE_GUI "Build the native GUI launcher" OFF)
 option(TRON_ENABLE_CUDA "Embed native NVIDIA CUDA PTX kernels" OFF)
 option(TRON_ENABLE_VULKAN "Build the native Vulkan compute pipeline self-test" OFF)
 set(TRON_CUDA_PTX_HEADER "" CACHE FILEPATH "Precompiled cuda_ptx.h for cross-compilation")
@@ -403,6 +404,36 @@ endif()
 
 if(WIN32)
   target_link_libraries(tron_vanity_generator PRIVATE bcrypt)
+endif()
+
+if(TRON_ENABLE_GUI AND (WIN32 OR APPLE))
+  if(WIN32)
+    add_executable(tron_vanity_gui WIN32 gui/win_gui.cpp)
+    target_compile_definitions(tron_vanity_gui PRIVATE UNICODE _UNICODE NOMINMAX)
+    target_link_libraries(tron_vanity_gui PRIVATE comctl32 comdlg32 shell32 ole32)
+    add_dependencies(tron_vanity_gui tron_vanity_generator)
+    add_custom_command(TARGET tron_vanity_gui POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              $<TARGET_FILE:tron_vanity_generator>
+              $<TARGET_FILE_DIR:tron_vanity_gui>/tron_vanity_generator.exe)
+  else()
+    add_executable(tron_vanity_gui MACOSX_BUNDLE gui/mac_gui.mm)
+    set_source_files_properties(gui/mac_gui.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+    target_link_libraries(tron_vanity_gui PRIVATE "-framework Cocoa")
+    set_target_properties(tron_vanity_gui PROPERTIES
+      MACOSX_BUNDLE_GUI_IDENTIFIER "org.tronvanity.generator.gui"
+      MACOSX_BUNDLE_BUNDLE_NAME "TRON Vanity Generator")
+    add_dependencies(tron_vanity_gui tron_vanity_generator)
+    add_custom_command(TARGET tron_vanity_gui POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              $<TARGET_FILE:tron_vanity_generator>
+              $<TARGET_BUNDLE_DIR:tron_vanity_gui>/Contents/MacOS/tron_vanity_generator)
+  endif()
+  if(MSVC)
+    target_compile_options(tron_vanity_gui PRIVATE /EHsc /utf-8 $<$<CONFIG:Release>:/O2>)
+  else()
+    target_compile_options(tron_vanity_gui PRIVATE -O2)
+  endif()
 endif()
 
 if(MSVC)

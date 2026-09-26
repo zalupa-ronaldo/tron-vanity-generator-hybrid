@@ -9,7 +9,7 @@ if ! xcrun --find metal >/dev/null 2>&1; then
   exit 1
 fi
 
-cmake -S . -B build-mac-metal -DCMAKE_BUILD_TYPE=Release -DSTATIC_RUNTIME=OFF
+cmake -S . -B build-mac-metal -DCMAKE_BUILD_TYPE=Release -DSTATIC_RUNTIME=OFF -DTRON_ENABLE_GUI=ON
 cmake --build build-mac-metal --parallel
 ./build-mac-metal/tron_vanity_generator --selftest
 ./build-mac-metal/tron_vanity_generator --matchtest

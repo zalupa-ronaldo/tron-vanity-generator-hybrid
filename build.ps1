@@ -8,6 +8,7 @@ param(
     [string]$Config = "Release",
     [switch]$EnableCuda,
     [switch]$EnableVulkan,
+    [switch]$EnableGui,
     [switch]$SkipVulkanRuntimeTests
 )
 $ErrorActionPreference = "Stop"
@@ -62,10 +63,11 @@ if (Test-Path $ninja) {
 
 $cudaOption = if ($EnableCuda) { "ON" } else { "OFF" }
 $vulkanOption = if ($EnableVulkan) { "ON" } else { "OFF" }
+$guiOption = if ($EnableGui) { "ON" } else { "OFF" }
 if ($EnableVulkan -and -not $env:VULKAN_SDK) {
     throw "-EnableVulkan requires the LunarG Vulkan SDK and VULKAN_SDK environment variable"
 }
-& $cmake -B build $gen "-DCMAKE_BUILD_TYPE=$Config" "-DTRON_ENABLE_CUDA=$cudaOption" "-DTRON_ENABLE_VULKAN=$vulkanOption"
+& $cmake -B build $gen "-DCMAKE_BUILD_TYPE=$Config" "-DTRON_ENABLE_CUDA=$cudaOption" "-DTRON_ENABLE_VULKAN=$vulkanOption" "-DTRON_ENABLE_GUI=$guiOption"
 if ($LASTEXITCODE) { throw "cmake configure failed" }
 & $cmake --build build --config $Config
 if ($LASTEXITCODE) { throw "build failed" }
@@ -82,6 +84,7 @@ if ($LASTEXITCODE) { throw "kernel correctness tests failed" }
 
 Write-Host ""
 Write-Host "Done: $root\build\tron_vanity_generator.exe"
+if ($EnableGui) { Write-Host "GUI:  $root\build\tron_vanity_gui.exe" }
 & "$root\build\tron_vanity_generator.exe" --selftest
 if ($LASTEXITCODE) { throw "selftest failed" }
 & "$root\build\tron_vanity_generator.exe" --hashtest

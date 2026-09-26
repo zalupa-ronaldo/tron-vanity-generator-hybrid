@@ -111,7 +111,7 @@ jobs:
 
       - name: Build and run smoke tests
         shell: pwsh
-        run: .\build.ps1 -EnableCuda -EnableVulkan -SkipVulkanRuntimeTests
+        run: .\build.ps1 -EnableCuda -EnableVulkan -EnableGui -SkipVulkanRuntimeTests
 
       - name: Validate bounded benchmark launcher syntax
         shell: pwsh
@@ -135,6 +135,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
           Copy-Item build\tron_vanity_generator.exe release\
+          Copy-Item build\tron_vanity_gui.exe release\
           Copy-Item words.example.txt release\words.txt
           Copy-Item README.md,NOTICE,LICENSE,tron-vanity.conf release\
           Copy-Item test-opencl.ps1,test-opencl.cmd,bench.cmd,bench-vulkan.ps1,bench-vulkan.cmd release\
@@ -145,7 +146,7 @@ jobs:
       - name: Verify packaged no-argument configuration
         shell: pwsh
         run: |
-          foreach ($name in @('tron_vanity_generator.exe', 'tron-vanity.conf', 'words.txt', 'bench.cmd', 'bench-vulkan.cmd', 'bench-vulkan.ps1', 'tools\upload-benchmark-results.ps1', 'tools\upload-benchmark-results.cmd')) {
+          foreach ($name in @('tron_vanity_generator.exe', 'tron_vanity_gui.exe', 'tron-vanity.conf', 'words.txt', 'bench.cmd', 'bench-vulkan.cmd', 'bench-vulkan.ps1', 'tools\upload-benchmark-results.ps1', 'tools\upload-benchmark-results.cmd')) {
             if (-not (Test-Path (Join-Path release $name))) { throw "Missing release file: $name" }
           }
           Push-Location release

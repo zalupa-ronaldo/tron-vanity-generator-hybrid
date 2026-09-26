@@ -46,10 +46,15 @@ cp words.long.8plus.txt words.txt
 ## Windows: run in one click
 
 Download and extract the [latest Windows ZIP](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/releases).
-The ZIP contains `tron_vanity_generator.exe`, `tron-vanity.conf`,
-`words.txt` and `bench.cmd`. Replace `words.txt` with your own dictionary if
-needed. Double-click **`tron_vanity_generator.exe`**: it reads the adjacent
-config and searches on the RX 9070 XT until Ctrl+C. The bundled config uses
+The ZIP contains `tron_vanity_generator.exe`, `tron_vanity_gui.exe`,
+`tron-vanity.conf`, `words.txt` and `bench.cmd`. Replace `words.txt` with your
+own dictionary if needed. For the button-based interface, double-click
+**`tron_vanity_gui.exe`**. It lets you choose the backend and dictionary,
+start/stop a search, run a GPU self-test or resident benchmark, open the
+results folder, and watch the safe progress stream. The GUI launches the
+generator next to it and never displays private-key fields. For the direct
+headless path, double-click **`tron_vanity_generator.exe`**: it reads the
+adjacent config and searches on the RX 9070 XT until Ctrl+C. The bundled config uses
 the validated resident Vulkan winner: 10x26 field, curve batch 4, affine
 batch 8, 131072-key submits and resident group 16. The matched user run
 measured 157.14 M/s for that configuration versus about 105 M/s for the
@@ -166,6 +171,16 @@ installed, use `powershell -ExecutionPolicy Bypass -File .\build.ps1 -EnableVulk
 The build runs the Vulkan stage and repeated-dispatch tests locally. The SDK
 is a build dependency, not needed to run the prebuilt Windows ZIP.
 The installed Vulkan runtime/driver is still required on the target machine.
+
+To build the native GUI from source, add `-EnableGui`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -EnableCuda -EnableVulkan -EnableGui
+```
+
+On macOS, `./build-macos.sh` produces `build-mac-metal/tron_vanity_gui.app`.
+The GUI is a separate launcher, so benchmark numbers from
+`tron_vanity_generator` remain unchanged.
 For a bounded, no-wallet A/B test from the extracted ZIP, replace its
 `words.txt` with the **same 358-word file** used for the OpenCL measurement,
 then double-click `bench-vulkan.cmd` (or run it in a terminal):

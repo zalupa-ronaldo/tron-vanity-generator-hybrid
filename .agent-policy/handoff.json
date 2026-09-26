@@ -3,20 +3,21 @@
     "words.long.8plus.txt",
     "README.md",
     ".agent-policy/check.json",
-    ".agent-policy/evidence/20260926T150021Z.json"
+    ".agent-policy/evidence/20260926T171536Z.json"
   ],
-  "commit": "6061de9acc9186e3bea6ba5a790bfe215dacd250",
+  "commit": "b900db482e1643740f80f0c511612cc7a208904b",
   "completed_checks": [
-    "dictionary validation: 2048 unique tokens, 8-33 chars, alphabet valid",
+    "dictionary validation: 2048 unique tokens, 8-12 chars, alphabet valid",
+    "artificial target concatenations removed",
     "policy check: passed",
-    "evidence commit 6061de9: configure/build/test/diff-check passed"
+    "evidence commit b900db4: configure/build/test/diff-check passed"
   ],
-  "current_state": "The project contains words.long.8plus.txt with 2,048 unique Base58-safe lowercase tokens, each 8-33 characters long; README documents copying it to words.txt. The dictionary commit is 6061de9 and final policy check/evidence pass.",
+  "current_state": "words.long.8plus.txt now contains 2,048 unique Base58-safe lowercase single tokens, each 8-12 characters long, with artificial pairwise concatenations removed. README documents the file. Source commit b900db4 and final policy evidence pass.",
   "failed_checks": [],
   "format": 1,
-  "goal": "Install a broad long-token dictionary for TRON vanity matching",
+  "goal": "Trim the TRON vanity dictionary to practical long-token lengths",
   "known_risks": [
-    "Longer dictionary entries are much rarer matches; search throughput and result frequency should be measured on the target GPU with the full file.",
+    "The dictionary is optimized for frequent 8-9 character hits; 10-12 character matches remain probabilistic and much rarer.",
     "The dictionary is Base58-safe by construction and deliberately excludes lowercase l, uppercase O/I, and zero."
   ],
   "next_command": "Copy words.long.8plus.txt to words.txt and run the normal GPU search or a bounded no-wallet benchmark.",
@@ -31,5 +32,5 @@
     "version": "1.0.0"
   },
   "status": "complete",
-  "updated_at": "2026-09-26T15:00:48.596664+00:00"
+  "updated_at": "2026-09-26T17:16:10.623833+00:00"
 }

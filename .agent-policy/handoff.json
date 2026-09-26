@@ -3,15 +3,15 @@
     "words.long.8plus.txt",
     "README.md",
     ".agent-policy/check.json",
-    ".agent-policy/evidence/20260926T145652Z.json"
+    ".agent-policy/evidence/20260926T150021Z.json"
   ],
-  "commit": "b382e5098d8c7e8b128faeec47e000b8d39d6486",
+  "commit": "6061de9acc9186e3bea6ba5a790bfe215dacd250",
   "completed_checks": [
     "dictionary validation: 2048 unique tokens, 8-33 chars, alphabet valid",
     "policy check: passed",
-    "evidence configure/build/test/diff-check: passed"
+    "evidence commit 6061de9: configure/build/test/diff-check passed"
   ],
-  "current_state": "The project now contains words.long.8plus.txt with 2,048 unique Base58-safe lowercase tokens, each 8-33 characters long; README documents copying it to words.txt. Policy check and evidence pass.",
+  "current_state": "The project contains words.long.8plus.txt with 2,048 unique Base58-safe lowercase tokens, each 8-33 characters long; README documents copying it to words.txt. The dictionary commit is 6061de9 and final policy check/evidence pass.",
   "failed_checks": [],
   "format": 1,
   "goal": "Install a broad long-token dictionary for TRON vanity matching",
@@ -31,5 +31,5 @@
     "version": "1.0.0"
   },
   "status": "complete",
-  "updated_at": "2026-09-26T14:57:40.283387+00:00"
+  "updated_at": "2026-09-26T15:00:48.596664+00:00"
 }

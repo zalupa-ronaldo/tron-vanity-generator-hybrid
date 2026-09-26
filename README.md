@@ -33,6 +33,16 @@ Copy it to `words.txt` and add your own Base58-compatible tokens. The matcher
 accepts words anywhere in the address, including the final characters; longer
 matches are especially rare and useful.
 
+For a broad long-token search, use [`words.long.8plus.txt`](words.long.8plus.txt):
+it contains 2,048 unique Base58-safe lowercase tokens, all 8--33 characters
+long. It includes crypto/energy, technology, nature, space, mythic, gaming and
+finance themes, plus the `energyrent`/`tronenergy`-style combinations monitored
+by the worker. To use it as the active dictionary, copy it to `words.txt`:
+
+```sh
+cp words.long.8plus.txt words.txt
+```
+
 ## Windows: run in one click
 
 Download and extract the [latest Windows ZIP](https://github.com/zalupa-ronaldo/tron-vanity-generator-hybrid/releases).

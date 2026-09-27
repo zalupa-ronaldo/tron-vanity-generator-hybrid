@@ -202,7 +202,7 @@ NSString* Redact(NSString* input) {
         [self alert:@"Choose a results folder first." title:@"Results"];
         return NO;
     }
-    [arguments addObjectsFromArray:@[@"--backend", [self backendName], @"--words", self.dictionary.stringValue,
+    [arguments addObjectsFromArray:@[@"--no-config", @"--backend", [self backendName], @"--words", self.dictionary.stringValue,
                                      @"--out", self.results.stringValue]];
     return YES;
 }
@@ -225,7 +225,7 @@ NSString* Redact(NSString* input) {
 - (void)startSelfTest:(id)sender {
     (void)sender;
     if (self.task) return;
-    NSMutableArray<NSString*>* args = [NSMutableArray arrayWithObjects:@"--backend", [self backendName], @"--gputest", nil];
+    NSMutableArray<NSString*>* args = [NSMutableArray arrayWithObjects:@"--no-config", @"--backend", [self backendName], @"--gputest", nil];
     if (self.resident.state == NSControlStateValueOn && [[self backendName] isEqualToString:@"opencl"])
         [args addObject:@"--gpu-resident"];
     [self startTask:args label:@"GPU self-test"];

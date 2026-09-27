@@ -397,7 +397,7 @@ private:
             MessageBoxW(hwnd_, L"Choose a results folder first.", L"Results", MB_OK | MB_ICONWARNING);
             return false;
         }
-        arguments = {L"--backend", backendName(), L"--words", words.wstring(),
+        arguments = {L"--no-config", L"--backend", backendName(), L"--words", words.wstring(),
                      L"--out", results.wstring()};
         return true;
     }
@@ -417,7 +417,7 @@ private:
 
     void startSelfTest() {
         if (running_) return;
-        std::vector<std::wstring> args = {L"--backend", backendName(), L"--gputest"};
+        std::vector<std::wstring> args = {L"--no-config", L"--backend", backendName(), L"--gputest"};
         if (checked(resident_) && backendName() == L"opencl") args.push_back(L"--gpu-resident");
         startProcess(args, L"GPU self-test");
     }

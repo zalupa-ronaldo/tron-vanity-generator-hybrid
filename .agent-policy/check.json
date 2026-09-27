@@ -46,7 +46,7 @@
       "returncode": 0,
       "status": "passed",
       "stderr": "",
-      "stdout": "Test project /Users/uzer/PycharmProjects/JupyterProject1/tron-vanity-gpu/build-agent-policy\n    Start 1: run_config\n1/8 Test #1: run_config .......................   Passed    0.00 sec\n    Start 2: cuda_kernel_rng_1\n2/8 Test #2: cuda_kernel_rng_1 ................   Passed    0.03 sec\n    Start 3: opencl_pair_math_1\n3/8 Test #3: opencl_pair_math_1 ...............   Passed    0.03 sec\n    Start 4: cuda_kernel_rng_2\n4/8 Test #4: cuda_kernel_rng_2 ................   Passed    0.03 sec\n    Start 5: opencl_pair_math_2\n5/8 Test #5: opencl_pair_math_2 ...............   Passed    0.03 sec\n    Start 6: cuda_kernel_rng_3\n6/8 Test #6: cuda_kernel_rng_3 ................   Passed    0.03 sec\n    Start 7: opencl_pair_math_3\n7/8 Test #7: opencl_pair_math_3 ...............   Passed    0.03 sec\n    Start 8: opencl_runtime\n8/8 Test #8: opencl_runtime ...................   Passed    3.48 sec\n\n100% tests passed out of 8\n\nTotal Test time (real) =   3.68 sec\n"
+      "stdout": "Test project /Users/uzer/PycharmProjects/JupyterProject1/tron-vanity-gpu/build-agent-policy\n    Start 1: run_config\n1/8 Test #1: run_config .......................   Passed    0.00 sec\n    Start 2: cuda_kernel_rng_1\n2/8 Test #2: cuda_kernel_rng_1 ................   Passed    0.03 sec\n    Start 3: opencl_pair_math_1\n3/8 Test #3: opencl_pair_math_1 ...............   Passed    0.03 sec\n    Start 4: cuda_kernel_rng_2\n4/8 Test #4: cuda_kernel_rng_2 ................   Passed    0.03 sec\n    Start 5: opencl_pair_math_2\n5/8 Test #5: opencl_pair_math_2 ...............   Passed    0.05 sec\n    Start 6: cuda_kernel_rng_3\n6/8 Test #6: cuda_kernel_rng_3 ................   Passed    0.05 sec\n    Start 7: opencl_pair_math_3\n7/8 Test #7: opencl_pair_math_3 ...............   Passed    0.04 sec\n    Start 8: opencl_runtime\n8/8 Test #8: opencl_runtime ...................   Passed    3.77 sec\n\n100% tests passed out of 8\n\nTotal Test time (real) =   4.01 sec\n"
     },
     {
       "argv": [
@@ -63,7 +63,7 @@
       "stdout": ""
     }
   ],
-  "commit": "8d91b2a35a70e39d596e8aa7d55e4be0970287e8",
+  "commit": "3f4c685e25859a961df204388dfa3fec06420e26",
   "dry_run": false,
   "source_hashes": {
     ".DS_Store": "f32237eaac934b2cd109853ae9a954b65e0d8ec2a13d64b2fd3bfa208901a553",
@@ -477,8 +477,8 @@
     "build-agent-policy/CTestTestfile.cmake": "f237ecb24c6c9d81e56c53a19b538b72f95f2c4b6c2ebf55de2ef105ff54a98f",
     "build-agent-policy/DartConfiguration.tcl": "e3bcb67fa714abf779ee99615225ed590e2afe6af424d9590176d2b1400ea97c",
     "build-agent-policy/Makefile": "2404c9bf30590ce34ce0d8b89612ee806eea97ac6666d44e1b97d94baba1665f",
-    "build-agent-policy/Testing/Temporary/CTestCostData.txt": "32f6523fd5305c54728a055a8e4cd3fad0ba1fdc371a98e21f58a0e549688226",
-    "build-agent-policy/Testing/Temporary/LastTest.log": "cb0e790b1b2a436873ef2c2cad4f24cbcdd03477c765e317220dc729eadb2f8e",
+    "build-agent-policy/Testing/Temporary/CTestCostData.txt": "714eb70f3e99b9f5bf8ade0da61203912c3d0d57933740d70f5ff058e05ee7fe",
+    "build-agent-policy/Testing/Temporary/LastTest.log": "954f16fcd4f6a8805517bcf65032cfdfc2bc132707f4fea0f28d4767a99b0ba3",
     "build-agent-policy/cmake_install.cmake": "f921c8a98a75c5077c17d6c46d3794aaea9c5c30114be506d6185b3386721339",
     "build-agent-policy/cuda_kernel_test_1": "ec856aefdb3a3ba1bad4f30343d3b7ec0d347b644ed9765eb3ae056c4736a289",
     "build-agent-policy/cuda_kernel_test_2": "6c417ec93b6fe2619c0b73124cafca86d74625cecfd191a306b0125960417569",
@@ -1388,15 +1388,15 @@
     "build-gui-local/CMakeFiles/tron_vanity_gui.dir/compiler_depend.ts": "b178435fed7e7e50ff9d42c5c490f349302dba5c8a2f44d765d1e1de79be46b2",
     "build-gui-local/CMakeFiles/tron_vanity_gui.dir/depend.make": "64308f641bdc36309d64d02b2d5c149f466d942eac672ac9fbc74891d9e2653a",
     "build-gui-local/CMakeFiles/tron_vanity_gui.dir/flags.make": "5316568325ec3139e893ba873cdbf788a0d194116c074e22034732576fa35028",
-    "build-gui-local/CMakeFiles/tron_vanity_gui.dir/gui/mac_gui.mm.o": "def999b326dc8e17a89e78359588c36bdeddfcfefa6557758b457d27fe68f7b0",
+    "build-gui-local/CMakeFiles/tron_vanity_gui.dir/gui/mac_gui.mm.o": "6be3d0b50783ae86ac551e0f6642d5a6bde812ed9e77b29666941eb95bce1e92",
     "build-gui-local/CMakeFiles/tron_vanity_gui.dir/gui/mac_gui.mm.o.d": "b3c971c1fc4489972e0f06d6cf0e1df480cabdc88d8272778a9b4772d03ab5d8",
     "build-gui-local/CMakeFiles/tron_vanity_gui.dir/link.txt": "e8fe6757e604fcef03854ffb899bd8bd983976e48bab000d0ad8bd996a96b478",
     "build-gui-local/CMakeFiles/tron_vanity_gui.dir/progress.make": "59602dcfa6c813bcd04b1976359fe527a25f3c6795b0789c29da83215bad6d0a",
     "build-gui-local/CTestTestfile.cmake": "0d1b5c5bede545148ab00c0f72591040caeb87db5c7d00df7821396571ec6220",
     "build-gui-local/DartConfiguration.tcl": "8c58687cb3a6c8557a87d4bd245851448865bef0b64733c55a350ab4685c10d6",
     "build-gui-local/Makefile": "000ca6158ef6ba095972df7e90f0b677456c6d65ba78d606ccf9881b09074e1c",
-    "build-gui-local/Testing/Temporary/CTestCostData.txt": "52f0b26fe4e4124f6e224cbe153900bdbc1a4f1872cb0867d88179479ea7f21a",
-    "build-gui-local/Testing/Temporary/LastTest.log": "305a141425e1cff57dfa79d30ea2327323233ef08b01fed3877d7fcccadf3191",
+    "build-gui-local/Testing/Temporary/CTestCostData.txt": "425582d353df546b265732af012cafbefb8fca6e7840f1de509db2096973a6e6",
+    "build-gui-local/Testing/Temporary/LastTest.log": "4a9022946fa997984d771dbe8b2ee6c67314c50dac7d4c599d36753431bceceb",
     "build-gui-local/cmake_install.cmake": "2b29940663f67fc91b84b2747e92b9b6c38c88115187bf8a97f1f85d418cfdd1",
     "build-gui-local/cuda_kernel_test_1": "ec856aefdb3a3ba1bad4f30343d3b7ec0d347b644ed9765eb3ae056c4736a289",
     "build-gui-local/cuda_kernel_test_2": "6c417ec93b6fe2619c0b73124cafca86d74625cecfd191a306b0125960417569",
@@ -1451,7 +1451,7 @@
     "build-gui-local/tron_vanity_generator": "cd9b23061ef81cb7ef43dcf62805a3aecfab5bd53ffd17bfd655128e839342eb",
     "build-gui-local/tron_vanity_gui.app/Contents/Info.plist": "acb0797235da98dcf7dc99052e273ddc0a6ecbae7b47214a51cbd3f6beaf4da9",
     "build-gui-local/tron_vanity_gui.app/Contents/MacOS/tron_vanity_generator": "cd9b23061ef81cb7ef43dcf62805a3aecfab5bd53ffd17bfd655128e839342eb",
-    "build-gui-local/tron_vanity_gui.app/Contents/MacOS/tron_vanity_gui": "92ad20d723b969d635ec60423a21315d13a3cc9ef2c7da3ece9adb586572185b",
+    "build-gui-local/tron_vanity_gui.app/Contents/MacOS/tron_vanity_gui": "29d2c52f284d6c668b670b8a5ecbbb3d2b10c62b66aa8a83007241652424b5e0",
     "build-gui-local/tron_vanity_resident_1.air": "82f15a56444049ea7b42524ab3d744d2e920f36ab3ede94842dc5a297ca64d18",
     "build-gui-local/tron_vanity_resident_1.metallib": "f39e71a96bfff68f48f1770206b5fcb71628228684d1d09e3a3d881fde76ef01",
     "build-gui-local/tron_vanity_resident_2.air": "acb23145c3b8873f964bbe6cfe67d917a2df5c63d0caf1df150e2973222920d1",
@@ -3510,8 +3510,8 @@
     "docs/rx9070xt-opencl-research.md": "30b5edfafee3ebf16d3e91251fe7bc7dd388e1fe636c9023c440805750399918",
     "docs/tron-benchmark-upload.md": "3c6edb17dbfc20132583dfd876b9d2145b1109bd64af9dd41db33366ae75b98d",
     "docs/vulkan-stage-contract.md": "d91737e02e41fd40bbe9b78e933d37af8de44db945686042fc8acef4047395e4",
-    "gui/mac_gui.mm": "43bb5c7640923da8369da41dd6e2dd8984ff05769424e32bfd4a329fb0d9025a",
-    "gui/win_gui.cpp": "2f0e9b5b2c5e87e68e042e08da9f31af8633d65bdb0a91dc0c1442c802dc38bd",
+    "gui/mac_gui.mm": "22fe0f4e715da01800194f19c697fb9619949fd75b9f702356bace4a1fd4eeee",
+    "gui/win_gui.cpp": "91529886c23f97ba5efbd88e6ebe194b3bef86db7376fe12942940a7078bdfb3",
     "kernels/metal_hardware_profile.metal": "c78f3c1ae19dea32f8e2d3eb0a740ebbbe714ae9f8eb5c39ca320d7667f42ce9",
     "kernels/secp256k1_tron.cl": "734a09923e38052e999663c780dbbfc4c3a561d3d1b96b5be4ff0c8a8c644800",
     "kernels/tron_vanity_cuda.cu": "c1360f95784dad288be91a4ff643ecd91e8d2c223d4122767fe6a635fe8e1956",
